@@ -3,9 +3,9 @@
 ;; Perspectives — one workspace context per project, switched from the title
 ;; bar. Visiting a file inside a project (find-file-hook) creates that
 ;; project's perspective on first touch and records the file as its resume
-;; point; the title bar's "Projects" menu (a titlebar-menu.scm menu) lists
+;; point; the title bar's "projects" menu (a titlebar-menu.scm menu) lists
 ;; every perspective and reopens the picked project at its last visited file.
-;; It's on by default; turn it off with (titlebar-menu-hide "Projects") — the
+;; It's on by default; turn it off with (titlebar-menu-hide "projects") — the
 ;; perspectives keep tracking, and `perspective-switch` still works.
 ;; The list survives restarts via ~/.config/macros/perspectives.
 ;;
@@ -58,7 +58,7 @@
 
 ;; --- title bar ----------------------------------------------------------------
 
-(define perspective-menu "Projects")
+(define perspective-menu "projects")
 
 ;; Registered at load, before the user's init.scm, so it sits leftmost.
 (titlebar-menu-configure! perspective-menu
@@ -92,9 +92,9 @@
 ;; The current perspective is STICKY: only visiting a file inside some project
 ;; moves it. Everything else — dired / the sidebar / terminal / magit /
 ;; *scratch* (fileless buffers whose buffer-directory can't attribute them to
-;; a project), or a stray file outside every root — leaves the title bar on
-;; the project you were working in rather than flapping to the neutral
-;; "Projects" trigger on every sidebar or terminal visit.
+;; a project), or a stray file outside every root — leaves the checkmark (and
+;; the project commands that follow it) on the project you were working in
+;; rather than clearing it on every sidebar or terminal visit.
 (define (perspective-track)
   (let ((root (project-root (buffer-directory)))
         (file (buffer-file-name)))
@@ -172,9 +172,9 @@
               (join-lines (map (lambda (kv) (string-append (car kv) "\t" (cdr kv)))
                                *perspectives*))))
 
-;; Restore at startup, dropping projects whose roots no longer exist. The bar
-;; starts with no active perspective (the trigger shows "Projects") until the
-;; first file visit picks one.
+;; Restore at startup, dropping projects whose roots no longer exist. The menu
+;; starts with no active perspective (nothing checkmarked) until the first file
+;; visit picks one.
 (define (perspective-load)
   (when (file-exists? (perspectives-file))
     (for-each

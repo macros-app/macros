@@ -76,6 +76,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { slug: "packages", label: "Packages", blurb: "Install Steel extensions from git with package-install" },
       { slug: "secrets", label: "Passwords & secrets", blurb: "One encrypted authinfo.gpg store for every package; secrets as option values" },
       { slug: "mcp-server", label: "MCP server", blurb: "Let an AI assistant eval Steel and read buffers in the live editor" },
+      { slug: "titlebar-menus", label: "Title-bar menus", blurb: "Add dropdowns of quick actions to the title bar" },
       { slug: "themes-and-faces", label: "Themes & faces", blurb: "Load themes, set faces, line numbers" },
       { slug: "plotting", label: "Text charts", blurb: "Sparklines, bars, line plots, shaded function and normal-distribution plots, histograms, heatmaps" },
       { slug: "rainbow-delimiters", label: "Rainbow & tree-sitter", blurb: "Depth-colored brackets via tree-sitter" },

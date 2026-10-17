@@ -8862,7 +8862,7 @@ mod perspectives_lib {
             .as_slice()
         {
             [EditorCommand::SetTitlebarMenu(m)] => {
-                assert_eq!(m.title, "Projects");
+                assert_eq!(m.title, "projects");
                 assert_eq!(m.items, ["proj", "other"]);
                 assert_eq!(m.commands, ["", ""]);
                 assert_eq!(m.active, "other");
@@ -12441,10 +12441,10 @@ mod titlebar_menu_lib {
         let (engine, _rx) = ScriptEngine::new();
         load_with_deps(&engine, "titlebar-menu");
         engine
-            .eval(r#"(titlebar-menu-configure! "Projects" 'section "Recent Projects" 'on-select 'perspective-select)"#)
+            .eval(r#"(titlebar-menu-configure! "projects" 'section "Recent Projects" 'on-select 'perspective-select)"#)
             .unwrap();
         let commands = engine
-            .eval(r#"(titlebar-menu-set! "Projects" (list (cons "macros" "")) "macros")"#)
+            .eval(r#"(titlebar-menu-set! "projects" (list (cons "macros" "")) "macros")"#)
             .unwrap()
             .commands;
         match commands.as_slice() {

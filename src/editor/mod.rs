@@ -899,11 +899,11 @@ pub(crate) struct TitlebarDropdownState {
     /// Per-item Scheme command, parallel to `items`; a missing or empty entry
     /// falls back to `callback`.
     pub(crate) commands: Vec<String>,
-    /// The checkmarked item, shown on the trigger in place of `trigger`.
+    /// The checkmarked item ("" for none).
     pub(crate) active: SharedString,
     /// The Scheme function a click hands the picked label to.
     pub(crate) callback: String,
-    /// The trigger's label while nothing is active (the title).
+    /// The trigger's label (the title).
     pub(crate) trigger: SharedString,
     /// The dim heading over the rows.
     pub(crate) section: SharedString,
@@ -928,7 +928,7 @@ pub(crate) struct TitlebarDropdownState {
 /// click can name the item stably while the filter narrows.
 pub struct TitlebarDropdownView {
     pub key: String,
-    /// The trigger's label: the active item, else the dropdown's name.
+    /// The trigger's label: the menu's title.
     pub trigger: SharedString,
     pub section: SharedString,
     pub placeholder: SharedString,
@@ -3965,11 +3965,7 @@ impl Editor {
                 let items = Self::titlebar_dropdown_filtered(d);
                 TitlebarDropdownView {
                     key: d.key.clone(),
-                    trigger: if d.active.is_empty() {
-                        d.trigger.clone()
-                    } else {
-                        d.active.clone()
-                    },
+                    trigger: d.trigger.clone(),
                     section: d.section.clone(),
                     placeholder: d.placeholder.clone(),
                     selected: d.selected.map(|s| s.min(items.len().saturating_sub(1))),
