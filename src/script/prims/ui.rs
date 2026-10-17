@@ -42,7 +42,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // publish the title-bar menu named `title`. `labels` and `commands` are
         // parallel lists; clicking a row calls its command (a function name)
         // with no arguments, or — when that entry is "" — `(callback label)`.
-        // `active` is checkmarked and shown on the trigger ("" for none);
+        // `active` is checkmarked ("" for none);
         // `section` heads the rows. An empty list hides the menu. Driven from
         // scheme/titlebar-menu.scm, which is the API to use.
         let q = queue.clone();

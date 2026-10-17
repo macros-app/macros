@@ -4,13 +4,13 @@
 ;; Each menu is named by its title (the trigger's label) and holds rows of
 ;; (label . command); clicking a row runs its command. Menus appear left to
 ;; right in the order they were first defined, rows in insertion order. The
-;; built-in "Projects" switcher (perspectives.scm) is one of these menus.
+;; built-in "projects" switcher (perspectives.scm) is one of these menus.
 ;;
 ;;   (titlebar-menu-add "Dashboards" "Postgres"   'psql-dashboard)
 ;;   (titlebar-menu-add "Dashboards" "Kubernetes" 'k8s-dashboard)
 ;;   (titlebar-menu-add "Tools" "Scratch" (lambda () (switch-to-buffer "*scratch*")))
 ;;
-;;   (titlebar-menu-hide "Projects")   ; turn off the projects switcher
+;;   (titlebar-menu-hide "projects")   ; turn off the projects switcher
 ;;
 ;; A command is a function name (symbol or string) or a no-argument procedure.
 ;; Prefer a name for anything a package defines: it's looked up when the row is
@@ -18,7 +18,7 @@
 ;; resolved when the lambda is written, so it may only call functions that
 ;; already exist.
 ;;
-;; Generated menus (like Projects) replace their rows wholesale with
+;; Generated menus (like projects) replace their rows wholesale with
 ;; `titlebar-menu-set!`, pairing labels with "" commands and an 'on-select
 ;; function that receives the picked label (see `titlebar-menu-configure!`).
 ;;
@@ -27,7 +27,7 @@
 
 ;; alist: title -> settings alist with keys
 ;;   rows      list of (label . command-name)
-;;   active    the checkmarked label, also shown on the trigger ("" for none)
+;;   active    the checkmarked label ("" for none)
 ;;   section   the heading over the rows ("" = the title)
 ;;   on-select function name called with the label of a row whose command is ""
 ;;   hidden    #t keeps the menu out of the title bar
@@ -70,7 +70,7 @@
 ;; Set options on the menu `title` (created, empty, on first use — which fixes
 ;; its position): 'section "Heading over the rows", 'on-select 'fn (called with
 ;; the label of a row whose command is "").
-;;   (titlebar-menu-configure! "Projects" 'section "Recent Projects" 'on-select 'perspective-select)
+;;   (titlebar-menu-configure! "projects" 'section "Recent Projects" 'on-select 'perspective-select)
 (define (titlebar-menu-configure! title . opts)
   (titlebar-menu-update!
    title

@@ -54,11 +54,21 @@ Perspectives are created automatically. The first time you visit a file inside a
 
 ### Switching
 
-Click the project name in the title bar (just right of the traffic lights) to unfold the dropdown, then pick a project. Macros reopens that project's last visited file and the title bar updates to show it as current — a checkmark marks the active perspective in the list. Clicking anywhere outside the menu folds it without switching.
+Click **projects** in the title bar (just right of the traffic lights) to unfold the dropdown, then pick a project. Macros reopens that project's last visited file, and a checkmark marks it as the current perspective in the list. Type to filter the list; <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>C-p</kbd>/<kbd>C-n</kbd>) and <kbd>Enter</kbd> pick from the keyboard. Clicking anywhere outside the menu folds it without switching.
 
 The same list is available from the keyboard as `perspective-switch` (<kbd>C-c p s</kbd>), a [Helm](/docs/helm) source.
 
 If a project's resume file has been deleted since your last visit, switching to it falls back to the project's find-file picker instead of opening a dead path.
+
+### Hiding the dropdown
+
+The dropdown is a regular [title-bar menu](/docs/titlebar-menus) named `projects`, and it's on by default. To remove it from the title bar, add this to your `init.scm`:
+
+```scheme
+(titlebar-menu-hide "projects")
+```
+
+Perspectives keep tracking while it's hidden, and <kbd>C-c p s</kbd> still switches between them. `(titlebar-menu-show "projects")` brings it back.
 
 ### Names and persistence
 

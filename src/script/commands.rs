@@ -818,7 +818,7 @@ pub enum EditorCommand {
     /// one row per `items` label, each running the parallel `commands` entry
     /// by name (a late-bound call, so package-defined commands resolve). A row
     /// with an empty command hands its label to `callback` instead. `active`
-    /// (if non-empty) is checkmarked and shown on the trigger; `section` heads
+    /// (if non-empty) is checkmarked; `section` heads
     /// the rows. An empty `items` hides the menu but keeps its position.
     SetTitlebarMenu(Box<TitlebarMenuArgs>),
     // Transient popup (the magit / `transient.el` pattern).
