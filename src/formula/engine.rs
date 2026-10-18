@@ -23,6 +23,17 @@
 //! million dirty cells is one scan. Reading a formula that is itself waiting
 //! on the reader is a cycle: it becomes `#CIRC!`, which then propagates.
 //! A time budget lets a large recalculation continue across frames.
+//!
+//! **Spilling.** A formula whose result is an array (`=SEQUENCE(3)`,
+//! `=SORT(A1:A9)`, `=A1:B3*2`) is a dynamic-array formula: its values fill
+//! the cells down and right of it, which hold no text of their own. A spill
+//! range covering any non-empty cell (or another formula's spill) doesn't
+//! spill: the formula shows `#SPILL!`. Each formula's wanted spill range is
+//! indexed like a precedent, so typing into it or clearing a blocker
+//! recalculates the formula; a formula reading a spilled cell depends on the
+//! formula that spills there, and a spill that changes shape marks the
+//! readers of every cell it covered or now covers. `A1#` reads the range the
+//! formula in `A1` spills into.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -30,8 +41,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::ast::Expr;
-use super::eval;
-use super::func::{Arg, Ctx, RangeRef};
+use super::eval::{self, Outcome};
+use super::func::{Arg, Array, Ctx, RangeRef};
 use super::parse::{ParseError, parse};
 use super::value::{ErrorKind, Value};
 
@@ -41,6 +52,11 @@ pub const MARK: char = '\u{1}';
 /// Ranges wider than this many columns go in the short "wide" list instead
 /// of one interval entry per column.
 const WIDE: usize = 64;
+
+/// How many times one formula's spill range may change shape in one
+/// recalculation before it's taken for a cycle (a spill feeding the
+/// formula that makes it, so it never settles) and shows `#CIRC!`.
+const MAX_RESPILLS: u32 = 32;
 
 /// Whether stored cell text is a formula.
 pub fn is_formula(stored: &str) -> bool {
@@ -160,6 +176,40 @@ impl SheetValues {
 
 type Fid = usize;
 
+/// Cells `(r0, c0, r1, c1)`, inclusive.
+type Rect = (usize, usize, usize, usize);
+
+/// A formula's array result, spilled from its cell.
+struct Spill {
+    rows: usize,
+    cols: usize,
+    /// Row-major; the first is the formula's own cell.
+    values: Vec<Value>,
+    /// Each value as shown (kept so reads can borrow a `&str`).
+    shown: Vec<String>,
+}
+
+impl Spill {
+    fn new(a: Array) -> Spill {
+        Spill {
+            rows: a.rows,
+            cols: a.cols,
+            shown: a.data.iter().map(Value::to_string).collect(),
+            values: a.data,
+        }
+    }
+
+    /// The cells it covers when spilled from `(row, col)`.
+    fn rect(&self, (row, col): (usize, usize)) -> Rect {
+        (row, col, row + self.rows - 1, col + self.cols - 1)
+    }
+
+    /// Index of `(row, col)` in [`Spill::values`], for a spill from `at`.
+    fn index(&self, at: (usize, usize), row: usize, col: usize) -> usize {
+        (row - at.0) * self.cols + (col - at.1)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Clean,
@@ -184,6 +234,14 @@ struct Slot {
     /// Other sheets read (lower-case names): it recalculates when one
     /// changes ([`Engine::sheet_changed`]).
     sheets: Vec<String>,
+    /// Its array result, when it spilled.
+    spill: Option<Spill>,
+    /// The range its last array result wanted to spill into, spilled or
+    /// blocked (`None` for one value).
+    wants: Option<Rect>,
+    /// [`Slot::wants`] without the formula's own cell: indexed like
+    /// precedents, so an edit in the range recalculates it.
+    spill_deps: Vec<Rect>,
 }
 
 impl Slot {
@@ -244,6 +302,14 @@ pub struct Engine {
     own_sheet: String,
     /// Formula results computed so far (a change counter for results).
     evaluations: u64,
+    /// Per column: `(r0, r1, fid)` cells covered by a formula's spill (its
+    /// own cell included).
+    spill_cols: HashMap<usize, Vec<(usize, usize, Fid)>>,
+    /// `(rows, cols)` up to the furthest spilled cell.
+    spill_extent: (usize, usize),
+    /// Spill-range changes per formula in this recalculation (see
+    /// [`MAX_RESPILLS`]).
+    respills: HashMap<Fid, u32>,
 }
 
 impl Engine {
@@ -285,6 +351,207 @@ impl Engine {
     /// Positions of every formula (unordered).
     pub fn positions(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.by_pos.keys().copied()
+    }
+
+    // ---- spills -------------------------------------------------------------
+
+    /// Whether any formula spills.
+    pub fn has_spills(&self) -> bool {
+        !self.spill_cols.is_empty()
+    }
+
+    /// `(rows, cols)` up to the furthest spilled cell (the used area
+    /// spilled values extend the sheet's to).
+    pub fn spill_extent(&self) -> (usize, usize) {
+        self.spill_extent
+    }
+
+    /// The formula whose spill covers `(row, col)`, that cell included.
+    fn spill_owner(&self, row: usize, col: usize) -> Option<Fid> {
+        self.spill_cols
+            .get(&col)?
+            .iter()
+            .find(|e| (e.0..=e.1).contains(&row))
+            .map(|e| e.2)
+    }
+
+    /// The cells formula `fid` spills into, if it spills.
+    fn spill_rect(&self, fid: Fid) -> Option<Rect> {
+        let s = self.slot(fid)?;
+        s.spill.as_ref().map(|sp| sp.rect(s.pos))
+    }
+
+    /// For a cell another formula spills into (not that formula's own
+    /// cell): that formula's position.
+    pub fn spilled_from(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        let pos = self.slot(self.spill_owner(row, col)?)?.pos;
+        (pos != (row, col)).then_some(pos)
+    }
+
+    /// The range `(r0, c0, r1, c1)` the formula at `(row, col)` spills
+    /// into, if it spills.
+    pub fn spill_range(&self, row: usize, col: usize) -> Option<(usize, usize, usize, usize)> {
+        self.spill_rect(*self.by_pos.get(&(row, col))?)
+    }
+
+    /// The value spilled into `(row, col)` from another formula's cell.
+    pub fn spilled_value(&self, row: usize, col: usize) -> Option<&Value> {
+        let s = self.slot(self.spill_owner(row, col)?)?;
+        let sp = s.spill.as_ref()?;
+        (s.pos != (row, col)).then(|| &sp.values[sp.index(s.pos, row, col)])
+    }
+
+    /// [`Engine::spilled_value`] as the cell shows it.
+    pub fn spilled_shown(&self, row: usize, col: usize) -> Option<&str> {
+        let s = self.slot(self.spill_owner(row, col)?)?;
+        let sp = s.spill.as_ref()?;
+        (s.pos != (row, col)).then(|| sp.shown[sp.index(s.pos, row, col)].as_str())
+    }
+
+    /// Record that `fid`'s spill moved from `old` to `new`.
+    fn move_spill(&mut self, fid: Fid, old: Option<Rect>, new: Option<Rect>) {
+        if let Some((_, c0, _, c1)) = old {
+            for c in c0..=c1 {
+                if let Some(v) = self.spill_cols.get_mut(&c) {
+                    v.retain(|e| e.2 != fid);
+                    if v.is_empty() {
+                        self.spill_cols.remove(&c);
+                    }
+                }
+            }
+        }
+        if let Some((r0, c0, r1, c1)) = new {
+            for c in c0..=c1 {
+                self.spill_cols.entry(c).or_default().push((r0, r1, fid));
+            }
+        }
+        let (rows, cols) = self.spill_extent;
+        self.spill_extent = match old {
+            // The furthest spill shrank or went: measure again.
+            Some((_, _, r1, c1)) if r1 + 1 >= rows || c1 + 1 >= cols => self
+                .spill_cols
+                .iter()
+                .fold((0, 0), |(rows, cols), (&c, v)| {
+                    let bottom = v.iter().map(|e| e.1 + 1).max().unwrap_or(0);
+                    (rows.max(bottom), cols.max(c + 1))
+                }),
+            _ => (rows, cols),
+        };
+        if let Some((_, _, r1, c1)) = new {
+            self.spill_extent.0 = self.spill_extent.0.max(r1 + 1);
+            self.spill_extent.1 = self.spill_extent.1.max(c1 + 1);
+        }
+    }
+
+    /// Whether spilling from `fid`'s cell over `rect` is blocked: a
+    /// non-empty cell in it (other than the formula's own), or another
+    /// formula's spill.
+    fn spill_blocked(&self, src: &dyn Source, fid: Fid, rect: Rect) -> bool {
+        let Some(at) = self.slot(fid).map(|s| s.pos) else {
+            return true;
+        };
+        let (r0, c0, r1, c1) = rect;
+        for c in c0..=c1 {
+            let mut hit = false;
+            src.for_each_in_column(c, r0..r1 + 1, &mut |r, text| {
+                hit |= !text.is_empty() && (r, c) != at;
+            });
+            let spilled = self
+                .spill_cols
+                .get(&c)
+                .is_some_and(|v| v.iter().any(|&(a, b, f)| f != fid && a <= r1 && r0 <= b));
+            if hit || spilled {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether formula `fid`'s references cover a cell of `rect` (where it
+    /// would spill) other than its own: a cycle, as in Excel.
+    fn reads_own_spill(&self, fid: Fid, rect: Rect) -> bool {
+        let Some(s) = self.slot(fid) else {
+            return false;
+        };
+        let (r0, c0, r1, c1) = rect;
+        s.precedents.iter().any(|&(a0, b0, a1, b1)| {
+            let (x0, y0, x1, y1) = (a0.max(r0), b0.max(c0), a1.min(r1), b1.min(c1));
+            // The overlap, if any, is more than just the formula's own cell.
+            x0 <= x1 && y0 <= y1 && (x0, y0, x1, y1) != (r0, c0, r0, c0)
+        })
+    }
+
+    /// Settle formula `fid` (evaluated to `value`, or to `array` when its
+    /// result is one): spill the array if its range is free, and if the
+    /// spill changed shape, recalculate whatever reads the cells involved.
+    fn finish(&mut self, src: &dyn Source, fid: Fid, value: Value, array: Option<Array>) {
+        let Some(at) = self.slot(fid).map(|s| s.pos) else {
+            return;
+        };
+        let old = self.spill_rect(fid);
+        let mut value = value;
+        let mut spill = None;
+        let mut wants = None;
+        if let Some(a) = array {
+            let end = (
+                at.0.checked_add(a.rows - 1)
+                    .filter(|&r| r <= super::parse::MAX_ROW),
+                at.1.checked_add(a.cols - 1)
+                    .filter(|&c| c <= super::parse::MAX_COL),
+            );
+            value = Value::Error(ErrorKind::Spill);
+            // Off the sheet's edge it can never spill; otherwise it waits
+            // for its range to clear.
+            if let (Some(r1), Some(c1)) = end {
+                let rect = (at.0, at.1, r1, c1);
+                wants = Some(rect);
+                if self.reads_own_spill(fid, rect) {
+                    // Its result would change what it reads.
+                    (value, wants) = (Value::Error(ErrorKind::Circ), None);
+                } else if !self.spill_blocked(src, fid, rect) {
+                    value = a.data[0].clone();
+                    spill = Some(Spill::new(a));
+                }
+            }
+        }
+        let mut new = spill.as_ref().map(|sp| sp.rect(at));
+        if new != old {
+            let n = self.respills.entry(fid).or_insert(0);
+            *n += 1;
+            if *n > MAX_RESPILLS {
+                (value, spill, wants, new) = (Value::Error(ErrorKind::Circ), None, None, None);
+            }
+        }
+        if self.slot(fid).is_some_and(|s| s.wants != wants) {
+            self.unindex(fid);
+            if let Some(s) = self.slot_mut(fid) {
+                s.wants = wants;
+                s.spill_deps = wants.map_or_else(Vec::new, |(r0, c0, r1, c1)| {
+                    let mut deps = Vec::new();
+                    if c1 > c0 {
+                        deps.push((r0, c0 + 1, r0, c1));
+                    }
+                    if r1 > r0 {
+                        deps.push((r0 + 1, c0, r1, c1));
+                    }
+                    deps
+                });
+            }
+            self.index(fid);
+        }
+        if let Some(s) = self.slot_mut(fid) {
+            s.settle(value);
+            s.spill = spill;
+        }
+        if new != old {
+            self.move_spill(fid, old, new);
+            self.lookups.clear();
+            // New work on a recalculation under way (see `settle_waits`).
+            self.settle_waits();
+            for rect in old.into_iter().chain(new) {
+                self.mark_area(rect, Some(fid));
+            }
+        }
     }
 
     /// Whether a recalculation still has work queued.
@@ -334,7 +601,11 @@ impl Engine {
             self.own_sheet = src.sheet_name().to_string();
         }
         for &(row, col) in cells {
+            // A formula that goes takes its spill with it: what read the
+            // spilled cells (or waited for them to clear) recalculates.
+            let mut freed = None;
             if let Some(fid) = self.by_pos.get(&(row, col)).copied() {
+                freed = self.spill_rect(fid);
                 self.unregister(fid);
             }
             let text = src.text(row, col);
@@ -343,6 +614,9 @@ impl Engine {
                 self.register(row, col, &text);
             }
             self.mark_dependents(row, col);
+            if let Some(rect) = freed {
+                self.mark_area(rect, None);
+            }
         }
         self.mark_volatile();
     }
@@ -377,6 +651,9 @@ impl Engine {
             volatile,
             precedents,
             sheets,
+            spill: None,
+            wants: None,
+            spill_deps: Vec::new(),
         };
         let fid = match self.free.pop() {
             Some(f) => {
@@ -404,6 +681,10 @@ impl Engine {
 
     fn unregister(&mut self, fid: Fid) {
         self.unindex(fid);
+        let spilled = self.spill_rect(fid);
+        if spilled.is_some() {
+            self.move_spill(fid, spilled, None);
+        }
         if let Some(slot) = self.slots[fid].take() {
             self.by_pos.remove(&slot.pos);
         }
@@ -411,11 +692,16 @@ impl Engine {
         self.free.push(fid);
     }
 
+    /// What formula `fid` is indexed as reading: its references and its
+    /// wanted spill range.
+    fn read_rects(&self, fid: Fid) -> Vec<Rect> {
+        self.slot(fid)
+            .map(|s| s.precedents.iter().chain(&s.spill_deps).copied().collect())
+            .unwrap_or_default()
+    }
+
     fn index(&mut self, fid: Fid) {
-        let precedents = self
-            .slot(fid)
-            .map(|s| s.precedents.clone())
-            .unwrap_or_default();
+        let precedents = self.read_rects(fid);
         for (r0, c0, r1, c1) in precedents {
             if r0 == r1 && c0 == c1 {
                 self.cell_deps.entry((r0, c0)).or_default().push(fid);
@@ -430,10 +716,7 @@ impl Engine {
     }
 
     fn unindex(&mut self, fid: Fid) {
-        let precedents = self
-            .slot(fid)
-            .map(|s| s.precedents.clone())
-            .unwrap_or_default();
+        let precedents = self.read_rects(fid);
         for (r0, c0, r1, c1) in precedents {
             if r0 == r1 && c0 == c1 {
                 if let Some(v) = self.cell_deps.get_mut(&(r0, c0)) {
@@ -481,25 +764,79 @@ impl Engine {
         );
     }
 
+    /// Formulas reading any cell of `rect`.
+    fn dependents_in(&self, rect: Rect, out: &mut Vec<Fid>) {
+        let (r0, c0, r1, c1) = rect;
+        if r0 == r1 && c0 == c1 {
+            return self.dependents_of(r0, c0, out);
+        }
+        // Walk whichever is smaller: the rectangle or the index.
+        let cells = (r1 - r0 + 1).saturating_mul(c1 - c0 + 1);
+        if cells <= self.cell_deps.len() {
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    if let Some(v) = self.cell_deps.get(&(r, c)) {
+                        out.extend(v);
+                    }
+                }
+            }
+        } else {
+            for (&(r, c), v) in &self.cell_deps {
+                if (r0..=r1).contains(&r) && (c0..=c1).contains(&c) {
+                    out.extend(v);
+                }
+            }
+        }
+        let overlaps = |e: &&(usize, usize, Fid)| e.0 <= r1 && r0 <= e.1;
+        if c1 - c0 < self.col_deps.len() {
+            for c in c0..=c1 {
+                if let Some(v) = self.col_deps.get(&c) {
+                    out.extend(v.iter().filter(overlaps).map(|e| e.2));
+                }
+            }
+        } else {
+            for (c, v) in &self.col_deps {
+                if (c0..=c1).contains(c) {
+                    out.extend(v.iter().filter(overlaps).map(|e| e.2));
+                }
+            }
+        }
+        out.extend(
+            self.wide_deps
+                .iter()
+                .filter(|e| e.0 <= r1 && r0 <= e.2 && e.1 <= c1 && c0 <= e.3)
+                .map(|e| e.4),
+        );
+    }
+
     /// Mark everything downstream of cell `(row, col)` dirty.
     fn mark_dependents(&mut self, row: usize, col: usize) {
-        let mut frontier = vec![(row, col)];
-        let mut seen: HashSet<Fid> = HashSet::new();
+        self.mark_area((row, col, row, col), None);
+    }
+
+    /// Mark everything downstream of the cells of `rect` dirty (but not
+    /// `skip`). Downstream of a formula is downstream of its cell and of
+    /// every cell it spills into.
+    fn mark_area(&mut self, rect: Rect, skip: Option<Fid>) {
+        let mut frontier = vec![rect];
+        let mut seen: HashSet<Fid> = skip.into_iter().collect();
         let mut deps = Vec::new();
-        while let Some((r, c)) = frontier.pop() {
+        while let Some(area) = frontier.pop() {
             deps.clear();
-            self.dependents_of(r, c, &mut deps);
+            self.dependents_in(area, &mut deps);
             for &fid in &deps {
                 if !seen.insert(fid) {
                     continue;
                 }
+                let spilled = self.spill_rect(fid);
                 if let Some(slot) = self.slot_mut(fid) {
                     if slot.state == State::Clean {
                         slot.state = State::Dirty;
                     }
-                    let pos = slot.pos;
+                    let (r, c) = slot.pos;
                     self.stack.push(fid);
-                    frontier.push(pos);
+                    frontier.push((r, c, r, c));
+                    frontier.extend(spilled);
                 }
             }
         }
@@ -524,11 +861,15 @@ impl Engine {
 
     /// Queue formula `fid` and everything downstream of it.
     fn requeue(&mut self, fid: Fid) {
+        let spilled = self.spill_rect(fid);
         if let Some(s) = self.slot_mut(fid) {
             s.state = State::Dirty;
             let pos = s.pos;
             self.stack.push(fid);
             self.mark_dependents(pos.0, pos.1);
+            if let Some(rect) = spilled {
+                self.mark_area(rect, Some(fid));
+            }
         }
     }
 
@@ -575,6 +916,7 @@ impl Engine {
     pub fn mark_all(&mut self) {
         self.settle_waits();
         self.lookups.clear();
+        self.respills.clear();
         for (fid, slot) in self.slots.iter_mut().enumerate() {
             if let Some(s) = slot {
                 s.state = State::Dirty;
@@ -604,6 +946,7 @@ impl Engine {
             }
             let Evaluation {
                 value,
+                array,
                 pending,
                 circular,
                 called,
@@ -614,9 +957,7 @@ impl Engine {
                 .collect();
             if pending.is_empty() || circular {
                 self.evaluations += 1;
-                if let Some(s) = self.slot_mut(fid) {
-                    s.settle(value);
-                }
+                self.finish(src, fid, value, array);
                 if called {
                     self.waiting_on_calls.insert(fid);
                 } else {
@@ -653,6 +994,7 @@ impl Engine {
                 }
             }
         }
+        self.respills.clear();
         true
     }
 
@@ -679,20 +1021,24 @@ impl Engine {
             called: false,
             now: src.now(),
         };
-        let value = eval::eval_cell(&expr, &mut ctx);
+        let (value, array) = match eval::eval_formula(&expr, &mut ctx) {
+            Outcome::Value(v) => (v, None),
+            Outcome::Array(a) => (a.data[0].clone(), Some(a)),
+        };
         let pending = ctx.pending.into_inner();
         let circular = ctx.circular.get();
         let called = ctx.called;
         if let Some(s) = self.slot_mut(fid) {
             s.state = State::Dirty;
         }
-        let value = if circular {
-            Value::Error(ErrorKind::Circ)
+        let (value, array) = if circular {
+            (Value::Error(ErrorKind::Circ), None)
         } else {
-            value
+            (value, array)
         };
         Evaluation {
             value,
+            array,
             pending,
             circular,
             called,
@@ -786,6 +1132,8 @@ impl Engine {
 /// What evaluating one formula found.
 struct Evaluation {
     value: Value,
+    /// The whole result when it's an array (`value` is its first element).
+    array: Option<Array>,
     /// Inputs it read that were still dirty.
     pending: Vec<Fid>,
     /// It read itself (the value is then `#CIRC!`).
@@ -799,6 +1147,7 @@ impl Evaluation {
     fn of(value: Value) -> Evaluation {
         Evaluation {
             value,
+            array: None,
             pending: Vec::new(),
             circular: false,
             called: false,
@@ -822,9 +1171,16 @@ impl EngineCtx<'_> {
         sheet.is_none_or(|s| s.eq_ignore_ascii_case(self.src.sheet_name()))
     }
 
-    /// A cell's value; a formula cell gives its result if computed.
+    /// A cell's value; a formula cell gives its result if computed, and an
+    /// empty cell what's spilled into it.
     fn value_of(&self, row: usize, col: usize, text: &str) -> Value {
         if !is_formula(text) {
+            if text.is_empty()
+                && self.engine.has_spills()
+                && let Some(fid) = self.engine.spill_owner(row, col)
+            {
+                return self.spilled(fid, row, col);
+            }
             return Value::from_cell_text(text);
         }
         let Some(&fid) = self.engine.by_pos.get(&(row, col)) else {
@@ -845,6 +1201,59 @@ impl EngineCtx<'_> {
             }
         }
     }
+
+    /// The value formula `fid` spills into `(row, col)`, once computed.
+    fn spilled(&self, fid: Fid, row: usize, col: usize) -> Value {
+        let Some(slot) = self.engine.slot(fid) else {
+            return Value::Empty;
+        };
+        match slot.state {
+            State::Clean => slot.spill.as_ref().map_or(Value::Empty, |sp| {
+                sp.values[sp.index(slot.pos, row, col)].clone()
+            }),
+            State::Evaluating => {
+                self.circular.set(true);
+                Value::Error(ErrorKind::Circ)
+            }
+            State::Dirty | State::Waiting => {
+                self.pending.borrow_mut().push(fid);
+                Value::Error(ErrorKind::Calc)
+            }
+        }
+    }
+
+    /// The spills covering any of `range`'s cells: `(fid, rect)`.
+    fn spills_in(&self, range: &RangeRef) -> Vec<(Fid, Rect)> {
+        let mut out: Vec<(Fid, Rect)> = Vec::new();
+        if !self.engine.has_spills() {
+            return out;
+        }
+        let mut visit = |v: &Vec<(usize, usize, Fid)>| {
+            for &(r0, r1, fid) in v {
+                if r0 <= range.r1
+                    && range.r0 <= r1
+                    && !out.iter().any(|e| e.0 == fid)
+                    && let Some(rect) = self.engine.spill_rect(fid)
+                {
+                    out.push((fid, rect));
+                }
+            }
+        };
+        if range.c1.saturating_sub(range.c0) < self.engine.spill_cols.len() {
+            for c in range.c0..=range.c1 {
+                if let Some(v) = self.engine.spill_cols.get(&c) {
+                    visit(v);
+                }
+            }
+        } else {
+            for (c, v) in &self.engine.spill_cols {
+                if (range.c0..=range.c1).contains(c) {
+                    visit(v);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Ctx for EngineCtx<'_> {
@@ -860,7 +1269,10 @@ impl Ctx for EngineCtx<'_> {
 
     fn extent(&self, sheet: Option<&str>) -> Option<(usize, usize)> {
         if self.local(sheet) {
-            return Some(self.src.extent());
+            // Spilled values extend the used area.
+            let (rows, cols) = self.src.extent();
+            let (sr, sc) = self.engine.spill_extent;
+            return Some((rows.max(sr), cols.max(sc)));
         }
         sheet
             .and_then(|s| self.src.other_sheet(s))
@@ -893,6 +1305,50 @@ impl Ctx for EngineCtx<'_> {
             return;
         }
         let (rows, _) = self.src.extent();
+        let spills = self.spills_in(range);
+        if !spills.is_empty() {
+            // Spilled cells have no text: read the stored ones, then lay
+            // the spilled values over the empty cells they cover.
+            let bottom = spills.iter().map(|s| s.1.2 + 1).max().unwrap_or(0);
+            let row_end = range
+                .r1
+                .saturating_add(1)
+                .min(rows.max(bottom))
+                .max(range.r0);
+            let width = range.cols();
+            let height = row_end - range.r0;
+            if crate::formula::func::dense_cells(width, height).is_ok() {
+                let mut grid = vec![Value::Empty; width * height];
+                for (i, col) in (range.c0..=range.c1).enumerate() {
+                    self.src
+                        .for_each_in_column(col, range.r0..row_end, &mut |row, text| {
+                            grid[(row - range.r0) * width + i] = self.value_of(row, col, text);
+                        });
+                }
+                for &(fid, (r0, c0, r1, c1)) in &spills {
+                    let at = (r0, c0);
+                    for r in r0.max(range.r0)..=r1.min(row_end - 1) {
+                        for c in c0.max(range.c0)..=c1.min(range.c1) {
+                            if (r, c) != at && self.src.text(r, c).is_empty() {
+                                grid[(r - range.r0) * width + (c - range.c0)] =
+                                    self.spilled(fid, r, c);
+                            }
+                        }
+                    }
+                }
+                for (k, v) in grid.into_iter().enumerate() {
+                    f(range.r0 + k / width, range.c0 + k % width, v);
+                }
+                if range.r1 != usize::MAX {
+                    for row in row_end..range.r1 + 1 {
+                        for col in range.c0..=range.c1 {
+                            f(row, col, Value::Empty);
+                        }
+                    }
+                }
+                return;
+            }
+        }
         // Stored rows end at the data; anything past it in the range is empty.
         let row_end = range.r1.saturating_add(1).min(rows).max(range.r0);
         let tail = (range.r1 != usize::MAX).then(|| row_end..range.r1 + 1);
@@ -952,6 +1408,42 @@ impl Ctx for EngineCtx<'_> {
             self.engine.lookups.insert(range.clone(), ix.clone());
         }
         Some(ix)
+    }
+
+    fn spill_range(
+        &mut self,
+        sheet: Option<&str>,
+        row: usize,
+        col: usize,
+    ) -> Result<RangeRef, ErrorKind> {
+        // Other sheets keep values only, no formulas to spill.
+        if !self.local(sheet) || !is_formula(self.src.text(row, col)) {
+            return Err(ErrorKind::Ref);
+        }
+        let fid = *self.engine.by_pos.get(&(row, col)).ok_or(ErrorKind::Calc)?;
+        let slot = self.engine.slot(fid).ok_or(ErrorKind::Calc)?;
+        let (r1, c1) = match slot.state {
+            State::Clean => match (&slot.spill, &slot.result) {
+                (Some(sp), _) => (row + sp.rows - 1, col + sp.cols - 1),
+                (None, Value::Error(e)) => return Err(*e),
+                (None, _) => (row, col),
+            },
+            State::Evaluating => {
+                self.circular.set(true);
+                return Err(ErrorKind::Circ);
+            }
+            State::Dirty | State::Waiting => {
+                self.pending.borrow_mut().push(fid);
+                return Err(ErrorKind::Calc);
+            }
+        };
+        Ok(RangeRef {
+            sheet: None,
+            r0: row,
+            c0: col,
+            r1,
+            c1,
+        })
     }
 
     fn call_external(&mut self, name: &str, args: &[Arg]) -> Option<Value> {
@@ -1304,8 +1796,9 @@ mod tests {
                 (2, 0, Value::Number(3.0)),
             ]),
         );
-        s.set("B2", "=Costs!A1:A3");
-        s.set("C2", "=Costs!A1:A3*10");
+        // `@`: one value, as pre-dynamic-array Excel read every formula.
+        s.set("B2", "=@Costs!A1:A3");
+        s.set("C2", "=@Costs!A1:A3*10");
         let mut e = Engine::new();
         e.rebuild(&s);
         assert!(e.recalc(&s, None));
@@ -1390,6 +1883,180 @@ mod tests {
         assert!(!e.recalc(&s, Some(Instant::now())));
         edit(&mut e, &mut s, "B1", "6");
         assert_eq!(val(&e, "C1"), Value::Number(306.0));
+    }
+
+    /// What cell `name` shows: a formula's result, or the value spilled
+    /// into it.
+    fn at(e: &Engine, name: &str) -> Value {
+        let (r, c) = crate::grid::view::parse_cell_name(name).unwrap();
+        e.result(r, c)
+            .or_else(|| e.spilled_value(r, c))
+            .cloned()
+            .unwrap_or(Value::Empty)
+    }
+
+    fn n(x: f64) -> Value {
+        Value::Number(x)
+    }
+
+    fn sheet(cells: &[(&str, &str)]) -> (Engine, MapSheet) {
+        let mut s = MapSheet::default();
+        for (name, text) in cells {
+            s.set(name, text);
+        }
+        let mut e = Engine::new();
+        e.rebuild(&s);
+        assert!(e.recalc(&s, None));
+        (e, s)
+    }
+
+    #[test]
+    fn arrays_spill_and_are_read_like_cells() {
+        let (mut e, mut s) = sheet(&[
+            ("A1", "=SEQUENCE(3)"),
+            ("B1", "=SUM(A1:A5)"),
+            ("B2", "=A3*10"),
+            ("C1", "=A1:A3*2"),
+            ("D1", "=SORT({3,1,2},,,TRUE)"),
+        ]);
+        assert_eq!(
+            [at(&e, "A1"), at(&e, "A2"), at(&e, "A3"), at(&e, "A4")],
+            [n(1.0), n(2.0), n(3.0), Value::Empty]
+        );
+        assert_eq!(e.spill_range(0, 0), Some((0, 0, 2, 0)));
+        assert_eq!(e.spilled_from(2, 0), Some((0, 0)));
+        assert_eq!(e.spilled_from(0, 0), None, "the formula's own cell");
+        assert_eq!(e.spilled_shown(1, 0), Some("2"));
+        assert_eq!(at(&e, "B1"), n(6.0));
+        assert_eq!(at(&e, "B2"), n(30.0));
+        // A range in arithmetic spills too; so does a row.
+        assert_eq!([at(&e, "C2"), at(&e, "C3")], [n(4.0), n(6.0)]);
+        assert_eq!(
+            [at(&e, "D1"), at(&e, "E1"), at(&e, "F1")],
+            [n(1.0), n(2.0), n(3.0)]
+        );
+        assert_eq!(e.spill_extent(), (3, 6));
+        // Editing an input reshapes nothing but the values.
+        edit(&mut e, &mut s, "A1", "=SEQUENCE(3,1,10)");
+        assert_eq!(at(&e, "B1"), n(33.0));
+        assert_eq!(at(&e, "B2"), n(120.0));
+        assert_eq!(at(&e, "C3"), n(24.0));
+    }
+
+    #[test]
+    fn blocked_spills_show_spill_and_recover() {
+        let (mut e, mut s) = sheet(&[("A1", "=SEQUENCE(3)"), ("B1", "=A3"), ("B2", "=COUNT(A:A)")]);
+        assert_eq!(at(&e, "B1"), n(3.0));
+        // Typing into the spill range blocks it.
+        edit(&mut e, &mut s, "A2", "x");
+        assert_eq!(at(&e, "A1"), Value::Error(ErrorKind::Spill));
+        assert_eq!(e.spill_range(0, 0), None);
+        assert_eq!(at(&e, "A3"), Value::Empty);
+        assert_eq!(
+            at(&e, "B1"),
+            n(0.0),
+            "the cell it spilled into is empty again"
+        );
+        assert_eq!(at(&e, "B2"), n(0.0));
+        // Clearing the blocker re-spills, and the readers follow.
+        edit(&mut e, &mut s, "A2", "");
+        assert_eq!(at(&e, "A1"), n(1.0));
+        assert_eq!(at(&e, "B1"), n(3.0));
+        assert_eq!(at(&e, "B2"), n(3.0));
+        // A formula blocks it too, and so does another formula's spill.
+        edit(&mut e, &mut s, "A3", "=1");
+        assert_eq!(at(&e, "A1"), Value::Error(ErrorKind::Spill));
+        edit(&mut e, &mut s, "A3", "");
+        edit(&mut e, &mut s, "C2", "=SEQUENCE(1,3,7)");
+        edit(&mut e, &mut s, "C1", "=SEQUENCE(2)");
+        assert_eq!(at(&e, "C1"), Value::Error(ErrorKind::Spill));
+        assert_eq!(at(&e, "D2"), n(8.0));
+        // The other spill going away frees the range.
+        edit(&mut e, &mut s, "C2", "");
+        assert_eq!([at(&e, "C1"), at(&e, "C2")], [n(1.0), n(2.0)]);
+        // Off the sheet's edge it can never spill.
+        edit(&mut e, &mut s, "XFD1", "=SEQUENCE(1,2)");
+        assert_eq!(at(&e, "XFD1"), Value::Error(ErrorKind::Spill));
+    }
+
+    #[test]
+    fn spill_range_references_follow_resizes() {
+        let (mut e, mut s) = sheet(&[
+            ("A1", "3"),
+            ("B1", "=SEQUENCE(A1)"),
+            ("C1", "=SUM(B1#)"),
+            ("C2", "=ROWS(B1#)"),
+            ("C3", "=B3"),
+            ("C4", "=B5"),
+            ("D1", "=B1#*10"),
+            ("C5", "=A1#"),
+        ]);
+        assert_eq!([at(&e, "C1"), at(&e, "C2")], [n(6.0), n(3.0)]);
+        assert_eq!([at(&e, "D1"), at(&e, "D3")], [n(10.0), n(30.0)]);
+        assert_eq!(
+            at(&e, "C5"),
+            Value::Error(ErrorKind::Ref),
+            "A1 holds no formula"
+        );
+        // Growing: the new cells' readers recalculate.
+        edit(&mut e, &mut s, "A1", "5");
+        assert_eq!([at(&e, "C1"), at(&e, "C2")], [n(15.0), n(5.0)]);
+        assert_eq!(at(&e, "C4"), n(5.0));
+        assert_eq!(at(&e, "D5"), n(50.0));
+        // Shrinking: so do the cells it left.
+        edit(&mut e, &mut s, "A1", "2");
+        assert_eq!([at(&e, "C1"), at(&e, "C2")], [n(3.0), n(2.0)]);
+        assert_eq!([at(&e, "C3"), at(&e, "C4")], [n(0.0), n(0.0)]);
+        assert_eq!(at(&e, "D3"), Value::Empty);
+        // A blocked spill's reference is its error.
+        edit(&mut e, &mut s, "B2", "x");
+        assert_eq!(at(&e, "C1"), Value::Error(ErrorKind::Spill));
+        // One value: the reference is the one cell.
+        edit(&mut e, &mut s, "A1", "1");
+        assert_eq!([at(&e, "C1"), at(&e, "C2")], [n(1.0), n(1.0)]);
+    }
+
+    #[test]
+    fn spills_feed_whole_column_reads_and_chains() {
+        let (mut e, mut s) = sheet(&[
+            ("A1", "=SEQUENCE(1000)"),
+            ("B1", "=SUM(A:A)"),
+            ("C1", "=SORT(A1#,,-1)"),
+            ("D1", "=C1+C1000"),
+            ("E1", "=MATCH(500,A:A,0)"),
+        ]);
+        assert_eq!(at(&e, "B1"), n(500_500.0));
+        assert_eq!(at(&e, "C1"), n(1000.0));
+        assert_eq!(at(&e, "D1"), n(1001.0));
+        assert_eq!(at(&e, "E1"), n(500.0));
+        edit(&mut e, &mut s, "A1", "=SEQUENCE(10)");
+        assert_eq!(at(&e, "B1"), n(55.0));
+        assert_eq!(at(&e, "D1"), n(10.0), "C1000 is empty now");
+        assert_eq!(at(&e, "E1"), Value::Error(ErrorKind::NA));
+        assert_eq!(e.spill_extent(), (10, 3));
+    }
+
+    #[test]
+    fn a_spill_over_its_own_inputs_is_a_cycle() {
+        // It reads the cells it spills into: never settles.
+        let (e, _) = sheet(&[("A1", "=SEQUENCE(COUNT(A2:A5)+2)")]);
+        assert_eq!(at(&e, "A1"), Value::Error(ErrorKind::Circ));
+        let (e, _) = sheet(&[("B1", "=SORT(B2:B4)")]);
+        assert_eq!(at(&e, "B1"), Value::Error(ErrorKind::Circ));
+    }
+
+    #[test]
+    fn implicit_intersection_keeps_one_value() {
+        let (e, _) = sheet(&[
+            ("A1", "1"),
+            ("A2", "2"),
+            ("A3", "3"),
+            ("B2", "=@A1:A3*10"),
+            ("C2", "=A1:A3*10"),
+        ]);
+        assert_eq!(at(&e, "B2"), n(20.0));
+        assert_eq!(e.spill_range(1, 1), None);
+        assert_eq!([at(&e, "C2"), at(&e, "C4")], [n(10.0), n(30.0)]);
     }
 
     #[test]

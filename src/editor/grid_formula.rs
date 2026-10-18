@@ -287,9 +287,50 @@ impl GridDoc {
         is_formula(self.wb.cell(SHEET, r, c))
     }
 
-    /// The computed value of a formula cell.
+    /// The computed value of a formula cell, or of a cell a formula spills
+    /// into.
     pub(super) fn formula_value(&self, r: usize, c: usize) -> Option<&Value> {
-        self.formulas.result(r, c)
+        self.formulas.result(r, c).or_else(|| {
+            (self.formulas.has_spills() && self.wb.cell(SHEET, r, c).is_empty())
+                .then(|| self.formulas.spilled_value(r, c))
+                .flatten()
+        })
+    }
+
+    /// For a cell another formula spills into: that formula's source, which
+    /// the formula bar shows (greyed) for it, as Excel does.
+    pub(super) fn spill_source(&self, r: usize, c: usize) -> Option<String> {
+        if !self.wb.cell(SHEET, r, c).is_empty() {
+            return None;
+        }
+        let (ar, ac) = self.formulas.spilled_from(r, c)?;
+        Some(self.source(ar, ac).into_owned())
+    }
+
+    /// Whether the formula bar shows another cell's formula (the cursor is
+    /// on a spilled value): it's drawn greyed.
+    pub(super) fn bar_ghost(&self) -> bool {
+        let (r, c) = self.view.cursor;
+        self.view.edit.is_none()
+            && self.selection().is_single()
+            && self.spill_source(r, c).is_some()
+    }
+
+    /// The spill range to outline: the one the cursor cell's formula
+    /// spills into, or spills over the cursor cell.
+    pub(super) fn cursor_spill(&self) -> Option<CellRange> {
+        let (r, c) = self.view.cursor;
+        let (ar, ac) = self.formulas.spilled_from(r, c).unwrap_or((r, c));
+        let (r0, c0, r1, c1) = self.formulas.spill_range(ar, ac)?;
+        Some(CellRange { r0, c0, r1, c1 })
+    }
+
+    /// `(rows, cols)` of what's shown: the used area, and any values
+    /// spilled past it.
+    pub(super) fn shown_extent(&self) -> (usize, usize) {
+        let (rows, cols) = self.used();
+        let (sr, sc) = self.formulas.spill_extent();
+        (rows.max(sr), cols.max(sc))
     }
 
     /// Every formula's position and parsed form, before a structural edit.

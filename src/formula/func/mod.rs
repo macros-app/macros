@@ -145,7 +145,24 @@ pub trait Ctx {
     fn lookup_index(&mut self, _range: &RangeRef) -> Option<Arc<lookup::LookupIndex>> {
         None
     }
+
+    /// `A1#`: the range the formula at `(row, col)` spills into (just that
+    /// cell for a formula of one value). An error when the formula's result
+    /// is one (`#SPILL!` while it's blocked), and `#REF!` when the cell holds
+    /// no formula — the default, for hosts without spilling.
+    fn spill_range(
+        &mut self,
+        sheet: Option<&str>,
+        row: usize,
+        col: usize,
+    ) -> Result<RangeRef, ErrorKind> {
+        let _ = (sheet, row, col);
+        Err(ErrorKind::Ref)
+    }
 }
+
+/// The body of a dynamic-array function (see [`FuncDef::array`]).
+pub type ArrayFn = fn(&[Arg], &mut dyn Ctx) -> Result<Array, ErrorKind>;
 
 /// A function's signature and implementation.
 pub struct FuncDef {
@@ -160,6 +177,10 @@ pub struct FuncDef {
     /// The body, its result already converted to a cell value (see
     /// [`args::def`]).
     pub f: fn(&[Arg], &mut dyn Ctx) -> Value,
+    /// For a dynamic-array function (`FILTER`, `SEQUENCE`, …), the body
+    /// returning its whole array, which a formula spills; `f` then gives
+    /// the top-left value. `None` for a function of one value.
+    pub array: Option<ArrayFn>,
     /// Re-run on every recalculation (`NOW`, `RAND`).
     pub volatile: bool,
 }
@@ -228,6 +249,7 @@ pub fn signature(name: &str) -> Option<&'static str> {
 
 pub mod args;
 pub use args::dense_cells;
+mod array;
 mod datefn;
 mod info;
 mod logic;
@@ -250,6 +272,7 @@ const TABLES: &[&[FuncDef]] = &[
     text::FUNCS,
     datefn::FUNCS,
     info::FUNCS,
+    array::FUNCS,
 ];
 
 // ---- helpers shared by the categories ---------------------------------------

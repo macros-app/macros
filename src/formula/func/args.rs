@@ -177,8 +177,26 @@ pub const MANY: usize = usize::MAX;
 /// `def!(volatile "NOW", …)` for one re-run on every recalculation. `body`
 /// is any
 /// `fn(&[Arg], &mut dyn Ctx) -> R` where `R:` [`IntoValue`](super::IntoValue);
-/// the result is converted to a cell value here, once.
+/// the result is converted to a cell value here, once. `def!(array
+/// "SORT", …)` defines a dynamic-array function, whose body returns
+/// `Result<Array, ErrorKind>`.
 macro_rules! def {
+    (array $name:literal, $min:expr, $max:expr, $f:path, $sig:literal) => {
+        $crate::formula::func::FuncDef {
+            name: $name,
+            min_args: $min,
+            max_args: $max,
+            sig: $sig,
+            f: |args: &[$crate::formula::func::Arg], ctx: &mut dyn $crate::formula::func::Ctx| {
+                match $f(args, ctx) {
+                    Ok(a) => a.data.into_iter().next().unwrap_or($crate::formula::value::Value::Empty),
+                    Err(e) => $crate::formula::value::Value::Error(e),
+                }
+            },
+            array: Some($f),
+            volatile: false,
+        }
+    };
     (volatile $name:literal, $min:expr, $max:expr, $f:path, $sig:literal) => {
         $crate::formula::func::args::def!(@ $name, $min, $max, $f, $sig, true)
     };
@@ -194,6 +212,7 @@ macro_rules! def {
             f: |args: &[$crate::formula::func::Arg], ctx: &mut dyn $crate::formula::func::Ctx| {
                 $crate::formula::func::IntoValue::into_value($f(args, ctx))
             },
+            array: None,
             volatile: $volatile,
         }
     };

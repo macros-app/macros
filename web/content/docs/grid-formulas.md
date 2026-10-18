@@ -1,6 +1,6 @@
 ---
 title: Grid formulas
-description: An Excel-compatible formula engine for grid buffers — 150 functions, point mode, completion, dependency tracking, .xlsx files, and formulas written in Scheme.
+description: An Excel-compatible formula engine for grid buffers — 155 functions, dynamic arrays, point mode, completion, dependency tracking, .xlsx files, and formulas written in Scheme.
 ---
 
 # Grid formulas
@@ -11,10 +11,10 @@ Type `=` in a grid cell and you're writing an Excel formula. The engine was writ
 
 ## Excel compatible
 
-- **The same syntax.** `=A1+B1`, `$A$1`, `A:A`, `3:3`, `B2:D9`, `Costs!B2`, `'Q1 Sales'!A:A`, `"text"&A1`, `{1,2;3,4}`, `%`, `^`, and Excel's operator precedence, including its quirks (`=-2^2` is `4`).
-- **The same 150 functions** — math, statistics, logic, lookup, text, dates, and information — with Excel's argument order and edge cases. See [the list](#functions).
+- **The same syntax.** `=A1+B1`, `$A$1`, `A:A`, `3:3`, `B2:D9`, `Costs!B2`, `'Q1 Sales'!A:A`, `"text"&A1`, `{1,2;3,4}`, `%`, `^`, the spill-range reference `A1#` and implicit intersection `@`, and Excel's operator precedence, including its quirks (`=-2^2` is `4`).
+- **The same 155 functions** — math, statistics, logic, lookup, text, dates, and information — with Excel's argument order and edge cases. See [the list](#functions).
 - **The same values.** Numbers are IEEE doubles shown to 15 significant digits, so `=0.1+0.2-0.3` shows `0` just like Excel. `ROUND(2.675, 2)` is `2.68`. Dates are serial numbers from 1900, `TRUE` counts as 1, `"3"+1` is `4`, and comparisons ignore case.
-- **The same errors.** `#DIV/0!`, `#N/A`, `#NAME?`, `#NULL!`, `#NUM!`, `#REF!`, `#VALUE!`, and `#CALC!` behave as in Excel, and `IFERROR`, `IFNA`, and `ISERROR` catch them. A circular reference shows **`#CIRC!`** in the cells involved, rather than a dialog.
+- **The same errors.** `#DIV/0!`, `#N/A`, `#NAME?`, `#NULL!`, `#NUM!`, `#REF!`, `#VALUE!`, `#CALC!`, and `#SPILL!` behave as in Excel, and `IFERROR`, `IFNA`, and `ISERROR` catch them. A circular reference shows **`#CIRC!`** in the cells involved, rather than a dialog.
 - **The same files.** Formulas are stored in Excel's English form (`=SUM(A1:A3)`), so `.xlsx` files open with their formulas intact and save back with results cached — Excel, Numbers, and Google Sheets show values the moment they open the file.
 
 ## Writing formulas
@@ -40,11 +40,21 @@ Type `=` in a grid cell and you're writing an Excel formula. The engine was writ
 
 The formula bar shows a cell's formula; the cell shows its result. Copying, pasting, filling down (<kbd>S-RET</kbd>, <kbd>C-c d</kbd>) or right (<kbd>C-c r</kbd>), filling a selection (<kbd>C-RET</kbd>), and sorting move formulas with their relative references adjusted, and inserting or deleting rows and columns updates every reference that crosses the edit — a reference to a deleted cell becomes `#REF!`. Copied ranges reach other apps as values, and paste back into a grid as formulas.
 
+## Dynamic arrays
+
+A formula whose result is more than one value **spills** it, as in Excel 365: `=SEQUENCE(5)`, `=SORT(A2:A100)`, `=FILTER(A2:C100, C2:C100>10)`, `=UNIQUE(B:B)`, or just `=A2:A10*2` fill the cells below and to the right of the formula.
+
+- **Spilled cells hold no formula.** They show values that other formulas read like any cell; selecting one shows the formula it came from greyed in the formula bar. Selecting the formula's cell (or any cell of its spill) outlines the whole spill range.
+- **`#SPILL!`.** If the range a result needs isn't empty — a value, another formula, or another formula's spill is in the way — the formula shows `#SPILL!` until the range is cleared, then spills again by itself.
+- **`A1#`** refers to the whole range the formula in `A1` spills into, however big it currently is: `=SUM(D2#)`, `=ROWS(SORT(A:A))`, `=COUNTIF(D2#,">3")`. It follows the spill as it grows and shrinks.
+- **`@`** asks for one value instead: `=@A1:A10` is the cell of `A1:A10` in the formula's own row, as formulas behaved before dynamic arrays.
+- **Files from older Excel versions** open as they computed there: wherever such a formula took one value from a range, it gets the `@` that Excel 365 also shows (`=@A2:A9*2`). Saving writes it back in its old form.
+
 Recalculation follows a dependency graph, so an edit only recomputes the formulas downstream of it: 100,000 formulas recalculate in about 50 ms, and an edit feeding 10,000 dependents in about 5 ms.
 
 ## Saving
 
-- **`.xlsx`** stores formulas with their results, and the grid's formatting: bold, the palette's text and fill colors, and number formats. Files that hold something the engine can't write back — charts, other cell styles such as borders, italics or other colors, extra sheets — open **protected**: you can view and edit them, and save a copy with `:w copy.xlsx`, but the original is never overwritten and silently damaged.
+- **`.xlsx`** stores formulas with their results, and the grid's formatting: bold, the palette's text and fill colors, and number formats. Files that hold something the engine can't write back — charts, other cell styles such as borders, italics or other colors, extra sheets — open **protected**: you can view and edit them, and save a copy with `:w copy.xlsx`, but the original is never overwritten and silently damaged. Dynamic-array formulas are saved the way Excel 365 saves them, with their spilled values cached, so Excel opens them as dynamic arrays and other apps show the values.
 - **CSV can't store formulas or formatting**, so a CSV never gets formula text written into it, and bold, colors and number formats are never silently dropped. Formulas in a CSV evaluate normally while you work; when you save a CSV that has formulas or any formatting, <kbd>C-x C-s</kbd> becomes **Save As `.xlsx`** (the prompt says which) and the buffer then visits the new workbook, formatting included. The original CSV is left untouched. Remove every formula and all formatting (<kbd>M-o d</kbd>) and the buffer saves as plain CSV again.
 
 ## Functions written in Scheme
@@ -82,6 +92,7 @@ From Scheme, `(grid-formula)` reads the cursor cell's formula, `(grid-current-va
 | Conditional | `SUMIF` `SUMIFS` `COUNTIF` `COUNTIFS` `AVERAGEIF` `AVERAGEIFS` `MAXIFS` `MINIFS` |
 | Statistics | `AVERAGE` `AVERAGEA` `COUNT` `COUNTA` `COUNTBLANK` `MIN` `MAX` `MINA` `MAXA` `MEDIAN` `MODE` `MODE.SNGL` `STDEV` `STDEV.S` `STDEV.P` `STDEVP` `VAR` `VAR.S` `VAR.P` `VARP` `LARGE` `SMALL` `RANK` `RANK.EQ` `RANK.AVG` `PERCENTILE` `PERCENTILE.INC` `QUARTILE` `QUARTILE.INC` |
 | Lookup | `VLOOKUP` `HLOOKUP` `XLOOKUP` `MATCH` `INDEX` `ROW` `COLUMN` `ROWS` `COLUMNS` |
+| Dynamic arrays | `FILTER` `SORT` `SORTBY` `UNIQUE` `SEQUENCE` |
 | Text | `LEN` `LEFT` `RIGHT` `MID` `UPPER` `LOWER` `PROPER` `TRIM` `CLEAN` `CONCAT` `CONCATENATE` `TEXTJOIN` `SUBSTITUTE` `REPLACE` `FIND` `SEARCH` `VALUE` `NUMBERVALUE` `TEXT` `FIXED` `DOLLAR` `REPT` `EXACT` `CHAR` `CODE` |
 | Date & time | `DATE` `TIME` `TODAY` `NOW` `YEAR` `MONTH` `DAY` `HOUR` `MINUTE` `SECOND` `WEEKDAY` `WEEKNUM` `EDATE` `EOMONTH` `DATEDIF` `DAYS` `NETWORKDAYS` `WORKDAY` `DATEVALUE` `TIMEVALUE` `YEARFRAC` |
 | Information | `ISBLANK` `ISNUMBER` `ISTEXT` `ISNONTEXT` `ISLOGICAL` `ISERROR` `ISERR` `ISNA` `ISEVEN` `ISODD` `NA` `ERROR.TYPE` `TYPE` `N` `T` |
@@ -90,7 +101,7 @@ From Scheme, `(grid-formula)` reads the cursor cell's formula, `(grid-current-va
 
 The remaining few percent, mostly newer or rarer Excel features:
 
-- **Dynamic arrays and spilling** — `FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`. Array constants and array-taking functions like `SUMPRODUCT` do work.
+- **Other dynamic-array functions** — `RANDARRAY`, `TRANSPOSE`, `XMATCH`, `TAKE`, `VSTACK` and the like. Functions of one value don't spill element by element either: `=ABS(A1:A3)` shows one value, as before Excel 365 (operators do spill: `=A1:A3*2`). `A1#` reads the current sheet only.
 - **`INDIRECT` and `OFFSET`**, `LAMBDA` and `LET`, structured table references (`Table1[Col]`), and data tables.
 - **Iterative calculation** — circular references are always `#CIRC!`.
 - **Localized** function names and separators; formulas use Excel's English form, as Excel stores them.

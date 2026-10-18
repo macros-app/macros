@@ -312,11 +312,22 @@ fn registry_is_consistent() {
         ("COUNTIFS", 2, usize::MAX),
         ("NOW", 0, 0),
         ("ROW", 0, 1),
+        ("FILTER", 2, 3),
+        ("SORT", 1, 4),
+        ("SORTBY", 2, usize::MAX),
+        ("UNIQUE", 1, 3),
+        ("SEQUENCE", 1, 4),
     ] {
         let f = super::lookup(name).unwrap();
         assert_eq!((f.min_args, f.max_args), (min, max), "{name}");
     }
     assert!(super::lookup("stdev.p").is_some());
+    // Exactly the dynamic-array functions return whole arrays.
+    let arrays: Vec<_> = super::all()
+        .filter(|f| f.array.is_some())
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(arrays, ["FILTER", "SORT", "SORTBY", "UNIQUE", "SEQUENCE"]);
     let volatile: Vec<_> = super::all()
         .filter(|f| f.volatile)
         .map(|f| f.name)

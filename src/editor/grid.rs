@@ -28,6 +28,7 @@ use crate::grid::cellfmt::{self, CellFmt, CellFormats, NumCode};
 use crate::grid::cmd::{Dir, GridCmd, GridInvocation, GridOp};
 use crate::grid::infer::ColType;
 use crate::grid::model::{CellsSnapshot, Change, Workbook};
+use crate::grid::scrollbar::{self, BarHit, ScrollBar};
 use crate::grid::sidecar::Sidecar;
 use crate::grid::style::RuleTest;
 use crate::grid::view::{
@@ -89,8 +90,10 @@ pub(super) struct GridUi {
     pub extensions: Vec<String>,
     /// Painted geometry per grid pane (set by `GridElement` each frame).
     pub geom: HashMap<usize, GridGeom>,
-    /// A mouse drag (selection or header resize) on a grid pane.
+    /// A mouse drag (selection, header resize or scrollbar) on a grid pane.
     pub drag: Option<GridDrag>,
+    /// The scrollbar under the pointer (pane and axis), drawn highlighted.
+    pub bar_hover: Option<(usize, Axis)>,
     /// The echo the grid last showed (formula-bar fallback), so it only
     /// replaces its own text, never someone else's message.
     pub echo: Option<SharedString>,
@@ -114,6 +117,7 @@ impl Default for GridUi {
                 .to_vec(),
             geom: HashMap::new(),
             drag: None,
+            bar_hover: None,
             echo: None,
             opts: GridOptions::default(),
             cell_popup: None,
@@ -712,12 +716,15 @@ impl GridDoc {
         (self.wb.used_rows(SHEET), self.wb.used_cols(SHEET))
     }
 
-    /// What a cell shows: a formula's result, anything else as stored. (For
-    /// the text to *edit*, see [`GridDoc::source`].)
+    /// What a cell shows: a formula's result, a value spilled into it,
+    /// anything else as stored. (For the text to *edit*, see
+    /// [`GridDoc::source`].)
     pub fn cell(&self, r: usize, c: usize) -> &str {
         let raw = self.wb.cell(SHEET, r, c);
         if crate::formula::engine::is_formula(raw) {
             self.formulas.shown(r, c).unwrap_or("#CALC!")
+        } else if raw.is_empty() && self.formulas.has_spills() {
+            self.formulas.spilled_shown(r, c).unwrap_or(raw)
         } else {
             raw
         }
@@ -1157,7 +1164,10 @@ impl GridDoc {
             return (range_name(&sel), String::new());
         }
         let (r, c) = self.view.cursor;
-        (self.name_box_for(r, c), self.source(r, c).to_string())
+        let content = self
+            .spill_source(r, c)
+            .unwrap_or_else(|| self.source(r, c).into_owned());
+        (self.name_box_for(r, c), content)
     }
 
     fn name_box_for(&self, r: usize, c: usize) -> String {
@@ -1864,6 +1874,9 @@ pub(super) struct GridGeom {
     pub bar_text_x: f32,
     pub bar_shift: f32,
     pub bar_char_w: f32,
+    /// The scrollbars as painted (vertical, horizontal), when shown.
+    pub vbar: Option<ScrollBar>,
+    pub hbar: Option<ScrollBar>,
 }
 
 impl GridGeom {
@@ -1873,6 +1886,29 @@ impl GridGeom {
             f32::from(self.origin.x) + self.header_w,
             f32::from(self.origin.y) + self.bar_h + self.header_h,
         )
+    }
+
+    /// The scrollbar under `pos` (its band along the cells area's right or
+    /// bottom edge), and where along it the point falls.
+    pub fn bar_at(&self, pos: Point<Pixels>) -> Option<(Axis, ScrollBar, f32)> {
+        let (x, y) = (f32::from(pos.x), f32::from(pos.y));
+        let right = f32::from(self.origin.x) + self.width;
+        let bottom = f32::from(self.origin.y) + self.height;
+        let along =
+            |b: &ScrollBar, at: f32| (b.track_start..b.track_start + b.track_len).contains(&at);
+        if let Some(b) = self.vbar
+            && (right - scrollbar::HOT_WIDTH..right).contains(&x)
+            && along(&b, y)
+        {
+            return Some((Axis::Rows, b, y));
+        }
+        if let Some(b) = self.hbar
+            && (bottom - scrollbar::HOT_WIDTH..bottom).contains(&y)
+            && along(&b, x)
+        {
+            return Some((Axis::Cols, b, x));
+        }
+        None
     }
 }
 
@@ -1889,6 +1925,15 @@ pub(super) enum GridDrag {
         idx: usize,
         start: f32,
         size: f64,
+    },
+    /// Dragging a scrollbar thumb: grabbed `grab` px past its start. `bar`
+    /// is the bar as it was on the press; its extent stays fixed until the
+    /// release (see `crate::grid::scrollbar`).
+    Scroll {
+        pane: usize,
+        axis: Axis,
+        grab: f32,
+        bar: ScrollBar,
     },
 }
 
@@ -4319,6 +4364,9 @@ impl Editor {
         if pane != self.selected_pane {
             self.select_pane(pane, cx);
         }
+        if self.grid_bar_down(pane, pos, cx) {
+            return true;
+        }
         let Some(hit) = self.grid_hit(pane, pos) else {
             return true;
         };
@@ -4468,12 +4516,68 @@ impl Editor {
         true
     }
 
-    /// Mouse motion while a grid drag is in progress.
+    /// A press on a scrollbar: the thumb starts a drag, the track pages
+    /// toward the press. Only the view scrolls; the cursor stays put (as
+    /// with the wheel), and an open cell edit stays open.
+    fn grid_bar_down(&mut self, pane: usize, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some((axis, bar, at)) = self.grid_ui.geom.get(&pane).and_then(|geo| geo.bar_at(pos))
+        else {
+            return false;
+        };
+        match bar.hit(at) {
+            BarHit::Thumb(grab) => {
+                self.grid_ui.drag = Some(GridDrag::Scroll {
+                    pane,
+                    axis,
+                    grab,
+                    bar,
+                });
+            }
+            hit => self.grid_set_scroll(pane, axis, bar.page(hit == BarHit::After)),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Scroll `pane` along `axis` to `offset` (unzoomed px).
+    fn grid_set_scroll(&mut self, pane: usize, axis: Axis, offset: f64) {
+        if let Some(g) = self.pane_grid_mut(pane) {
+            match axis {
+                Axis::Rows => g.view.scroll_y = offset,
+                Axis::Cols => g.view.scroll_x = offset,
+            }
+            g.view.clamp_scroll();
+        }
+    }
+
+    /// Mouse motion: a grid drag in progress, or the pointer moving over
+    /// (or off) a scrollbar. Returns whether a drag took it.
     pub(super) fn grid_mouse_move(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
         let Some(drag) = self.grid_ui.drag else {
+            let hover = self.pane_at_position(pos).and_then(|pane| {
+                let (axis, ..) = self.grid_ui.geom.get(&pane)?.bar_at(pos)?;
+                self.pane_grid(pane).map(|_| (pane, axis))
+            });
+            if hover != self.grid_ui.bar_hover {
+                self.grid_ui.bar_hover = hover;
+                cx.notify();
+            }
             return false;
         };
         match drag {
+            GridDrag::Scroll {
+                pane,
+                axis,
+                grab,
+                bar,
+            } => {
+                let at = match axis {
+                    Axis::Rows => f32::from(pos.y),
+                    Axis::Cols => f32::from(pos.x),
+                };
+                self.grid_set_scroll(pane, axis, bar.offset_at(at - grab));
+                cx.notify();
+            }
             GridDrag::Select { pane } => {
                 let Some(hit) = self.grid_hit(pane, pos) else {
                     return true;
@@ -4533,11 +4637,16 @@ impl Editor {
         true
     }
 
-    /// Mouse release: finish a resize (applied now, as one undo step).
+    /// Mouse release: finish a resize (applied now, as one undo step) or a
+    /// scrollbar drag.
     pub(super) fn grid_mouse_up(&mut self, cx: &mut Context<Self>) {
         let Some(drag) = self.grid_ui.drag.take() else {
             return;
         };
+        if let GridDrag::Scroll { .. } = drag {
+            // The extent is recomputed from the new offset.
+            cx.notify();
+        }
         if let GridDrag::Resize {
             pane,
             axis,

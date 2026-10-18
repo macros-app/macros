@@ -20,6 +20,11 @@
 //!   `#CALC!`, a parse failure's `#ERROR!` — anything Excel 2007 doesn't
 //!   know) cache as 0 instead; the workbook asks for a full recalculation on
 //!   load, so Excel replaces them with its own verdict at once.
+//! - A dynamic-array formula is written as Excel 365 writes one: an array
+//!   formula over the range it spills into, marked with the dynamic-array
+//!   cell metadata (`cm="1"`, defined in `xl/metadata.xml`); the spilled
+//!   cells are plain cached values. Excel before 365 reads it as an
+//!   ordinary array formula.
 //!
 //! The output depends only on the input: no timestamps, so saving the same
 //! cells twice gives identical bytes. Cells are sorted row-major (a later
@@ -41,12 +46,15 @@ pub struct WriteCell<'a> {
     pub col: usize,
     pub value: &'a XValue,
     pub formula: Option<&'a str>,
+    /// For a dynamic-array formula, the range it spills into (`B2:B9`; its
+    /// own cell when it shows one value).
+    pub array: Option<&'a str>,
     pub style: Option<&'a XStyle>,
 }
 
 /// Error values every Excel version reads; anything else is written as
 /// described in the module docs.
-const EXCEL_ERRORS: [&str; 8] = [
+const EXCEL_ERRORS: [&str; 9] = [
     "#NULL!",
     "#DIV/0!",
     "#VALUE!",
@@ -55,6 +63,7 @@ const EXCEL_ERRORS: [&str; 8] = [
     "#NUM!",
     "#N/A",
     "#GETTING_DATA",
+    "#SPILL!",
 ];
 
 const DECL: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
@@ -68,8 +77,19 @@ pub fn write<'a>(
     cells: impl IntoIterator<Item = WriteCell<'a>>,
     date1904: bool,
 ) -> Vec<u8> {
+    let mut styles = Styles::default();
+    let (sheet, dynamic) = sheet_xml(cells, &mut styles);
     let mut z = zip::Writer::new();
-    z.add("[Content_Types].xml", CONTENT_TYPES.as_bytes());
+    // The dynamic-array metadata part, only when a formula uses it.
+    let (types, rels) = if dynamic {
+        (
+            CONTENT_TYPES.replace("</Types>", METADATA_TYPE),
+            WORKBOOK_RELS.replace("</Relationships>", METADATA_REL),
+        )
+    } else {
+        (CONTENT_TYPES.to_string(), WORKBOOK_RELS.to_string())
+    };
+    z.add("[Content_Types].xml", types.as_bytes());
     z.add("_rels/.rels", ROOT_RELS.as_bytes());
     z.add("docProps/app.xml", APP.as_bytes());
     z.add("docProps/core.xml", CORE.as_bytes());
@@ -77,13 +97,41 @@ pub fn write<'a>(
         "xl/workbook.xml",
         workbook_xml(sheet_name, date1904).as_bytes(),
     );
-    z.add("xl/_rels/workbook.xml.rels", WORKBOOK_RELS.as_bytes());
-    let mut styles = Styles::default();
-    let sheet = sheet_xml(cells, &mut styles);
+    z.add("xl/_rels/workbook.xml.rels", rels.as_bytes());
     z.add("xl/styles.xml", styles.xml().as_bytes());
     z.add("xl/worksheets/sheet1.xml", sheet.as_bytes());
+    if dynamic {
+        z.add("xl/metadata.xml", METADATA.as_bytes());
+    }
     z.finish()
 }
+
+/// The content type and workbook relationship of `xl/metadata.xml`, each
+/// closing its list.
+const METADATA_TYPE: &str = concat!(
+    "<Override PartName=\"/xl/metadata.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml\"/>",
+    "</Types>"
+);
+const METADATA_REL: &str = concat!(
+    "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata\" Target=\"metadata.xml\"/>",
+    "</Relationships>"
+);
+
+/// Excel's dynamic-array cell metadata: cell metadata record 1 (`cm="1"`)
+/// marks a formula as a dynamic array, exactly as Excel 365 writes it.
+const METADATA: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+    "<metadata xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" ",
+    "xmlns:xda=\"http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray\">",
+    "<metadataTypes count=\"1\"><metadataType name=\"XLDAPR\" minSupportedVersion=\"120000\" ",
+    "copy=\"1\" pasteAll=\"1\" pasteValues=\"1\" merge=\"1\" splitFirst=\"1\" rowColShift=\"1\" ",
+    "clearFormats=\"1\" clearComments=\"1\" assign=\"1\" coerce=\"1\" cellMeta=\"1\"/></metadataTypes>",
+    "<futureMetadata name=\"XLDAPR\" count=\"1\"><bk><extLst>",
+    "<ext uri=\"{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}\">",
+    "<xda:dynamicArrayProperties fDynamic=\"1\" fCollapsed=\"0\"/></ext></extLst></bk></futureMetadata>",
+    "<cellMetadata count=\"1\"><bk><rc t=\"1\" v=\"0\"/></bk></cellMetadata>",
+    "</metadata>"
+);
 
 const CONTENT_TYPES: &str = concat!(
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
@@ -316,7 +364,11 @@ fn needs_preserve(s: &str) -> bool {
     s.starts_with(ws) || s.ends_with(ws) || s.contains('\n')
 }
 
-fn sheet_xml<'a>(cells: impl IntoIterator<Item = WriteCell<'a>>, styles: &mut Styles) -> String {
+/// The worksheet part, and whether a dynamic-array formula is in it.
+fn sheet_xml<'a>(
+    cells: impl IntoIterator<Item = WriteCell<'a>>,
+    styles: &mut Styles,
+) -> (String, bool) {
     let mut cells: Vec<WriteCell> = cells
         .into_iter()
         .filter(|c| {
@@ -352,8 +404,11 @@ fn sheet_xml<'a>(cells: impl IntoIterator<Item = WriteCell<'a>>, styles: &mut St
     let _ = write!(s, "<dimension ref=\"{dim}\"/>");
     if cells.is_empty() {
         s.push_str("<sheetData/></worksheet>");
-        return s;
+        return (s, false);
     }
+    let dynamic = cells
+        .iter()
+        .any(|c| c.formula.is_some() && c.array.is_some());
     s.push_str("<sheetData>");
     let mut row = None;
     for c in &cells {
@@ -367,7 +422,7 @@ fn sheet_xml<'a>(cells: impl IntoIterator<Item = WriteCell<'a>>, styles: &mut St
         push_cell(&mut s, c, styles.id(c.style));
     }
     s.push_str("</row></sheetData></worksheet>");
-    s
+    (s, dynamic)
 }
 
 fn push_cell(s: &mut String, c: &WriteCell, style: usize) {
@@ -421,7 +476,16 @@ fn push_cell(s: &mut String, c: &WriteCell, style: usize) {
         XValue::Error(_) => ("", Some("0".into())),
         XValue::Empty => ("", None),
     };
-    let _ = write!(s, "<c {r}{typ}><f>");
+    match c.array {
+        Some(range) => {
+            let _ = write!(s, "<c {r}{typ} cm=\"1\"><f t=\"array\" ref=\"");
+            escape_attr(s, range);
+            s.push_str("\">");
+        }
+        None => {
+            let _ = write!(s, "<c {r}{typ}><f>");
+        }
+    }
     escape_xstring(s, f);
     s.push_str("</f>");
     if let Some(v) = cached {
@@ -441,6 +505,7 @@ mod tests {
             col,
             value,
             formula: None,
+            array: None,
             style: None,
         }
     }
@@ -546,6 +611,7 @@ mod tests {
             col: 1,
             value,
             formula: Some(formula),
+            array: None,
             style: None,
         };
         let cells = [
@@ -575,6 +641,7 @@ mod tests {
                 col: 0,
                 value: &circ,
                 formula: Some("A1"),
+                array: None,
                 style: None,
             },
             WriteCell {
@@ -582,6 +649,7 @@ mod tests {
                 col: 0,
                 value: &calc,
                 formula: Some("SCHEME(1)"),
+                array: None,
                 style: None,
             },
             WriteCell {
@@ -589,6 +657,7 @@ mod tests {
                 col: 0,
                 value: &nan,
                 formula: Some("0/0"),
+                array: None,
                 style: None,
             },
             cell(3, 0, &inf),
@@ -625,10 +694,11 @@ mod tests {
             pos,
             [(0, 1, a.clone()), (5, 0, c.clone()), (5, 2, a.clone())]
         );
-        let xml = sheet_xml(cells.iter().copied(), &mut Styles::default());
+        let (xml, _) = sheet_xml(cells.iter().copied(), &mut Styles::default());
         assert!(xml.contains("<dimension ref=\"A1:C6\"/>"), "{xml}");
         assert!(
             sheet_xml(std::iter::empty(), &mut Styles::default())
+                .0
                 .contains("<dimension ref=\"A1\"/><sheetData/>")
         );
         assert!(round_trip(&[]).is_empty());
@@ -696,6 +766,7 @@ mod tests {
             col: 0,
             value,
             formula: None,
+            array: None,
             style,
         };
         let cells = [

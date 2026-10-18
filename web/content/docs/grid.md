@@ -10,7 +10,7 @@ Open a `.csv`, `.tsv`, `.tab`, `.psv`, or `.xlsx` file — with <kbd>C-x C-f</kb
 ![A CSV of sales orders open as a grid: auto-fitted columns, prices formatted as currency, discounts as percentages, pending and late statuses colored, and a selected range with its count, sum, average, min and max in the mode line.](/screenshots/grid-overview.png)
 
 - **Your keys.** The grid uses the bindings you already know from the rest of the editor (Emacs, evil, or helix), plus your own rebinds, so you don't have to learn a spreadsheet's shortcuts.
-- **Infinite.** Scroll or move past the last row and column; the grid keeps going, and empty space you visit never reaches the file.
+- **Infinite.** Scroll or move past the last row and column; the grid keeps going, and empty space you visit never reaches the file. Drag a scrollbar's thumb, or click its track to page; neither moves the cursor.
 - **Byte-exact saves.** Rows you didn't touch are written back exactly as they were — quoting, line endings, encoding, BOM. Values are stored exactly as typed: `007` stays `007`, `12345678901234567890` never becomes `1.23E+19`.
 - **Fast on big files.** Large files show their first rows at once and finish loading in the background; repeated values are stored once.
 - **Formulas.** Type `=SUM(B2:B9)` in a cell. See [Grid formulas](/docs/grid-formulas).
