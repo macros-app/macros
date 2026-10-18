@@ -186,6 +186,21 @@ pub enum GridCmd {
     /// One decimal place more / fewer in the selection's number format.
     IncreaseDecimals,
     DecreaseDecimals,
+    // Helix multi-cursor (`src/editor/grid_cursors.rs`)
+    /// `C`: a cursor on the cell below each cursor; the new one below the
+    /// primary becomes the primary (helix's copy-selection-on-next-line).
+    AddCursorBelow,
+    /// `M-C`: the same, above.
+    AddCursorAbove,
+    /// `,`: drop every cursor but the primary.
+    KeepPrimaryCursor,
+    /// `M-,`: drop the primary cursor; the next one becomes the primary.
+    RemovePrimaryCursor,
+    /// `)` / `(`: make the next / previous cursor (reading order) primary.
+    RotateCursorsForward,
+    RotateCursorsBackward,
+    /// `s`: put a cursor on every cell of the selection matching a regex.
+    SelectMatching,
 }
 
 /// One run of a grid command: the command and the prefix typed before the
@@ -330,6 +345,13 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-format-text", FormatText),
         ("grid-increase-decimals", IncreaseDecimals),
         ("grid-decrease-decimals", DecreaseDecimals),
+        ("grid-add-cursor-below", AddCursorBelow),
+        ("grid-add-cursor-above", AddCursorAbove),
+        ("grid-keep-primary-cursor", KeepPrimaryCursor),
+        ("grid-remove-primary-cursor", RemovePrimaryCursor),
+        ("grid-rotate-cursors-forward", RotateCursorsForward),
+        ("grid-rotate-cursors-backward", RotateCursorsBackward),
+        ("grid-select-matching", SelectMatching),
     ]
 };
 
@@ -388,6 +410,42 @@ impl GridCmd {
     pub fn prefix_is_flag(self) -> bool {
         use GridCmd::*;
         matches!(self, Clear | SortAscending | SortDescending | CopyDown)
+    }
+
+    /// Whether helix's extra cursors survive this command. Motions move them
+    /// all, edits spread to them, and view tweaks leave them be; anything
+    /// else (a jump, a structural edit, undo, Escape) keeps only the primary.
+    pub fn keeps_cursors(self) -> bool {
+        use GridCmd::*;
+        matches!(
+            self,
+            Move(_)
+                | EditStart
+                | EditEnd
+                | EditReplace
+                | Clear
+                | Cut
+                | Yank
+                | Repeat
+                | WidenColumn
+                | NarrowColumn
+                | AutofitColumn
+                | AutofitColumnFull
+                | TallerRow
+                | ShorterRow
+                | ZoomIn
+                | ZoomOut
+                | ZoomReset
+                | FormulaBar
+                | ShowFormulas
+                | Recenter
+                | AddCursorBelow
+                | AddCursorAbove
+                | RemovePrimaryCursor
+                | RotateCursorsForward
+                | RotateCursorsBackward
+                | SelectMatching
+        )
     }
 }
 

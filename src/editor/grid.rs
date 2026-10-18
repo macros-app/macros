@@ -31,7 +31,7 @@ use crate::grid::model::{CellsSnapshot, Change, Workbook};
 use crate::grid::sidecar::Sidecar;
 use crate::grid::style::RuleTest;
 use crate::grid::view::{
-    self, CellEdit, CellRange, GridView, Pos, SelKind, cell_name, parse_address, range_name,
+    self, CellEdit, CellRange, GridView, Pos, SelKind, Spread, cell_name, parse_address, range_name,
 };
 
 /// The grid has a single sheet until `.xlsx` support lands.
@@ -1384,6 +1384,9 @@ impl GridDoc {
         env: &CmdEnv,
     ) -> Result<Outcome, Cow<'static, str>> {
         use GridCmd::*;
+        if let Some(done) = self.apply_cursors(cmd) {
+            return done.map(|()| Outcome::default());
+        }
         let (r, c) = self.view.cursor;
         let (rows, cols) = self.used();
         match cmd {
@@ -1463,11 +1466,17 @@ impl GridDoc {
             EditStart | EditEnd => {
                 let text = self.source(r, c).to_string();
                 self.view.edit = Some(CellEdit::new(r, c, &text, text.clone(), cmd == EditEnd));
+                self.view.spread = if cmd == EditEnd {
+                    Spread::Append
+                } else {
+                    Spread::Insert
+                };
                 self.view.reveal_cursor();
             }
             EditReplace => {
                 let text = self.source(r, c).to_string();
                 self.view.edit = Some(CellEdit::new(r, c, &text, String::new(), true));
+                self.view.spread = Spread::Replace;
                 self.view.reveal_cursor();
             }
             Clear => self.clear_selection(env.flag),
@@ -1561,7 +1570,14 @@ impl GridDoc {
             | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
             | IncreaseDecimals | DecreaseDecimals | TracePrecedents | TraceDependents
             | GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
-            | Recalculate => {}
+            | Recalculate | SelectMatching => {}
+            // [`Self::apply_cursors`]'s.
+            AddCursorBelow
+            | AddCursorAbove
+            | KeepPrimaryCursor
+            | RemovePrimaryCursor
+            | RotateCursorsForward
+            | RotateCursorsBackward => {}
         }
         Ok(Outcome::default())
     }
@@ -1606,11 +1622,18 @@ impl GridDoc {
             sel.c0 = 0;
             sel.c1 = self.used().1.saturating_sub(1);
         }
-        let edits: Vec<(usize, usize, String)> = self
+        let mut edits: Vec<(usize, usize, String)> = self
             .visible_cells(&sel)
             .into_iter()
             .map(|(r, c)| (r, c, String::new()))
             .collect();
+        // Helix's extra cursors are cleared with it.
+        edits.extend(
+            self.view
+                .cursors
+                .iter()
+                .map(|&(r, c)| (r, c, String::new())),
+        );
         if !edits.is_empty() {
             self.set_cells_tracked(&edits);
         }
@@ -2867,6 +2890,9 @@ impl Editor {
         if cmd != Recenter {
             g.recenter_phase = 0;
         }
+        if !cmd.keeps_cursors() {
+            g.view.cursors.clear();
+        }
         let opens_editor = matches!(cmd, EditStart | EditEnd | EditReplace | EditPopup);
         if g.loading.is_some() && (cmd.edits() || opens_editor) {
             self.echo("Still loading — editing is available once it finishes", cx);
@@ -2891,6 +2917,7 @@ impl Editor {
         }
         match cmd {
             EditPopup => return self.grid_cell_popup_open(cx),
+            SelectMatching => return self.grid_select_matching_prompt(cx),
             Cut => {
                 self.grid_copy_selection(cx);
                 self.grid_command(Clear, cx);
@@ -3165,14 +3192,13 @@ impl Editor {
         let Some(edit) = g.view.edit.take() else {
             return;
         };
-        if edit.text != edit.original {
-            g.set_cells_tracked(&[(edit.row, edit.col, edit.text.clone())]);
-            g.last_repeat = Some(RepeatOp::SetText(edit.text));
+        // With helix's extra cursors, every cursor's cell (one undo step).
+        let writes = g.commit_writes(&edit);
+        if !writes.is_empty() {
+            g.set_cells_tracked(&writes);
+            g.last_repeat = Some(RepeatOp::SetText(edit.text.clone()));
         }
-        let r = edit.row.saturating_add_signed(dr);
-        let c = edit.col.saturating_add_signed(dc);
-        g.deselect();
-        g.move_to(r, c, false);
+        g.move_after_commit(&edit, dr, dc);
         self.grid_after(cx);
     }
 
@@ -3231,6 +3257,7 @@ impl Editor {
         let original = g.source(r, c).to_string();
         g.deselect();
         g.view.edit = Some(CellEdit::new(r, c, &original, text.to_string(), true));
+        g.view.spread = Spread::Replace;
         g.view.reveal_cursor();
         self.grid_after(cx);
     }
@@ -4230,6 +4257,10 @@ impl Editor {
             return true;
         };
         let (rows, cols) = g.used();
+        // A click elsewhere is a new selection: helix's extra cursors go.
+        if !keep_edit && !matches!(hit, GridHit::ColBorder(_) | GridHit::RowBorder(_)) {
+            g.view.cursors.clear();
+        }
         match hit {
             GridHit::NameBox => {
                 self.grid_command(GridCmd::Goto, cx);
@@ -4240,6 +4271,7 @@ impl Editor {
                     let (r, c) = g.view.cursor;
                     let text = g.source(r, c).to_string();
                     g.view.edit = Some(CellEdit::new(r, c, &text, text.clone(), true));
+                    g.view.spread = Spread::Append;
                 }
                 if let (Some(e), Some(geo)) = (g.view.edit.as_mut(), geo) {
                     e.in_bar = true;

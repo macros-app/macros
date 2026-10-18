@@ -2599,6 +2599,111 @@ fn helix_grid_format_keys(cx: &mut TestAppContext) {
     assert_eq!(shown(&ed, cx, 1, 1), None);
 }
 
+/// A grid under helix bindings.
+fn setup_helix(cx: &mut TestAppContext, csv: &str) -> Entity<Editor> {
+    let (ed, _) = setup(cx, csv, true);
+    ed.update(cx, |e, cx| e.run_script_blocking("(helix-mode)", cx));
+    settle(&ed, cx);
+    assert!(ed.read_with(cx, |e, _| e.modal_helix));
+    ed
+}
+
+fn extra_cursors(editor: &Entity<Editor>, cx: &mut TestAppContext) -> Vec<(usize, usize)> {
+    editor.read_with(cx, |e, _| {
+        let mut c = e.active.grid.as_ref().unwrap().view.cursors.clone();
+        c.sort_unstable();
+        c
+    })
+}
+
+fn column_b(editor: &Entity<Editor>, cx: &mut TestAppContext) -> Vec<String> {
+    (1..4).map(|r| cell(editor, cx, r, 1)).collect()
+}
+
+#[gpui::test]
+fn helix_multi_cursor_change_spreads_and_undoes_as_one(cx: &mut TestAppContext) {
+    let ed = setup_helix(cx, "k,v\n1,x\n2,y\n3,z\n");
+    keys(&ed, cx, "j l shift-c shift-c");
+    assert_eq!(cursor(&ed, cx), (3, 1), "the newest cursor is the primary");
+    assert_eq!(extra_cursors(&ed, cx), vec![(1, 1), (2, 1)]);
+    // Typed text shows in every cursor's cell before the commit.
+    keys(&ed, cx, "c n e w");
+    ed.read_with(cx, |e, _| {
+        let g = e.active.grid.as_ref().unwrap();
+        let edit = g.view.edit.as_ref().expect("editing");
+        assert_eq!(g.spread_text(edit, (1, 1)), "new");
+    });
+    keys(&ed, cx, "escape");
+    assert_eq!(column_b(&ed, cx), ["new", "new", "new"]);
+    assert_eq!(
+        extra_cursors(&ed, cx).len(),
+        2,
+        "cursors stay after a commit"
+    );
+    // `a` / `i` add to each cell's own text.
+    keys(&ed, cx, "a ! escape i > escape");
+    assert_eq!(column_b(&ed, cx), [">new!", ">new!", ">new!"]);
+    // `,` keeps only the primary.
+    keys(&ed, cx, ",");
+    assert!(extra_cursors(&ed, cx).is_empty());
+    assert_eq!(cursor(&ed, cx), (3, 1));
+    // Each edit was one undo step.
+    keys(&ed, cx, "u u");
+    assert_eq!(column_b(&ed, cx), ["new", "new", "new"]);
+    keys(&ed, cx, "u");
+    assert_eq!(column_b(&ed, cx), ["x", "y", "z"]);
+}
+
+#[gpui::test]
+fn helix_multi_cursor_motion_rotate_delete_and_escape(cx: &mut TestAppContext) {
+    let ed = setup_helix(cx, "k,v\n1,x\n2,y\n3,z\n");
+    keys(&ed, cx, "j j alt-shift-c");
+    assert_eq!(
+        cursor(&ed, cx),
+        (1, 0),
+        "M-C adds above; that one is primary"
+    );
+    assert_eq!(extra_cursors(&ed, cx), vec![(2, 0)]);
+    // Motions move every cursor.
+    keys(&ed, cx, "l");
+    assert_eq!(cursor(&ed, cx), (1, 1));
+    assert_eq!(extra_cursors(&ed, cx), vec![(2, 1)]);
+    keys(&ed, cx, ")");
+    assert_eq!(cursor(&ed, cx), (2, 1));
+    assert_eq!(extra_cursors(&ed, cx), vec![(1, 1)]);
+    keys(&ed, cx, "(");
+    assert_eq!(cursor(&ed, cx), (1, 1));
+    // `d` clears every cursor's cell, as one undo step.
+    keys(&ed, cx, "d");
+    assert_eq!(column_b(&ed, cx), ["", "", "z"]);
+    keys(&ed, cx, "escape");
+    assert!(extra_cursors(&ed, cx).is_empty(), "Escape collapses");
+    keys(&ed, cx, "u");
+    assert_eq!(column_b(&ed, cx), ["x", "y", "z"]);
+}
+
+#[gpui::test]
+fn helix_multi_cursor_formula_shifts_relative_refs(cx: &mut TestAppContext) {
+    let ed = setup_helix(cx, "n,d\n1,\n2,\n3,\n");
+    keys(&ed, cx, "j l shift-c shift-c c = a 4 * 2 escape");
+    assert_eq!(source(&ed, cx, 1, 1), "=A2*2");
+    assert_eq!(source(&ed, cx, 2, 1), "=A3*2");
+    assert_eq!(column_b(&ed, cx), ["2", "4", "6"]);
+}
+
+#[gpui::test]
+fn helix_select_matching_makes_cursors(cx: &mut TestAppContext) {
+    let ed = setup_helix(cx, "k,v\napple,1\npear,2\nfig,3\nplum,4\n");
+    keys(&ed, cx, "% s");
+    submit(&ed, cx, "^p");
+    assert_eq!(cursor(&ed, cx), (2, 0), "the first match is the primary");
+    assert_eq!(extra_cursors(&ed, cx), vec![(4, 0)]);
+    keys(&ed, cx, "c x escape");
+    assert_eq!(cell(&ed, cx, 2, 0), "x");
+    assert_eq!(cell(&ed, cx, 4, 0), "x");
+    assert_eq!(cell(&ed, cx, 1, 0), "apple");
+}
+
 // ---- find & replace ----------------------------------------------------------
 
 const CITIES: &str = "name,city,code\nann,Paris,a1\nbob,paris,b2\ncat,Rome,c3\ndan,PARIS,d4\n";

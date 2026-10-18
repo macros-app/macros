@@ -376,6 +376,16 @@
 ;; Selection-first: the same cell motions, with `x`/`X` selecting rows the
 ;; way they select lines in text, `d` acting on the selection (clear), and
 ;; `c` replacing it.
+;;
+;; Multiple cursors, as helix's selections: `C` / `M-C` add a cursor on the
+;; cell below / above each one (the new one below the primary becomes the
+;; primary), `s` puts one on every selected cell matching a regex (the whole
+;; sheet when one cell is selected), `,` keeps only the primary (so does
+;; Escape), `M-,` drops the primary, and `(` / `)` rotate which one is
+;; primary. Motions move them all; `i` / `a` / `c` edit every cursor's cell
+;; at once (the typed text shows in each as you type; a formula's relative
+;; references follow each cell, as copy-down moves them) and `d` clears
+;; them — each one undo step.
 (grid-bind-vim "helix-normal:grid-mode")
 (define-keys "helix-normal:grid-mode"
   '(("x" grid-select-rows)
@@ -390,7 +400,14 @@
     ("g h" grid-row-start)
     ("g l" grid-row-end)
     ("%" grid-select-all)
-    ("shift-u" grid-redo)))
+    ("shift-u" grid-redo)
+    ("shift-c" grid-add-cursor-below)
+    ("alt-shift-c" grid-add-cursor-above)
+    ("s" grid-select-matching)
+    ("," grid-keep-primary-cursor)
+    ("alt-," grid-remove-primary-cursor)
+    (")" grid-rotate-cursors-forward)
+    ("(" grid-rotate-cursors-backward)))
 
 ;; A grid switched to its raw text (`grid-toggle-view`) keeps the same key to
 ;; switch back.
