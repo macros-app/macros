@@ -4345,6 +4345,21 @@ impl Editor {
         self.completion_at_point_lsp(cx);
     }
 
+    /// Where the completion prefix ending at `point` starts. Lisp buffers use a
+    /// symbol boundary, so `plot-b` or `string->` is one token — what Scheme
+    /// servers (the builtin one included) match labels against; a word-only
+    /// prefix (`b`) would filter every returned `plot-…` label out. Elsewhere
+    /// it's `word_start`, not `backward_word`: right after `self.` the prefix
+    /// must be empty, or a motion-style word jump would filter every member
+    /// candidate out.
+    pub(super) fn completion_prefix_start(&self, point: usize) -> usize {
+        if self.is_lisp_buffer() {
+            self.active.buffer.backward_symbol(point)
+        } else {
+            self.active.buffer.word_start(point)
+        }
+    }
+
     /// Request completions from the active buffer's language server.
     fn completion_at_point_lsp(&mut self, cx: &mut Context<Self>) {
         // A full-sync server (the builtin Steel one) gets edits debounced: send
@@ -4362,10 +4377,10 @@ impl Editor {
         };
         let point = self.point();
         let (line, character) = self.active.buffer.byte_to_position(point);
-        // `word_start`, not `backward_word`: the range becomes the popup anchor
-        // AND the live filter prefix, so right after `self.` it must be empty —
-        // a motion-style word jump would filter every member candidate out.
-        let word_range = self.active.buffer.word_start(point)..point;
+        // The range becomes the popup anchor AND the live filter prefix, so it
+        // must match what the server treats as the prefix — see
+        // `completion_prefix_start`.
+        let word_range = self.completion_prefix_start(point)..point;
         let sent = if let Some(server) = self.servers.get_mut(&language) {
             if server.ready && server.open.contains(&uri) {
                 // A newer request supersedes the in-flight one: its response
@@ -4473,6 +4488,16 @@ impl Editor {
                 anchor: word_range.start,
                 selected: 0,
             });
+            // Nothing survives the live prefix filter (the server matched a
+            // different prefix than the anchor): the popup would render nothing
+            // yet still capture Tab/RET/arrows, so don't keep it.
+            if self.popup_filtered().is_empty() {
+                self.completion_popup = None;
+                if !was_auto {
+                    self.echo("No completions", cx);
+                }
+                return;
+            }
             self.completion_resolve_selected();
             cx.notify();
         }

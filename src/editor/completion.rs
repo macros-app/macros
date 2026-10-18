@@ -288,8 +288,8 @@ impl Editor {
                 return;
             }
             let point = self.point();
-            let word_start = self.active.buffer.word_start(point);
-            if point.saturating_sub(word_start) < min_prefix.max(1) {
+            let prefix_start = self.completion_prefix_start(point);
+            if point.saturating_sub(prefix_start) < min_prefix.max(1) {
                 return;
             }
         }

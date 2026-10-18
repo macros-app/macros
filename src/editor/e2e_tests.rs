@@ -1516,3 +1516,73 @@ fn evil_till_repeat_and_multibyte_toggle_case(cx: &mut TestAppContext) {
     keys(&ed, cx, "~");
     assert_eq!(text(&ed, cx), "Éa\n");
 }
+
+/// LSP completion in a Lisp buffer anchors on a symbol boundary: typing
+/// `(plot-b` in a `*.macros.scm` file against the builtin `macros-scheme`
+/// server opens a popup with `plot-bars`. A word-boundary anchor (`b`) used to
+/// filter every `plot-…` label the server returned, so nothing showed.
+#[gpui::test]
+fn lisp_completion_keeps_hyphenated_prefix(cx: &mut TestAppContext) {
+    let dir = std::env::temp_dir().join(format!("macros-lispcomp-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.macros.scm");
+    std::fs::write(&path, "\n").unwrap();
+    let ed = setup(cx, "\n");
+    ed.update(cx, |e, cx| {
+        let current = e.snapshot_active();
+        e.inactive.push(current);
+        e.install_active(make_document(
+            "test.macros.scm".into(),
+            Some(path.clone()),
+            "\n",
+        ));
+        assert_eq!(e.active_language().as_deref(), Some("macros-scheme"));
+        e.maybe_start_lsp(cx);
+    });
+    // The builtin server answers on its own thread: pump until it's ready
+    // and has the buffer open.
+    let ready = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.read_with(cx, |e, _| {
+            let uri = e.active_uri().unwrap();
+            e.servers
+                .get("macros-scheme")
+                .is_some_and(|s| s.ready && s.open.contains(&uri))
+        })
+    };
+    for _ in 0..200 {
+        if ready(&ed, cx) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&ed, cx);
+    }
+    assert!(
+        ready(&ed, cx),
+        "builtin macros-scheme server never became ready"
+    );
+
+    keys(&ed, cx, "i ( p l o t - b");
+    ed.update(cx, |e, cx| {
+        e.completion_popup = None;
+        e.completion_auto_pending = false;
+        e.completion_at_point(cx);
+    });
+    let labels = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.read_with(cx, |e, _| {
+            e.completion_view()
+                .map(|v| v.items.into_iter().map(|r| r.label).collect::<Vec<_>>())
+        })
+    };
+    for _ in 0..200 {
+        if labels(&ed, cx).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        settle(&ed, cx);
+    }
+    let labels = labels(&ed, cx).expect("completion popup is visible");
+    assert!(labels.iter().any(|l| l == "plot-bars"), "{labels:?}");
+    let anchor = ed.read_with(cx, |e, _| e.completion_popup.as_ref().map(|p| p.anchor));
+    assert_eq!(anchor, Some(1), "anchored at the symbol start, after `(`");
+    let _ = std::fs::remove_dir_all(&dir);
+}
