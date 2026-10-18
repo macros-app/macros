@@ -237,6 +237,13 @@ impl Workspace {
             }
             columns_row = columns_row.child(col);
         }
+        // An empty title means no header row: the popup is just its columns.
+        let header = (!transient.title.is_empty()).then(|| {
+            div().text_color(dim).child(SharedString::from(format!(
+                "{} — transient",
+                transient.title
+            )))
+        });
         div()
             .w_full()
             .flex()
@@ -246,10 +253,7 @@ impl Workspace {
             .text_size(px(13.))
             .px_2()
             .py_1()
-            .child(div().text_color(dim).child(SharedString::from(format!(
-                "{} — transient",
-                transient.title
-            ))))
+            .children(header)
             .child(columns_row)
             .into_any_element()
     }

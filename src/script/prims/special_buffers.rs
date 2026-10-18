@@ -74,7 +74,8 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         );
     }
     // `(transient title rows)` — `rows` is a list of `(key label command)`, or
-    // a list of `(column-title (key label command) …)` for columns. In the
+    // a list of `(column-title (key label command) …)` for columns. An empty
+    // `title` ("") shows no header row, just the columns. In the
     // `-sticky` variant selecting a row keeps the popup open — the row's
     // command re-opens it (to refresh state) or calls `transient-quit`, for
     // menus where you toggle several options before dismissing.
