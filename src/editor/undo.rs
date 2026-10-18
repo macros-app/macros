@@ -356,6 +356,7 @@ impl Editor {
             buffer: self.active.name.clone(),
             len: self.active.undo.len(),
             current: self.active.undo.current,
+            grid: self.active.grid.as_deref().map(|g| g.hist_len()),
         }
     }
 

@@ -43,6 +43,12 @@
 ;;   (grid-sort col descending?)          ; skips the header row
 ;;   (grid-sort-as col descending? 'numeric)   ; or 'alpha 'time 'auto
 ;;   (grid-map-cells f)  — each selected (visible) cell becomes (f value)
+;;   (grid-replace-all "old" "new" 'literal 'auto) → cells changed; 'regexp
+;;     for a regexp (`\1` `\&` in "new"); scope 'auto (the selection, or the
+;;     sheet when it's one cell), 'selection or 'sheet. Filtered-out rows are
+;;     skipped and a formula matches by its text. (See "Find & replace".)
+;;   (grid-replace-matches "old" "new" 'literal '(r0 c0 r1 c1)) → the cells
+;;     that would change, ((row col old new) …), or an error message string
 ;;
 ;; View:
 ;;   (grid-move-to row col)   (grid-select-range r0 c0 r1 c1)
@@ -183,6 +189,8 @@
       ("alt-w" grid-yank)
       ("ctrl-y" grid-paste)
       ("ctrl-s" grid-search-forward)
+      ("alt-%" grid-query-replace)
+      ("ctrl-alt-%" grid-query-replace-regexp)
       ("ctrl-=" grid-zoom-in)
       ("ctrl--" grid-zoom-out)
       ("ctrl-0" grid-zoom-reset)
@@ -292,6 +300,8 @@
       ("/" grid-search-forward)
       ("n" grid-search-next)
       ("shift-n" grid-search-previous)
+      ("g %" grid-query-replace)             ; and :s/old/new/ · :%s for the sheet
+      ("g &" grid-query-replace-regexp)
       ("i" grid-edit-start)
       ("a" grid-edit-end)
       ("enter" grid-edit-end)
@@ -426,6 +436,194 @@
 (define-command (grid-trim-cells)
   (grid-map-cells string-trim))
 
+;; --- Find & replace --------------------------------------------------------------
+;; `M-%` grid-query-replace / `C-M-%` grid-query-replace-regexp (`g %` / `g &`
+;; under evil/helix) ask at each cell; grid-replace / grid-replace-regexp
+;; replace without asking; evil's `:s/old/new/[gci]` works on the selection
+;; and `:%s` on the whole sheet. They all act on the selection, or the whole
+;; sheet when only the cursor cell is "selected", and skip rows a filter
+;; hides. A formula cell matches by its formula text (`=SUM(A1:A9)`), like
+;; Excel's Replace (Look in: Formulas): replacing there rewrites the formula.
+;; Case and the replacement syntax follow Emacs's query-replace (`\1` `\&` in
+;; a regexp's replacement; a FROM without capitals matches any case and
+;; copies it); `:s` uses Vim's (`\1` `&`, the `i` / `I` / `\c` case flags).
+;; The unit is a cell: `y` replaces every match in it (`:s` without `g`, just
+;; its first). Each command — a whole query session included — is ONE undo
+;; step.
+;;
+;; Session keys: y / SPC replace, n / DEL skip, ! replace the rest, . replace
+;; this one and stop, q / RET (or any other key) stop, ? help.
+
+;; (grid-replace--range scope) → (r0 c0 r1 c1): 'selection is the selection
+;; as it is, 'sheet every cell, 'auto the selection unless it's one cell.
+(define (grid-replace--range scope)
+  (let* ((sel (grid-selection))
+         (dims (grid-dimensions))
+         (whole (list 0 0 (max 0 (- (car dims) 1)) (max 0 (- (cadr dims) 1))))
+         (one? (and (= (list-ref sel 0) (list-ref sel 2))
+                    (= (list-ref sel 1) (list-ref sel 3)))))
+    (cond ((equal? scope 'sheet) whole)
+          ((equal? scope 'selection) sel)
+          (one? whole)
+          (else sel))))
+
+(define (grid-replace--plural n)
+  (string-append (int->string n) " cell" (if (= n 1) "" "s")))
+
+;; (grid-replace-all from to mode scope) — replace without asking, one undo
+;; step; returns how many cells changed. mode: 'literal or 'regexp (or 'raw /
+;; 'raw-first: a regex-crate pattern and `${1}` replacement, what `:s`
+;; translates to); scope as for grid-replace--range.
+(define (grid-replace-all from to mode scope)
+  (grid-replace--in-range from to mode (grid-replace--range scope)))
+
+(define (grid-replace--in-range from to mode range)
+  (let ((hits (grid-replace-matches from to mode range)))
+    (cond ((string? hits) (message hits) 0)
+          (else
+           (when (not (null? hits))
+             (grid-set-cells (map (lambda (h) (list (car h) (cadr h) (list-ref h 3))) hits)))
+           (message (string-append "Replaced " (grid-replace--plural (length hits))))
+           (length hits)))))
+
+;; The query session.
+(define *grid-qr-hits* (list->vector '()))   ; ((row col old new) …)
+(define *grid-qr-n* 0)
+(define *grid-qr-idx* 0)
+(define *grid-qr-count* 0)
+(define *grid-qr-label* "")
+(define *grid-qr-active?* #f)
+
+(define (grid-qr-hit i) (vector-ref *grid-qr-hits* i))
+
+;; Start asking about each changed cell of `range`; `label` heads the prompt.
+(define (grid-qr-start from to mode range label)
+  (let ((hits (grid-replace-matches from to mode range)))
+    (cond ((string? hits) (message hits))
+          ((null? hits) (message (string-append "No matches for \"" from "\"")))
+          (else
+           (set! *grid-qr-hits* (list->vector hits))
+           (set! *grid-qr-n* (length hits))
+           (set! *grid-qr-idx* 0)
+           (set! *grid-qr-count* 0)
+           (set! *grid-qr-label* label)
+           (set! *grid-qr-active?* #t)
+           (undo-amalgamate-begin)
+           (grid-qr-show "")))))
+
+(define (grid-qr-clip s)
+  (if (> (string-length s) 40) (string-append (substring s 0 40) "…") s))
+
+;; Put the cursor on the current cell and wait for a key.
+(define (grid-qr-show note)
+  (if (>= *grid-qr-idx* *grid-qr-n*)
+      (grid-qr-finish)
+      (let ((h (grid-qr-hit *grid-qr-idx*)))
+        (grid-move-to (car h) (cadr h))
+        (read-key-start
+         (string-append note (if (equal? note "") "" "  ") *grid-qr-label*
+                        " (" (int->string (+ *grid-qr-idx* 1)) "/" (int->string *grid-qr-n*)
+                        "): " (grid-qr-clip (list-ref h 2)) " → " (grid-qr-clip (list-ref h 3))
+                        "  (y/n/!/q, ? help)")
+         'grid-qr-key))))
+
+(define (grid-qr-replace! i)
+  (let ((h (grid-qr-hit i)))
+    (grid-set-cell (car h) (cadr h) (list-ref h 3))
+    (set! *grid-qr-count* (+ *grid-qr-count* 1))))
+
+;; `!`: every remaining cell in one write.
+(define (grid-qr-replace-rest!)
+  (let loop ((i (- *grid-qr-n* 1)) (acc '()))
+    (if (< i *grid-qr-idx*)
+        (when (not (null? acc))
+          (grid-set-cells acc)
+          (set! *grid-qr-count* (+ *grid-qr-count* (length acc))))
+        (let ((h (grid-qr-hit i)))
+          (loop (- i 1) (cons (list (car h) (cadr h) (list-ref h 3)) acc))))))
+
+(define (grid-qr-advance)
+  (set! *grid-qr-idx* (+ *grid-qr-idx* 1))
+  (grid-qr-show ""))
+
+(define (grid-qr-key k)
+  (cond
+    ((not *grid-qr-active?*) (read-key-stop))
+    ((or (equal? k "y") (equal? k " ")) (grid-qr-replace! *grid-qr-idx*) (grid-qr-advance))
+    ((member k (list "n" "backspace" "delete")) (grid-qr-advance))
+    ((equal? k "!") (grid-qr-replace-rest!) (grid-qr-finish))
+    ((equal? k ".") (grid-qr-replace! *grid-qr-idx*) (grid-qr-finish))
+    ((member k (list "?" "h" "f1"))
+     (grid-qr-show "y/SPC replace, n/DEL skip, ! all the rest, . this one and stop, q/RET stop."))
+    ;; q, RET, Escape, C-g — and like Emacs, any other key — end the session.
+    (else (grid-qr-finish))))
+
+;; End the session: release the key capture and close the undo group.
+(define (grid-qr-finish)
+  (read-key-stop)
+  (set! *grid-qr-active?* #f)
+  (undo-amalgamate-end)
+  (message (string-append "Replaced " (grid-replace--plural *grid-qr-count*))))
+
+;; Prompting: the range is taken before the minibuffer opens; an empty FROM
+;; reuses the previous pair, as in Emacs.
+(define *grid-qr-defaults* #f)   ; (from . to)
+(define *grid-qr-kind* 'query)
+(define *grid-qr-range* '(0 0 0 0))
+(define *grid-qr-from* "")
+
+(define (grid-qr-kind-label kind)
+  (cond ((equal? kind 'query) "Query replace")
+        ((equal? kind 'query-regexp) "Query replace regexp")
+        ((equal? kind 'string) "Replace string")
+        (else "Replace regexp")))
+
+(define (grid-qr-read kind)
+  (set! *grid-qr-kind* kind)
+  (set! *grid-qr-range* (grid-replace--range 'auto))
+  (read-string (string-append (grid-qr-kind-label kind)
+                              (if *grid-qr-defaults*
+                                  (string-append " (default " (car *grid-qr-defaults*)
+                                                 " -> " (cdr *grid-qr-defaults*) ")")
+                                  "")
+                              ": ")
+               'grid-qr-read-from))
+
+(define (grid-qr-read-from s)
+  (cond ((and (equal? s "") *grid-qr-defaults*)
+         (grid-qr-run (car *grid-qr-defaults*) (cdr *grid-qr-defaults*)))
+        ((equal? s "") (message "Nothing to replace"))
+        (else (set! *grid-qr-from* s)
+              (read-string (string-append (grid-qr-kind-label *grid-qr-kind*) " " s " with: ")
+                           'grid-qr-read-to))))
+
+(define (grid-qr-read-to s)
+  (set! *grid-qr-defaults* (cons *grid-qr-from* s))
+  (grid-qr-run *grid-qr-from* s))
+
+(define (grid-qr-run from to)
+  (let* ((kind *grid-qr-kind*)
+         (mode (if (member kind '(query-regexp regexp)) 'regexp 'literal)))
+    (if (member kind '(query query-regexp))
+        (grid-qr-start from to mode *grid-qr-range*
+                       (string-append (if (equal? mode 'regexp) "Query replacing regexp " "Query replacing ")
+                                      from " with " to))
+        (grid-replace--in-range from to mode *grid-qr-range*))))
+
+(define-command (grid-query-replace) (grid-qr-read 'query))
+(define-command (grid-query-replace-regexp) (grid-qr-read 'query-regexp))
+(define-command (grid-replace) (grid-qr-read 'string))
+(define-command (grid-replace-regexp) (grid-qr-read 'regexp))
+
+;; The grid's `:s` (see Editor::grid_ex_substitute): pattern and replacement
+;; already in regex-crate syntax; scope 'selection or 'sheet; `confirm?` is
+;; the `c` flag.
+(define (grid-substitute pat rep mode scope confirm?)
+  (if confirm?
+      (grid-qr-start pat rep mode (grid-replace--range scope)
+                     (string-append "Substitute " pat " with " rep))
+      (grid-replace-all pat rep mode scope)))
+
 ;; `C-c ^` / `gs` (and `C-u` before a sort key): org-table's sort prompt —
 ;; one key picks how the cursor's column compares; a capital sorts descending.
 (define (grid-sort-prompt--key k)
@@ -465,6 +663,9 @@
             (list "j" "Jump to column…" 'grid-jump-to-column)
             (list "s" "Search…" 'grid-search-forward)
             (list "r" "Search backward…" 'grid-search-backward)
+            (list "%" "Query replace…" 'grid-query-replace)
+            (list "&" "Query replace regexp…" 'grid-query-replace-regexp)
+            (list "R" "Replace all…" 'grid-replace)
             (list "l" "Recenter" 'grid-recenter))
       (list "Edit"
             (list "e" "Edit cell in a buffer" 'grid-edit-popup)

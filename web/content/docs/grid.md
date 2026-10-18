@@ -71,6 +71,21 @@ With a range selected, the mode line shows `24 cells · Sum 1,204 · Avg 50.2 ·
 
 While editing a cell: <kbd>Esc</kbd> saves the edit, <kbd>C-g</kbd> cancels it, <kbd>RET</kbd> / <kbd>Tab</kbd> save and move down / right (<kbd>S-RET</kbd> / <kbd>S-Tab</kbd> go back), <kbd>M-RET</kbd> inserts a newline, and the usual line-editing keys (<kbd>C-a</kbd> <kbd>C-e</kbd> <kbd>M-f</kbd> <kbd>M-b</kbd> <kbd>C-w</kbd> <kbd>C-k</kbd>) work.
 
+## Find & replace
+
+| Emacs | Evil / Helix | Action |
+| --- | --- | --- |
+| <kbd>M-%</kbd> | <kbd>g%</kbd>, `:s/old/new/c` | Query replace: ask at each cell |
+| <kbd>C-M-%</kbd> | <kbd>g&amp;</kbd> | Query replace a regexp |
+| `M-x grid-replace` / `grid-replace-regexp` | `:s/old/new/g`, `:%s/old/new/g` | Replace every match without asking |
+
+Replacing works on the selection, or the whole sheet when nothing is selected (under evil, `:s` is the selection or the cursor cell and `:%s` the whole sheet). Rows hidden by a filter are skipped. At each cell the prompt shows the cell's text before and after: <kbd>y</kbd> / <kbd>SPC</kbd> replaces, <kbd>n</kbd> / <kbd>DEL</kbd> skips, <kbd>!</kbd> replaces all the rest, <kbd>.</kbd> replaces this one and stops, and <kbd>q</kbd> / <kbd>RET</kbd> stops. A whole replace, a query session included, undoes in one step.
+
+- **Formulas are matched by their formula text**, like Excel's Replace with *Look in: Formulas*: replacing `A2` with `A3` turns `=A2*2` into `=A3*2`, and a value a formula shows is never matched.
+- **A cell is the unit**: <kbd>y</kbd> replaces every match in the cell (`:s` without `g`, only the first).
+- **Case and syntax follow Emacs**: a search with no capitals matches any case, and the replacement copies each match's case (`paris` → `lyon` makes `Paris` → `Lyon`). In a regexp's replacement `\1`…`\9` insert groups and `\&` the whole match. `:s` uses Vim's syntax instead (`\1`, `&`, the `i` and `I` flags, `\c`).
+- An empty search reuses the previous pair.
+
 ## Rows, columns, and structure
 
 | Emacs | Evil | Action |
@@ -168,6 +183,8 @@ Everything above is a Scheme command (`grid-left`, `grid-sort-ascending`, …) b
 (grid-read-range "A1:C500" 'my-callback)                         ; bulk data
 (grid-sort "units" #t)
 (grid-filter-rows "region" "=" "West")
+(grid-replace-all "N/A" "" 'literal 'sheet)                      ; => cells changed
+(grid-replace-all "(\\d+)kg" "\\1 kg" 'regexp 'auto)              ; 'auto: the selection, else the sheet
 ```
 
 Hooks: `grid-load-hook`, `grid-cell-changed-hook` (the cells the user edited), `grid-selection-changed-hook`, and `grid-mode-hook`. The full API is documented at the top of `scheme/grid.scm`.
