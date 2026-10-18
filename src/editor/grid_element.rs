@@ -8,6 +8,8 @@
 //! column, scrolling a few rows) don't re-shape; the element just keeps every
 //! string it shapes short (truncated to what the cell can show).
 
+use std::collections::HashMap;
+
 use gpui::{
     App, Bounds, ContentMask, CursorStyle, Element, ElementId, ElementInputHandler, Entity, Font,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, LayoutId,
@@ -257,6 +259,7 @@ impl Element for GridElement {
             .editing()
             .map_or_else(Vec::new, |e| formula_refs(&e.text, &f.pal));
         f.ref_outlines(&ref_spans, &mut p);
+        f.extra_cursors(&mut p, window);
         match f.editing() {
             Some(e) => f.cell_editor(e, &ref_spans, &popup, &mut p, window),
             None => f.cursor_outline(&mut p),
@@ -497,6 +500,9 @@ struct Frame<'a> {
     has_range: bool,
     /// Zoomed out past reading: cells draw as tinted blocks.
     blocks: bool,
+    /// While a cell is edited with helix's extra cursors: what each of
+    /// those on screen will become, drawn live in its cell.
+    spread: HashMap<view::Pos, String>,
 }
 
 /// One row being laid out.
@@ -567,6 +573,17 @@ impl<'a> Frame<'a> {
         let mut rows = v.visible_rows(ch);
         rows.iter_mut().for_each(|l| l.pos += oy);
         let sel = g.selection();
+        let spread = match &v.edit {
+            Some(e) if !v.cursors.is_empty() => v
+                .cursors
+                .iter()
+                .filter(|&&(r, c)| {
+                    rows.iter().any(|l| l.idx == r) && cols.iter().any(|l| l.idx == c)
+                })
+                .map(|&p| (p, g.spread_text(e, p)))
+                .collect(),
+            _ => HashMap::new(),
+        };
         Self {
             g,
             v,
@@ -607,6 +624,7 @@ impl<'a> Frame<'a> {
             sel,
             has_range: !sel.is_single(),
             blocks: zoom < view::BLOCK_ZOOM,
+            spread,
         }
     }
 
@@ -728,7 +746,9 @@ impl<'a> Frame<'a> {
                 if i < skip_until || r >= self.used_rows || c >= self.used_cols {
                     continue;
                 }
-                if self.editing().is_some_and(|e| e.row == r && e.col == c) {
+                if self.editing().is_some_and(|e| e.row == r && e.col == c)
+                    || self.spread.contains_key(&(r, c))
+                {
                     continue; // the editor draws this cell
                 }
                 if let Some(end) = self.cell_content(row, i, fmt, &mut layer, window) {
@@ -849,6 +869,7 @@ impl<'a> Frame<'a> {
                 && !self
                     .editing()
                     .is_some_and(|e| e.row == r && e.col == cols[j].idx)
+                && !self.spread.contains_key(&(r, cols[j].idx))
                 && !(self.has_range && self.sel.contains(r, cols[j].idx))
             {
                 avail += cols[j].size;
@@ -1143,6 +1164,47 @@ impl<'a> Frame<'a> {
                 h + 1.0,
                 CURSOR_BORDER,
                 self.pal.cursor,
+            );
+        }
+    }
+
+    /// Helix's extra cursors: a fainter frame than the primary's, and while
+    /// a cell is edited, what each cursor's cell will become.
+    fn extra_cursors(&self, p: &mut GridPrepaint, window: &mut Window) {
+        let faint = Hsla {
+            a: self.pal.cursor.a * 0.45,
+            ..self.pal.cursor
+        };
+        let pad = CELL_PAD * self.zoom;
+        for &(r, c) in &self.v.cursors {
+            let Some((x, y, w, h)) = self.cell_rect(r, c) else {
+                continue;
+            };
+            if let Some(text) = self.spread.get(&(r, c)) {
+                p.over.push(fill(rect(x, y, w, h), self.pal.bg));
+                let max_chars = ((w - 2.0 * pad) / self.char_w).ceil().max(1.0) as usize + 1;
+                let shown = display_text(text, max_chars);
+                let line = window.text_system().shape_line(
+                    SharedString::from(shown.clone()),
+                    self.font_size,
+                    &[run(shown.len(), &self.regular, self.pal.fg)],
+                    None,
+                );
+                p.over_text.push(Text {
+                    line,
+                    origin: point(px(x + pad), px(y + (h - self.header_h) / 2.0)),
+                    clip: rect(x, y, w, h),
+                    line_height: px(self.header_h.max(1.0)),
+                });
+            }
+            push_border(
+                &mut p.outlines,
+                x - 1.0,
+                y - 1.0,
+                w + 1.0,
+                h + 1.0,
+                CURSOR_BORDER,
+                faint,
             );
         }
     }
