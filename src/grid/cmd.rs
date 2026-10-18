@@ -110,6 +110,11 @@ pub enum GridCmd {
     ToggleHeader,
     /// Freeze the rows above the cursor (row 1 at the top), or unfreeze.
     ToggleFreeze,
+    /// Freeze panes: the rows above and the columns left of the cursor at
+    /// once, or unfreeze both.
+    FreezePanes,
+    /// Freeze column A, or unfreeze the frozen columns.
+    FreezeFirstColumn,
     FormulaBar,
     ViewAsText,
     NextProblem,
@@ -304,6 +309,8 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-search-previous", SearchPrevious),
         ("grid-toggle-header", ToggleHeader),
         ("grid-toggle-freeze", ToggleFreeze),
+        ("grid-freeze-panes", FreezePanes),
+        ("grid-freeze-first-column", FreezeFirstColumn),
         ("grid-formula-bar", FormulaBar),
         ("grid-view-as-text", ViewAsText),
         ("grid-next-problem", NextProblem),
@@ -526,6 +533,7 @@ pub enum GridOp {
         px: f64,
     },
     Freeze(usize),
+    FreezeCols(usize),
     SetHeader(bool),
     /// Zoom in percent (10–400).
     Zoom(f64),
@@ -600,6 +608,18 @@ pub enum GridOp {
         col: Option<usize>,
         values: Vec<String>,
     },
+    /// Remove duplicate rows compared on these columns (`None`: the
+    /// selection's, or every column) — `grid-remove-duplicates`.
+    RemoveDuplicates(Option<Vec<ColName>>),
+}
+
+/// A column as Scheme names it: an index, or a header name / letter /
+/// prompt label (`"email"`, `"C"`, `"email (C)"`), resolved against the
+/// grid when the op applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColName {
+    Index(usize),
+    Name(String),
 }
 
 #[cfg(test)]

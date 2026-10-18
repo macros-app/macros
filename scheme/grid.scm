@@ -29,7 +29,8 @@
 ;;   (grid-buffer?) (grid-cursor) → (row col)   (grid-selection) → (r0 c0 r1 c1)
 ;;   (grid-dimensions) → (rows cols)   (grid-current-value)   (grid-header?)
 ;;   (grid-header-names)   (grid-column-type col) → "int"/"float"/"bool"/"date"/"text"
-;;   (grid-frozen-rows)   (grid-zoom) → percent   (grid-editing?)
+;;   (grid-frozen-rows)   (grid-frozen-columns)   (grid-zoom) → percent
+;;   (grid-editing?)
 ;;   (grid-sheets) → an .xlsx's sheet names   (grid-current-sheet) → the one shown
 ;;   (grid-cell row col)   (grid-row-values row)   (grid-column-values col)
 ;;     — any cell, synchronously, for grids up to a million cells (a copy
@@ -52,6 +53,12 @@
 ;;   (grid-fill-selection)  — Excel's Ctrl+Enter: the cursor cell (or the
 ;;     entry being typed) into every selected cell, formulas adjusted.
 ;;   All of them skip rows a filter hides and hidden columns.
+;;   (grid-remove-duplicates '("email"))  — delete rows repeating an earlier
+;;     row on these columns (header names, letters or indices; '() for the
+;;     selection's columns, or all), keeping the first. Looks at the
+;;     selection's rows when it spans several, else the sheet's; never the
+;;     header, nor rows a filter hides. Text ignores case, numbers compare by
+;;     value (1 = 1.0), whitespace counts, formulas by their result.
 ;;   (grid-replace-all "old" "new" 'literal 'auto) → cells changed; 'regexp
 ;;     for a regexp (`\1` `\&` in "new"); scope 'auto (the selection, or the
 ;;     sheet when it's one cell), 'selection or 'sheet. Filtered-out rows are
@@ -62,7 +69,8 @@
 ;; View:
 ;;   (grid-move-to row col)   (grid-select-range r0 c0 r1 c1)
 ;;   (grid-set-column-width col px) (grid-set-row-height row px)   ; 100% px
-;;   (grid-freeze-rows n)   (grid-set-header #t)   (grid-set-zoom 125)
+;;   (grid-freeze-rows n)   (grid-freeze-columns n)   ; 0 unfreezes
+;;   (grid-set-header #t)   (grid-set-zoom 125)
 ;;   (grid-set-column-hidden col #t)
 ;;   (grid-open-sheet "Costs")  — show another sheet (see "Workbook sheets")
 ;;   (grid-filter-rows col op value)  — show only rows whose col passes; the
@@ -206,6 +214,8 @@
       ("ctrl-c ctrl-r" grid-sort-descending)
       ("ctrl-c ctrl-h" grid-toggle-header)
       ("ctrl-c ctrl-z" grid-toggle-freeze)
+      ("ctrl-c alt-z" grid-freeze-panes)
+      ("ctrl-c z" grid-freeze-first-column)
       ("ctrl-c ctrl-f" grid-formula-bar)
       ("ctrl-c ctrl-t" grid-toggle-view)
       ("f9" grid-recalculate)
@@ -217,6 +227,7 @@
       ("ctrl-c ctrl-o" grid-insert-row-below)
       ("ctrl-c alt-o" grid-insert-row-above)
       ("ctrl-c ctrl-k" grid-delete-row)
+      ("ctrl-c ctrl-d" grid-remove-duplicates)
       ("ctrl-c alt-k" grid-delete-column)
       ("ctrl-c ctrl-c" grid-insert-column-right)
       ("ctrl-c >" grid-widen-column)
@@ -317,6 +328,7 @@
       ("delete" grid-clear)
       ("d d" grid-delete-row)
       ("d c" grid-delete-column)
+      ("d u" grid-remove-duplicates)         ; keep the unique rows
       ("o" grid-insert-row-below)
       ("shift-o" grid-insert-row-above)
       ("g o" grid-insert-column-right)
@@ -342,6 +354,8 @@
       ("g n" grid-goto)
       ("g h" grid-toggle-header)
       ("g f" grid-toggle-freeze)
+      ("g shift-f" grid-freeze-panes)
+      ("z f" grid-freeze-first-column)
       ("g r" grid-toggle-view)
       ("g `" grid-show-formulas)
       ("g [" grid-trace-precedents)
@@ -409,6 +423,7 @@
     ;; rows and columns on `g d` / `g D` instead.
     ("g d" grid-delete-row)
     ("g shift-d" grid-delete-column)
+    ("g x" grid-remove-duplicates)
     ("c" grid-edit-replace)
     ("g g" grid-goto-first-row)
     ("g e" grid-goto-last-row)
@@ -462,6 +477,26 @@
 (define-command (grid-trim-cells)
   (grid-map-cells string-trim))
 
+;; `C-c C-d` / `du` (helix `gx`): Remove duplicates (Excel's Data › Remove
+;; Duplicates). Prompts for the columns to compare — header names (or
+;; letters), comma-separated; empty means the selection's columns, or all.
+;; From Scheme, pass them: (grid-remove-duplicates '("email" "name")).
+(define (grid-column-letter i)
+  (let ((ch (string (integer->char (+ 65 (remainder i 26))))))
+    (if (< i 26) ch (string-append (grid-column-letter (- (quotient i 26) 1)) ch))))
+(define (grid-remove-duplicates--choices)
+  (let ((names (filter (lambda (n) (not (equal? (string-trim n) "")))
+                       (grid-header-names))))
+    (if (null? names)
+        (map grid-column-letter (range 0 (min 702 (cadr (grid-dimensions)))))
+        names)))
+(define (grid-remove-duplicates . cols)
+  (if (null? cols)
+      (completing-read "Remove duplicates comparing columns (a, b; empty: all): "
+                       (grid-remove-duplicates--choices)
+                       'grid-remove-duplicates-impl)
+      (grid-remove-duplicates-impl (car cols))))
+(register-command 'grid-remove-duplicates)
 ;; --- Find & replace --------------------------------------------------------------
 ;; `M-%` grid-query-replace / `C-M-%` grid-query-replace-regexp (`g %` / `g &`
 ;; under evil/helix) ask at each cell; grid-replace / grid-replace-regexp
@@ -697,7 +732,7 @@
             (list "e" "Edit cell in a buffer" 'grid-edit-popup)
             (list "c" "Complete cell…" 'grid-complete-cell)
             (list "d" "Copy down / fill series" 'grid-copy-down)
-            (list "D" "Fill down from first row" 'grid-fill-down)
+            (list "V" "Fill down from first row" 'grid-fill-down)
             (list ">" "Fill right from first column" 'grid-fill-right)
             (list "E" "Fill selection with this cell" 'grid-fill-selection)
             (list "U" "Upcase" 'grid-upcase)
@@ -710,6 +745,7 @@
             (list "i" "Insert column right" 'grid-insert-column-right)
             (list "k" "Delete row" 'grid-delete-row)
             (list "K" "Delete column" 'grid-delete-column)
+            (list "D" "Remove duplicates…" 'grid-remove-duplicates)
             (list "p" "Move row up" 'grid-move-row-up)
             (list "n" "Move row down" 'grid-move-row-down)
             (list "b" "Move column left" 'grid-move-column-left)
@@ -725,6 +761,8 @@
       (list "View"
             (list "t" "Header row on/off" 'grid-toggle-header)
             (list "z" "Freeze rows on/off" 'grid-toggle-freeze)
+            (list "Z" "Freeze panes on/off" 'grid-freeze-panes)
+            (list "1" "Freeze first column on/off" 'grid-freeze-first-column)
             (list "a" "Auto-fit column" 'grid-autofit-column)
             (list "B" "Formula bar on/off" 'grid-formula-bar)
             (list "v" "Raw text view" 'grid-toggle-view))

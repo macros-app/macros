@@ -45,15 +45,13 @@ struct Text {
 }
 
 pub struct GridPrepaint {
-    /// Fills drawn under everything in the cells area (selection, blocks).
-    under: Vec<PaintQuad>,
+    /// The cells area's fills (selection, blocks) and text, one layer per
+    /// pane of a freeze, indexed by [`layer_index`]: the scrolled cells,
+    /// the frozen rows, the frozen columns, and their corner, painted in
+    /// that order, each clipped to its own pane.
+    layers: [Layer; 4],
     /// Gridlines.
     lines: Vec<PaintQuad>,
-    /// Cell text, clipped per cell (scrolled rows).
-    cells: Vec<Text>,
-    /// Frozen rows: their fills and text, drawn over the scrolled rows.
-    frozen_under: Vec<PaintQuad>,
-    frozen_cells: Vec<Text>,
     /// Headers, formula bar, cursor, editor, guides: drawn last.
     over: Vec<PaintQuad>,
     over_text: Vec<Text>,
@@ -65,7 +63,6 @@ pub struct GridPrepaint {
     /// left of it, so they never spill over the header labels.
     outline_bounds: Bounds<Pixels>,
     cells_bounds: Bounds<Pixels>,
-    scroll_bounds: Bounds<Pixels>,
     hitboxes: Vec<(Hitbox, CursorStyle)>,
     /// The function-name dropdown while typing a formula (the editor's
     /// LSP completion popup, reused).
@@ -321,30 +318,26 @@ impl Element for GridElement {
         };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(p.background.clone());
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: p.scroll_bounds,
-                }),
-                |window| {
-                    for q in p.under.drain(..) {
-                        window.paint_quad(q);
-                    }
-                    for t in p.cells.drain(..) {
-                        paint_text(t, window, cx);
-                    }
-                },
-            );
+            for layer in &mut p.layers {
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: layer.bounds,
+                    }),
+                    |window| {
+                        for q in layer.under.drain(..) {
+                            window.paint_quad(q);
+                        }
+                        for t in layer.texts.drain(..) {
+                            paint_text(t, window, cx);
+                        }
+                    },
+                );
+            }
             window.with_content_mask(
                 Some(ContentMask {
                     bounds: p.cells_bounds,
                 }),
                 |window| {
-                    for q in p.frozen_under.drain(..) {
-                        window.paint_quad(q);
-                    }
-                    for t in p.frozen_cells.drain(..) {
-                        paint_text(t, window, cx);
-                    }
                     for q in p.lines.drain(..) {
                         window.paint_quad(q);
                     }
@@ -433,6 +426,8 @@ struct Frame<'a> {
     ch: f32,
     /// Height of the frozen rows band.
     frozen_h: f32,
+    /// Width of the frozen columns band.
+    frozen_w: f32,
     /// The columns and rows on screen, at screen positions.
     cols: Vec<VisibleLine>,
     rows: Vec<VisibleLine>,
@@ -456,10 +451,17 @@ struct RowAt {
     header_row: bool,
 }
 
-/// Where a row's fills and text go: the scrolled layer or the frozen one.
-struct Layer<'p> {
-    under: &'p mut Vec<PaintQuad>,
-    texts: &'p mut Vec<Text>,
+/// One pane of the cells area: its fills and text, clipped to `bounds`.
+struct Layer {
+    under: Vec<PaintQuad>,
+    texts: Vec<Text>,
+    bounds: Bounds<Pixels>,
+}
+
+/// Which of [`GridPrepaint::layers`] a cell in a frozen row and/or a frozen
+/// column draws in.
+fn layer_index(frozen_row: bool, frozen_col: bool) -> usize {
+    usize::from(frozen_row) + 2 * usize::from(frozen_col)
 }
 
 impl<'a> Frame<'a> {
@@ -518,6 +520,7 @@ impl<'a> Frame<'a> {
         let cw = (width - header_w).max(0.0);
         let ch = (height - bar_h - header_h).max(0.0);
         let frozen_h = (v.frozen_height() * zoom as f64) as f32;
+        let frozen_w = (v.frozen_width() * zoom as f64) as f32;
         let mut cols = v.visible_cols(cw);
         cols.iter_mut().for_each(|l| l.pos += ox);
         let mut rows = v.visible_rows(ch);
@@ -564,6 +567,7 @@ impl<'a> Frame<'a> {
             cw,
             ch,
             frozen_h,
+            frozen_w,
             cols,
             rows,
             sel,
@@ -579,12 +583,25 @@ impl<'a> Frame<'a> {
 
     fn empty_prepaint(&self) -> GridPrepaint {
         let (ox, oy, cw, ch) = (self.ox, self.oy, self.cw, self.ch);
+        let (fw, fh) = (self.frozen_w.min(cw), self.frozen_h.min(ch));
+        // The frozen panes cover what scrolls under them.
+        let layer = |bounds: Bounds<Pixels>, opaque: bool| Layer {
+            under: if opaque {
+                vec![fill(bounds, self.pal.bg)]
+            } else {
+                Vec::new()
+            },
+            texts: Vec::new(),
+            bounds,
+        };
         GridPrepaint {
-            under: Vec::new(),
+            layers: [
+                layer(rect(ox + fw, oy + fh, cw - fw, ch - fh), false),
+                layer(rect(ox + fw, oy, cw - fw, fh), true),
+                layer(rect(ox, oy + fh, fw, ch - fh), true),
+                layer(rect(ox, oy, fw, fh), true),
+            ],
             lines: Vec::new(),
-            cells: Vec::new(),
-            frozen_under: Vec::new(),
-            frozen_cells: Vec::new(),
             over: Vec::new(),
             over_text: Vec::new(),
             outlines: Vec::new(),
@@ -595,12 +612,6 @@ impl<'a> Frame<'a> {
                 ch + CURSOR_BORDER,
             ),
             cells_bounds: rect(ox, oy, cw, ch),
-            scroll_bounds: rect(
-                ox,
-                oy + self.frozen_h.min(ch),
-                cw,
-                (ch - self.frozen_h).max(0.0),
-            ),
             hitboxes: Vec::new(),
             popup: None,
             background: fill(self.bounds, self.pal.bg),
@@ -637,31 +648,21 @@ impl<'a> Frame<'a> {
         });
         for line in &self.rows {
             let (r, y, h) = (line.idx, line.pos, line.size);
-            let mut layer = if line.frozen {
-                Layer {
-                    under: &mut p.frozen_under,
-                    texts: &mut p.frozen_cells,
-                }
-            } else {
-                Layer {
-                    under: &mut p.under,
-                    texts: &mut p.cells,
-                }
-            };
-            if line.frozen {
-                layer
-                    .under
-                    .push(fill(rect(self.ox, y, self.cw, h), self.pal.bg));
-            }
             // The header row reads as a header.
             let header_row = r == 0 && self.g.wb.header(SHEET);
             if let Some(bg) = stripe
                 && !header_row
                 && self.v.rows.rank(r) % 2 == 1
             {
-                layer
-                    .under
-                    .push(fill(rect(self.ox, y, self.cw, h - 1.0), bg));
+                // Across both of the row's panes (each clips it).
+                for frozen_col in [false, true]
+                    .into_iter()
+                    .filter(|&f| !f || self.frozen_w > 0.0)
+                {
+                    p.layers[layer_index(line.frozen, frozen_col)]
+                        .under
+                        .push(fill(rect(self.ox, y, self.cw, h - 1.0), bg));
+                }
             }
             let row = RowAt {
                 r,
@@ -672,6 +673,7 @@ impl<'a> Frame<'a> {
             let mut skip_until = 0usize; // columns already covered by overflow
             for (i, col) in self.cols.iter().enumerate() {
                 let (c, x, w) = (col.idx, col.pos, col.size);
+                let layer = &mut p.layers[layer_index(line.frozen, col.frozen)];
                 // Bold and colors set by hand; a fill shows on any cell,
                 // empty or not, and under the selection's tint.
                 let fmt = if self.g.formats.touches_col(c) {
@@ -696,7 +698,7 @@ impl<'a> Frame<'a> {
                 {
                     continue; // the editor draws this cell
                 }
-                if let Some(end) = self.cell_content(row, i, fmt, &mut layer, window) {
+                if let Some(end) = self.cell_content(row, i, fmt, layer, window) {
                     skip_until = end;
                 }
             }
@@ -779,6 +781,8 @@ impl<'a> Frame<'a> {
             let mut j = i + 1;
             while (avail / char_w) < value.chars().count() as f32
                 && j < cols.len()
+                // Never across the frozen columns' edge.
+                && cols[j].frozen == cols[i].frozen
                 // Into empty cells only — a formula cell isn't empty even
                 // when its result is "".
                 && (cols[j].idx >= self.used_cols
@@ -883,21 +887,24 @@ impl<'a> Frame<'a> {
                     .push(fill(rect(ox, l.pos + l.size - 1.0, cw, 1.0), self.pal.line));
             }
         }
+        let edge = Hsla {
+            a: 0.35,
+            ..self.pal.fg
+        };
         if self.frozen_h > 0.0 && self.frozen_h < ch {
-            p.over.push(fill(
-                rect(ox, oy + self.frozen_h - 1.0, cw, 2.0),
-                Hsla {
-                    a: 0.35,
-                    ..self.pal.fg
-                },
-            ));
+            p.over
+                .push(fill(rect(ox, oy + self.frozen_h - 1.0, cw, 2.0), edge));
+        }
+        if self.frozen_w > 0.0 && self.frozen_w < cw {
+            p.over
+                .push(fill(rect(ox + self.frozen_w - 1.0, oy, 2.0, ch), edge));
         }
     }
 
     // --- cursor cell, inline editor, outlines -----------------------------
 
     /// Cell `(r, c)`'s rectangle `(x, y, w, h)`, when any of it is on
-    /// screen (and not scrolled under the frozen rows).
+    /// screen (and not scrolled under the frozen rows or columns).
     fn cell_rect(&self, r: usize, c: usize) -> Option<(f32, f32, f32, f32)> {
         let (ox, oy, cw, ch, v) = (self.ox, self.oy, self.cw, self.ch, self.v);
         let x = ox + v.col_x(c) as f32;
@@ -909,7 +916,8 @@ impl<'a> Frame<'a> {
         } else {
             y + h > oy + self.frozen_h
         };
-        (x + w > ox && x < ox + cw && y + h > oy && y < oy + ch && visible_y)
+        let visible_x = c < v.frozen_cols || x + w > ox + self.frozen_w;
+        (x + w > ox && x < ox + cw && y + h > oy && y < oy + ch && visible_y && visible_x)
             .then_some((x, y, w, h))
     }
 
@@ -1083,9 +1091,15 @@ impl<'a> Frame<'a> {
             return;
         }
         let (ox, oy, cw, ch, v, sel) = (self.ox, self.oy, self.cw, self.ch, self.v, self.sel);
-        let x0 = (ox + v.col_x(sel.c0) as f32).max(ox - 2.0);
-        // A range below the frozen rows, scrolled up under them, stops at
-        // the frozen band's edge rather than drawing across it.
+        // A range right of the frozen columns, or below the frozen rows,
+        // scrolled under them, stops at the frozen band's edge rather than
+        // drawing across it.
+        let left_limit = if sel.c0 >= v.frozen_cols {
+            ox + self.frozen_w + 1.0
+        } else {
+            ox - 2.0
+        };
+        let x0 = (ox + v.col_x(sel.c0) as f32).max(left_limit);
         let top_limit = if sel.r0 >= v.frozen_rows {
             oy + self.frozen_h + 1.0
         } else {
@@ -1244,17 +1258,17 @@ impl<'a> Frame<'a> {
                 thumb_color,
             ));
         }
-        let content_w = v
-            .cols
-            .start(self.used_cols.max(v.cursor.1 + 1))
-            .max(v.scroll_x + cw as f64 / zoom)
+        let frozen_w = self.frozen_w;
+        let content_w = (v.cols.start(self.used_cols.max(v.cursor.1 + 1)) - v.frozen_width())
+            .max(v.scroll_x + (cw - frozen_w) as f64 / zoom)
             * zoom;
-        if content_w > cw as f64 + 1.0 {
-            let thumb = (cw as f64 / content_w * cw as f64).max(18.0) as f32;
-            let pos = (v.scroll_x * zoom / content_w * cw as f64) as f32;
+        if content_w > (cw - frozen_w) as f64 + 1.0 {
+            let view_w = (cw - frozen_w) as f64;
+            let thumb = (view_w / content_w * view_w).max(18.0) as f32;
+            let pos = (v.scroll_x * zoom / content_w * view_w) as f32;
             p.over.push(fill(
                 rect(
-                    ox + pos.min((cw - thumb).max(0.0)),
+                    ox + frozen_w + pos.min((view_w as f32 - thumb).max(0.0)),
                     oy + ch - 6.0,
                     thumb,
                     4.0,
@@ -1537,6 +1551,9 @@ pub(crate) mod probe {
         pub popup_row_height: Option<f32>,
         pub cells_top: f32,
         pub frozen_bottom: f32,
+        /// The frozen columns band's right edge (the cells area's left
+        /// edge when none are frozen).
+        pub frozen_right: f32,
     }
 
     pub struct Probe {
@@ -1591,8 +1608,12 @@ pub(crate) mod probe {
                         frozen,
                     )
                 };
-                s.cells = p.cells.iter().map(|t| rec(t, false)).collect();
-                s.cells.extend(p.frozen_cells.iter().map(|t| rec(t, true)));
+                s.cells = p
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, l)| l.texts.iter().map(move |t| rec(t, i % 2 == 1)))
+                    .collect();
                 s.over_text = p
                     .over_text
                     .iter()
@@ -1612,7 +1633,8 @@ pub(crate) mod probe {
                     .collect();
                 s.popup_row_height = p.popup.as_ref().map(|pp| f32::from(pp.hit.row_height));
                 s.cells_top = f32::from(p.cells_bounds.origin.y);
-                s.frozen_bottom = f32::from(p.scroll_bounds.origin.y);
+                s.frozen_bottom = f32::from(p.layers[0].bounds.origin.y);
+                s.frozen_right = f32::from(p.layers[0].bounds.origin.x);
             }
             p
         }
