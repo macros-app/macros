@@ -15,6 +15,7 @@
 //! - [`cellfmt`]: bold and colors set by hand on single cells.
 //! - [`series`]: continuing a series down a column (copy-down / fill).
 //! - [`export`]: cells as org / Markdown / JSON / CSV, and org tables back.
+//! - [`replace`]: find & replace over cell text.
 //! - [`sidecar`]: per-file view settings saved beside the config.
 //!
 //! The core invariant: a row loaded from the file and never edited ("clean")
@@ -32,6 +33,7 @@ pub mod model;
 pub mod parse;
 #[cfg(test)]
 mod regression_tests;
+pub mod replace;
 pub mod series;
 pub mod sheet;
 pub mod sidecar;

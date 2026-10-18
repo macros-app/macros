@@ -1201,6 +1201,9 @@ struct UndoBase {
     buffer: String,
     len: usize,
     current: usize,
+    /// A grid buffer's undo depth then (its history is separate from the
+    /// text undo tree); `(undo-amalgamate-end)` folds the grid steps since.
+    grid: Option<usize>,
 }
 
 /// Evil (modal editing) state. `Normal`/`Visual` intercept plain keys as
