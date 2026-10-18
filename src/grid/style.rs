@@ -98,7 +98,9 @@ pub enum RuleTest {
     Matches(Regex),
     Empty,
     NotEmpty,
-    /// A value that occurs more than once in its column.
+    /// A value that occurs more than once in its column, compared as
+    /// Remove duplicates compares ([`super::dedup::key`]: case ignored,
+    /// numbers by value).
     Duplicate,
     /// One of the column's `n` largest / smallest numbers.
     Top(usize),
@@ -180,7 +182,9 @@ impl RuleTest {
             Self::Matches(re) => re.is_match(value),
             Self::Empty => value.is_empty(),
             Self::NotEmpty => !value.is_empty(),
-            Self::Duplicate => matches!(derived, Derived::Set(set) if set.contains(value)),
+            Self::Duplicate => {
+                matches!(derived, Derived::Set(set) if set.contains(super::dedup::key(value).as_ref()))
+            }
             Self::Top(_) => {
                 matches!(derived, Derived::Threshold(t) if num().is_some_and(|v| v >= *t))
             }
@@ -372,7 +376,7 @@ impl GridStyle {
                     let mut seen: HashMap<String, u32> = HashMap::new();
                     values(col, &mut |v| {
                         if !v.is_empty() {
-                            *seen.entry(v.to_string()).or_default() += 1;
+                            *seen.entry(super::dedup::key(v).into_owned()).or_default() += 1;
                         }
                     });
                     Derived::Set(
@@ -527,11 +531,20 @@ mod tests {
             .unwrap();
         s.add_rule(rule(Some(0), "top", "2", "success")).unwrap();
         assert!(s.needs_refresh(1));
-        let cols = [vec!["5", "9", "1", "7"], vec!["x", "y", "x", ""]];
+        let cols = [
+            vec!["5", "9", "1", "7"],
+            vec!["x", "y", "X", "", "1", "1.0"],
+        ];
         s.refresh(1, |c, f| cols[c].iter().for_each(|v| f(v)));
         assert!(!s.needs_refresh(1) && s.needs_refresh(2));
         let none = |_| "";
         assert_eq!(s.face(0, 1, "x", none), Some("warning"));
+        assert_eq!(s.face(0, 1, "X", none), Some("warning"), "case ignored");
+        assert_eq!(
+            s.face(0, 1, "1.00", none),
+            Some("warning"),
+            "numbers by value"
+        );
         assert_eq!(s.face(0, 1, "y", none), None);
         assert_eq!(s.face(0, 0, "9", none), Some("success"));
         assert_eq!(s.face(0, 0, "7", none), Some("success"));

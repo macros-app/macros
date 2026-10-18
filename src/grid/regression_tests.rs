@@ -348,3 +348,33 @@ fn set_cell_in_deleted_all_cols_then_undo() {
     wb.undo();
     assert_eq!(to_bytes(&wb), b"a,b\n1,2\n");
 }
+
+/// Remove duplicates stays linear: a million rows, half of them repeats,
+/// found and deleted (and the delete undone) in a few seconds even in a
+/// debug build. An O(n²) pass — comparing rows pairwise, or deleting them
+/// one at a time — would take hours.
+#[test]
+fn remove_duplicates_perf_guard_1m_rows() {
+    use super::dedup::duplicate_rows;
+    use std::time::{Duration, Instant};
+    let rows = 1_000_000;
+    let (csv, expected) = super::testgen::gen_dup_csv(&mut Rng::new(7), rows, rows / 2);
+    let mut wb = load_bytes(csv.as_bytes());
+    assert_eq!(wb.used_rows(0), rows + 1);
+    let t = Instant::now();
+    let dups = duplicate_rows(1..=rows, &[0, 1, 2], |r, c| wb.cell(0, r, c));
+    assert_eq!(dups.len(), expected);
+    assert!(wb.delete_row_set(0, &dups));
+    let took = t.elapsed();
+    assert_eq!(wb.used_rows(0), rows + 1 - expected);
+    // What's left is unique.
+    assert!(duplicate_rows(1..wb.used_rows(0), &[0], |r, c| wb.cell(0, r, c)).is_empty());
+    let t = Instant::now();
+    wb.undo();
+    let undo = t.elapsed();
+    assert_eq!(wb.used_rows(0), rows + 1);
+    assert!(
+        took < Duration::from_secs(60) && undo < Duration::from_secs(30),
+        "remove duplicates took {took:?}, undo {undo:?}"
+    );
+}

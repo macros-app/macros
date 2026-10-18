@@ -191,6 +191,10 @@ impl<'a> IndexMap<'a> {
                 }
                 Some(self.inverse[i - start]).filter(|&new| new != usize::MAX)
             }
+            (Change::RowsRemoved { rows }, Axis::Rows) => match rows.binary_search(&i) {
+                Ok(_) => None,
+                Err(before) => Some(i - before),
+            },
             (Change::ColMoved { from, to }, Axis::Cols) => Some(if i == *from {
                 *to
             } else if from < to && i > *from && i <= *to {
@@ -371,6 +375,10 @@ impl GridDoc {
                     } else {
                         refs::delete(&mut it.expr, &sheet, axis, at, n)
                     };
+                }
+            } else if let Change::RowsRemoved { rows } = change {
+                for it in &mut items {
+                    it.dirty |= refs::delete_set(&mut it.expr, &sheet, Axis::Rows, rows);
                 }
             } else if let Change::Sorted { .. } = change {
                 // A sort moves formulas like a copy: their relative

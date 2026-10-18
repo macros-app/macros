@@ -322,6 +322,99 @@ fn freeze_is_opt_in_and_toggles(cx: &mut TestAppContext) {
     assert_eq!(frozen(&ed, cx), 0);
 }
 
+fn frozen_panes(ed: &Entity<Editor>, cx: &mut TestAppContext) -> (usize, usize) {
+    ed.read_with(cx, |e, _| {
+        let v = &e.active.grid.as_ref().unwrap().view;
+        (v.frozen_rows, v.frozen_cols)
+    })
+}
+
+#[gpui::test]
+fn freeze_panes_and_first_column_keys(cx: &mut TestAppContext) {
+    // Evil (and helix, which shares the vim layer).
+    let (ed, _) = setup(cx, CSV, true);
+    keys(&ed, cx, "j l l g shift-f");
+    assert_eq!(frozen_panes(&ed, cx), (1, 2), "rows above, columns left");
+    keys(&ed, cx, "g shift-f");
+    assert_eq!(frozen_panes(&ed, cx), (0, 0), "again unfreezes both");
+    keys(&ed, cx, "z f");
+    assert_eq!(frozen_panes(&ed, cx), (0, 1));
+    keys(&ed, cx, "z f");
+    assert_eq!(frozen_panes(&ed, cx), (0, 0));
+    // Emacs.
+    let (ed, _) = setup(cx, CSV, false);
+    keys(&ed, cx, "down right ctrl-c alt-z");
+    assert_eq!(frozen_panes(&ed, cx), (1, 1));
+    keys(&ed, cx, "ctrl-c alt-z ctrl-c z");
+    assert_eq!(frozen_panes(&ed, cx), (0, 1));
+    // Scheme, clamped to the data's columns.
+    scheme(&ed, cx, "(grid-freeze-columns 99)");
+    assert_eq!(frozen_panes(&ed, cx), (0, 3));
+    assert_eq!(eval(&ed, cx, "(grid-frozen-columns)"), "3");
+    scheme(&ed, cx, "(grid-freeze-columns 0)");
+    assert_eq!(frozen_panes(&ed, cx), (0, 0));
+}
+
+#[gpui::test]
+fn frozen_columns_stay_while_scrolling_and_the_cursor_stays_visible(cx: &mut TestAppContext) {
+    let header: Vec<String> = (0..60).map(|c| format!("h{c}")).collect();
+    let row: Vec<String> = (0..60).map(|c| c.to_string()).collect();
+    let csv = format!("{}\n{}\n", header.join(","), row.join(","));
+    let (ed, _) = setup(cx, &csv, true);
+    scheme(&ed, cx, "(grid-freeze-columns 2)");
+    // Far right: the frozen columns are still at the left edge.
+    keys(&ed, cx, "4 0 |");
+    let visible = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.read_with(cx, |e, _| {
+            let v = &e.active.grid.as_ref().unwrap().view;
+            let (_, c) = v.cursor;
+            let (x, w) = (v.col_x(c), v.col_px(c));
+            (
+                v.col_x(0),
+                v.col_x(1),
+                x,
+                x + w,
+                v.frozen_width(),
+                v.viewport.0,
+            )
+        })
+    };
+    let (a, b, x0, x1, fw, vw) = visible(&ed, cx);
+    assert_eq!(cursor(&ed, cx).1, 39);
+    assert_eq!((a, b), (0.0, crate::grid::view::DEFAULT_COL_WIDTH));
+    assert!(
+        x0 >= fw && x1 <= vw + 1e-6,
+        "cursor at {x0}..{x1}, band {fw}"
+    );
+    // Back left: a column that had scrolled under the frozen ones comes
+    // out right of them, not behind them.
+    keys(&ed, cx, "3 |");
+    let (_, _, x0, _, fw, _) = visible(&ed, cx);
+    assert_eq!(cursor(&ed, cx).1, 2);
+    assert_eq!(x0, fw, "column C sits just right of the frozen band");
+    // Into the frozen columns: no scroll needed, none happens.
+    keys(&ed, cx, "4 0 | 1 |");
+    let (_, _, x0, _, _, _) = visible(&ed, cx);
+    assert_eq!(x0, 0.0);
+    let scroll = ed.read_with(cx, |e, _| e.active.grid.as_ref().unwrap().view.scroll_x);
+    assert!(scroll > 0.0, "the scrolled columns stay where they were");
+}
+
+#[gpui::test]
+fn frozen_columns_are_remembered_per_file(cx: &mut TestAppContext) {
+    let (ed, path) = setup(cx, CSV, true);
+    keys(&ed, cx, "j l g shift-f");
+    assert_eq!(frozen_panes(&ed, cx), (1, 1));
+    let ed2 = cx.new(Editor::new);
+    let p = path.clone();
+    ed2.update(cx, |e, cx| {
+        e.mark_config_loaded(cx);
+        e.open_grid("data.csv".into(), p.clone(), std::fs::read(&p).unwrap(), cx);
+    });
+    settle(&ed2, cx);
+    assert_eq!(frozen_panes(&ed2, cx), (1, 1), "from the sidecar");
+}
+
 #[gpui::test]
 fn toggle_between_grid_and_raw_text(cx: &mut TestAppContext) {
     let (ed, path) = setup(cx, CSV, true);

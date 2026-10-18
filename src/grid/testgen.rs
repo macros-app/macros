@@ -120,3 +120,24 @@ pub fn gen_csv(rng: &mut Rng, opts: &GenOpts) -> String {
     }
     out
 }
+
+/// A large CSV for Remove duplicates: `email,name,n`, then `rows` records,
+/// each derived from a key drawn from `distinct` values — so two records
+/// are duplicates exactly when their keys match, though they're written
+/// differently (the email's case varies, `n` is `7` or `7.0`). Returns the
+/// CSV and how many records repeat an earlier one.
+pub fn gen_dup_csv(rng: &mut Rng, rows: usize, distinct: usize) -> (String, usize) {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(rows * 32);
+    out.push_str("email,name,n\n");
+    let mut seen = vec![false; distinct];
+    let mut dups = 0;
+    for _ in 0..rows {
+        let k = rng.below(distinct);
+        dups += usize::from(std::mem::replace(&mut seen[k], true));
+        let user = if rng.chance(50) { "User" } else { "user" };
+        let n = if rng.chance(50) { ".0" } else { "" };
+        let _ = writeln!(out, "{user}{k}@example.com,Name {k},{k}{n}");
+    }
+    (out, dups)
+}
