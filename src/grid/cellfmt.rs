@@ -1,6 +1,7 @@
 //! Formatting set by hand on single cells: bold, a text color and a fill
 //! color from a small fixed palette (Excel's font-color and fill buttons),
-//! and a number format (an Excel format code: `$#,##0.00`, `yyyy-mm-dd`, …).
+//! a number format (an Excel format code: `$#,##0.00`, `yyyy-mm-dd`, …), and
+//! Wrap Text (the cell's text wraps within its column, its row grows to fit).
 //!
 //! Unlike [`super::style`], which is declarative styling written in Scheme,
 //! this is what the user applies while moving around the grid, so it follows
@@ -9,7 +10,7 @@
 //! only changes how a cell is shown; the stored value is untouched. CSV can't
 //! hold any of it, so a formatted CSV grid saves as `.xlsx`, which does.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// The palette, in the order the color commands cycle through it. Each name
@@ -51,6 +52,8 @@ pub struct CellFmt {
     pub text: Option<u8>,
     pub fill: Option<u8>,
     pub num: Option<NumCode>,
+    /// Wrap Text: word-wrap within the column width, showing every line.
+    pub wrap: bool,
 }
 
 /// An interned number-format code. Interning is process-wide, so a code's
@@ -254,6 +257,8 @@ pub struct CellFormats {
     cells: HashMap<(usize, usize), CellFmt>,
     /// Formatted cells per column.
     per_col: HashMap<usize, usize>,
+    /// The wrapped cells, row-major, so a row's are found without a scan.
+    wrapped: BTreeSet<(usize, usize)>,
 }
 
 impl CellFormats {
@@ -285,7 +290,22 @@ impl CellFormats {
             }
             _ => {}
         }
+        if fmt.wrap {
+            self.wrapped.insert((row, col));
+        } else {
+            self.wrapped.remove(&(row, col));
+        }
         old.unwrap_or_default()
+    }
+
+    /// Whether any cell wraps.
+    pub fn any_wrapped(&self) -> bool {
+        !self.wrapped.is_empty()
+    }
+
+    /// The columns of row `row`'s wrapped cells, in order.
+    pub fn wrapped_in_row(&self, row: usize) -> impl Iterator<Item = usize> + '_ {
+        self.wrapped.range((row, 0)..(row + 1, 0)).map(|&(_, c)| c)
     }
 
     /// Every formatted cell.
@@ -296,6 +316,7 @@ impl CellFormats {
     pub fn clear(&mut self) {
         self.cells.clear();
         self.per_col.clear();
+        self.wrapped.clear();
     }
 
     /// Whether any cell in column `col` is formatted (lets the painter skip
@@ -314,6 +335,7 @@ impl CellFormats {
     ) {
         let old = std::mem::take(&mut self.cells);
         self.per_col.clear();
+        self.wrapped.clear();
         for ((r, c), f) in old {
             if let (Some(r), Some(c)) = (row(r), col(c)) {
                 self.set(r, c, f);

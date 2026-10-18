@@ -18,7 +18,7 @@
 
 use super::xml::{Event, Reader, Tag, XmlError, decode_xstring};
 use super::zip::Archive;
-use super::{Book, MAX_ROWS, XCell, XFormula, XSheet, XStyle, XValue, XlsxError, parse_ref};
+use super::{Book, MAX_ROWS, XCell, XFormula, XRow, XSheet, XStyle, XValue, XlsxError, parse_ref};
 
 /// Read a whole workbook from the bytes of an `.xlsx` file.
 pub fn read(bytes: &[u8]) -> Result<Book, XlsxError> {
@@ -79,11 +79,12 @@ pub fn read(bytes: &[u8]) -> Result<Book, XlsxError> {
             let xml = pkg.get(&rel.target)?.ok_or_else(|| {
                 XlsxError::Corrupt(format!("sheet part {} is missing", rel.target))
             })?;
-            let cells =
-                parse_sheet(&xml, &shared, &styles, &mut notes).map_err(|e| bad(&rel.target, e))?;
+            let (cells, rows) = parse_sheet_rows(&xml, &shared, &styles, &mut notes)
+                .map_err(|e| bad(&rel.target, e))?;
             sheets.push(XSheet {
                 name: s.name.clone(),
                 cells,
+                rows,
             });
         } else if rel.typ.ends_with("/chartsheet") {
             notes.add("chart sheets");
@@ -384,7 +385,9 @@ struct Xf {
     font: usize,
     fill: usize,
     border: usize,
-    /// Alignment, protection, a named style, a quote prefix.
+    /// `<alignment wrapText="1"/>`.
+    wrap: bool,
+    /// Other alignment, protection, a named style, a quote prefix.
     other: bool,
 }
 
@@ -486,21 +489,25 @@ impl StyleTables {
                         font: id("fontId").unwrap_or(0),
                         fill: id("fillId").unwrap_or(0),
                         border: id("borderId").unwrap_or(0),
+                        wrap: false,
                         other,
                     });
                 }
                 (Some("cellXfs"), Some("xf"), name) => {
-                    // Alignment, or protection other than Excel's default
-                    // (locked, not hidden).
-                    let changes = match name {
-                        "protection" => {
-                            t.attr("locked").is_some_and(|v| !is_true(&v))
-                                || t.attr("hidden").is_some_and(|v| is_true(&v))
-                        }
-                        _ => t.attrs().next().is_some(),
-                    };
-                    if changes && let Some(x) = xfs.last_mut() {
-                        x.other = true;
+                    // Alignment other than Wrap Text, or protection other
+                    // than Excel's default (locked, not hidden).
+                    if let Some(x) = xfs.last_mut() {
+                        x.other |= match name {
+                            "protection" => {
+                                t.attr("locked").is_some_and(|v| !is_true(&v))
+                                    || t.attr("hidden").is_some_and(|v| is_true(&v))
+                            }
+                            "alignment" => {
+                                x.wrap = t.attr("wrapText").is_some_and(|v| is_true(&v));
+                                t.attrs().any(|(q, _)| q != "wrapText")
+                            }
+                            _ => t.attrs().next().is_some(),
+                        };
                     }
                 }
                 _ => {}
@@ -548,6 +555,7 @@ impl StyleTables {
             color,
             fill,
             num_fmt: num_fmt.filter(|c| !c.eq_ignore_ascii_case("general")),
+            wrap: x.wrap,
         })
     }
 }
@@ -711,14 +719,27 @@ fn sheet_element_reason(name: &str) -> Option<&'static str> {
 }
 
 /// Parse a worksheet's cells, noting features a rewrite would lose.
+#[cfg(test)]
 fn parse_sheet(
     xml: &[u8],
     shared: &[String],
     styles: &[Option<XStyle>],
     notes: &mut Notes,
 ) -> Result<Vec<XCell>, XmlError> {
+    parse_sheet_rows(xml, shared, styles, notes).map(|(cells, _)| cells)
+}
+
+/// A worksheet's cells and the rows sized by hand, noting features a
+/// rewrite would lose.
+fn parse_sheet_rows(
+    xml: &[u8],
+    shared: &[String],
+    styles: &[Option<XStyle>],
+    notes: &mut Notes,
+) -> Result<(Vec<XCell>, Vec<XRow>), XmlError> {
     let mut r = Reader::new(xml)?;
     let mut cells = Vec::new();
+    let mut rows = Vec::new();
     let mut depth = 0;
     while let Some(ev) = r.next()? {
         let t = match ev {
@@ -737,13 +758,15 @@ fn parse_sheet(
             notes.add(reason);
         }
         match t.name {
-            "sheetData" => sheet_data(&mut r, shared, styles, notes, &mut cells)?,
+            "sheetData" => sheet_data(&mut r, shared, styles, notes, &mut cells, &mut rows)?,
             "sheetPr" | "sheetViews" => view_state(&mut r, notes)?,
             _ => r.skip()?,
         }
     }
     cells.sort_by_key(|c| (c.row, c.col));
-    Ok(cells)
+    rows.sort_by_key(|r| r.row);
+    rows.dedup_by_key(|r| r.row);
+    Ok((cells, rows))
 }
 
 /// The rest of a `<sheetPr>` or `<sheetViews>`: mostly view state, except a
@@ -771,6 +794,7 @@ fn sheet_data(
     styles: &[Option<XStyle>],
     notes: &mut Notes,
     cells: &mut Vec<XCell>,
+    rows: &mut Vec<XRow>,
 ) -> Result<(), XmlError> {
     // Rows and cells may omit `r`; each then follows the previous one.
     let mut next_row = 0usize;
@@ -791,7 +815,14 @@ fn sheet_data(
         }
         next_row = row + 1;
         if t.attr("customHeight").is_some_and(|v| is_true(&v)) {
-            notes.add("row heights");
+            match t.attr("ht").and_then(|v| v.trim().parse::<f64>().ok()) {
+                Some(height) if height.is_finite() && height >= 0.0 => rows.push(XRow {
+                    row,
+                    height,
+                    custom: true,
+                }),
+                _ => notes.add("row heights"),
+            }
         }
         if t.attr("hidden").is_some_and(|v| is_true(&v)) {
             notes.add("hidden rows");
@@ -1191,13 +1222,21 @@ mod tests {
             "images",
             "VBA macros",
             "frozen panes",
-            "row heights",
             "pivot tables",
             "unknown part xl/foo.xml",
         ];
         want.sort();
         assert_eq!(got, want);
         assert_eq!(book.sheets[0].cells.len(), 2);
+        // A row height set by hand is kept.
+        assert_eq!(
+            book.sheets[0].rows,
+            [XRow {
+                row: 0,
+                height: 30.0,
+                custom: true
+            }]
+        );
     }
 
     #[test]
@@ -1414,6 +1453,7 @@ mod tests {
                 color: Some(0xFF0070C0),
                 fill: Some(0xFFFFC000),
                 num_fmt: Some("0.0%".into()),
+                wrap: false,
             })
         );
         assert_eq!(

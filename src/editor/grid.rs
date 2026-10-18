@@ -464,6 +464,8 @@ pub(super) struct GridDoc {
     /// Cells the user changed in the current command, for
     /// `grid-cell-changed-hook` (drained by `grid_fire_changes`).
     changed: Vec<CellChange>,
+    /// Wrap Text row heights by row: `(key, height)` (see `grid_wrap.rs`).
+    pub(super) wrap_cache: HashMap<usize, (u64, f64)>,
 }
 
 impl Drop for GridDoc {
@@ -522,6 +524,7 @@ impl GridDoc {
             xlsx: XlsxState::default(),
             layout_moved: false,
             changed: Vec::new(),
+            wrap_cache: HashMap::new(),
         }
     }
 
@@ -1645,10 +1648,11 @@ impl GridDoc {
             | KillToRowEnd | Upcase | Downcase | Capitalize | CopyDown | CompleteCell
             | MoveLine(_) | HideColumn | ShowColumns | NarrowToSelection | Filter
             | FilterByValue | Widen | CopyAsOrg | CopyAsMarkdown | CopyAsJson | ToggleBold
-            | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral | FormatNumber
-            | FormatCurrency | FormatPercent | FormatDate | FormatText | IncreaseDecimals
-            | DecreaseDecimals | TracePrecedents | TraceDependents | GridMode | ToggleView
-            | CellPopupCommit | CellPopupAbort | OrgTableToGrid | Recalculate | SelectMatching => {}
+            | CycleTextColor | CycleFillColor | ToggleWrap | ClearFormat | FormatGeneral
+            | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
+            | IncreaseDecimals | DecreaseDecimals | TracePrecedents | TraceDependents
+            | GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
+            | Recalculate | SelectMatching => {}
             // [`Self::apply_cursors`]'s.
             AddCursorBelow
             | AddCursorAbove
@@ -2127,6 +2131,7 @@ impl Editor {
         let mut other_sheets = HashMap::new();
         let mut xlsx_text = Default::default();
         let mut xlsx_formats = Vec::new();
+        let mut xlsx_rows = Vec::new();
         let mut book = None;
         let (wb, background) = if ext.as_deref() == Some("xlsx") {
             match super::grid_xlsx::load(&bytes, 0, &self.grid_fn_names()) {
@@ -2143,6 +2148,7 @@ impl Editor {
                     other_sheets = l.others;
                     xlsx_text = l.text_cells;
                     xlsx_formats = l.formats;
+                    xlsx_rows = l.rows;
                     (l.wb, None)
                 }
                 Err(err) => {
@@ -2170,6 +2176,9 @@ impl Editor {
         grid.xlsx.book = book;
         for ((r, c), f) in xlsx_formats {
             grid.formats.set(r, c, f);
+        }
+        for (r, h) in xlsx_rows {
+            grid.view.rows.set(r, h);
         }
         grid.save.formats = grid.formats.clone();
         if grid.is_xlsx() {
@@ -2428,7 +2437,7 @@ impl Editor {
         self.grid_doc_named(&name)
     }
 
-    fn pane_grid_mut(&mut self, pane: usize) -> Option<&mut GridDoc> {
+    pub(super) fn pane_grid_mut(&mut self, pane: usize) -> Option<&mut GridDoc> {
         let name = self.pane(pane)?.buffer.clone();
         self.grid_doc_named_mut(&name)
     }
@@ -2840,6 +2849,7 @@ impl Editor {
                 text,
                 fill,
                 num,
+                wrap,
                 bad_color: None,
             } => {
                 let num = num.map(|n| NumCode::intern(cellfmt::preset_code(&n)));
@@ -2848,6 +2858,7 @@ impl Editor {
                     text: text.unwrap_or(f.text),
                     fill: fill.unwrap_or(f.fill),
                     num: num.unwrap_or(f.num),
+                    wrap: wrap.unwrap_or(f.wrap),
                 });
             }
             CellFormat {
@@ -3218,9 +3229,9 @@ impl Editor {
                 };
             }
             HideColumn => return self.grid_hide_columns(cx),
-            ToggleBold | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral
-            | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
-            | IncreaseDecimals | DecreaseDecimals => {
+            ToggleBold | CycleTextColor | CycleFillColor | ToggleWrap | ClearFormat
+            | FormatGeneral | FormatNumber | FormatCurrency | FormatPercent | FormatDate
+            | FormatText | IncreaseDecimals | DecreaseDecimals => {
                 return self.grid_format(cmd, None, cx);
             }
             ShowColumns => return self.grid_show_columns(cx),
@@ -3868,6 +3879,7 @@ impl Editor {
         g.save.failed = false;
         let mut background = None;
         let mut formats = Vec::new();
+        let mut rows = Vec::new();
         match parsed {
             Parsed::Xlsx(l) => {
                 // The workbook as the file has it now, for every sheet.
@@ -3896,6 +3908,7 @@ impl Editor {
                 g.xlsx.text = l.text_cells;
                 g.xlsx.sheet_published = None;
                 formats = l.formats;
+                rows = l.rows;
                 if let Some(old) = g.loading.take() {
                     old.cancel.store(true, Ordering::Relaxed);
                 }
@@ -3927,6 +3940,9 @@ impl Editor {
         // After `replaced_workbook`, which drops the old formatting.
         for ((r, c), f) in formats {
             g.formats.set(r, c, f);
+        }
+        for (r, h) in rows {
+            g.view.rows.set(r, h);
         }
         g.save.formats = g.formats.clone();
         g.apply_filters();

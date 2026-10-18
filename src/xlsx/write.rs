@@ -3,8 +3,9 @@
 //! The package has exactly the parts Excel needs to open a file without a
 //! repair prompt — content types, package and workbook relationships, app
 //! and core properties, the workbook, a stylesheet holding just the cell
-//! formats used (bold, font and fill colors, number formats) and the sheet —
-//! and nothing that would need keeping in sync.
+//! formats used (bold, font and fill colors, number formats, Wrap Text) and
+//! the sheets with their row heights — and nothing that would need keeping
+//! in sync.
 //!
 //! Cell encoding:
 //!
@@ -36,7 +37,7 @@ use std::fmt::Write as _;
 
 use super::xml::{escape_attr, escape_xstring};
 use super::zip;
-use super::{XStyle, XValue, cell_name};
+use super::{XRow, XStyle, XValue, cell_name};
 
 /// One cell to write. `formula` is formula text without the leading `=`. A
 /// cell with a style but no value or formula is written as formatting only.
@@ -88,20 +89,33 @@ pub fn write_book<'a, I>(sheets: Vec<(&str, I)>, date1904: bool) -> Vec<u8>
 where
     I: IntoIterator<Item = WriteCell<'a>>,
 {
+    let sheets = sheets
+        .into_iter()
+        .map(|(name, cells)| (name, cells, &[][..]))
+        .collect();
+    write_book_rows(sheets, date1904)
+}
+
+/// [`write_book`], with each sheet's row heights (`rows` in any order, one
+/// per row).
+pub fn write_book_rows<'a, I>(sheets: Vec<(&str, I, &[XRow])>, date1904: bool) -> Vec<u8>
+where
+    I: IntoIterator<Item = WriteCell<'a>>,
+{
     let n = sheets.len().max(1);
-    let names: Vec<&str> = sheets.iter().map(|(name, _)| *name).collect();
+    let names: Vec<&str> = sheets.iter().map(|(name, ..)| *name).collect();
     let mut styles = Styles::default();
     let mut dynamic = false;
     let mut parts: Vec<String> = sheets
         .into_iter()
-        .map(|(_, cells)| {
-            let (xml, d) = sheet_xml(cells, &mut styles);
+        .map(|(_, cells, rows)| {
+            let (xml, d) = sheet_xml(cells, rows, &mut styles);
             dynamic |= d;
             xml
         })
         .collect();
     if parts.is_empty() {
-        parts.push(sheet_xml(std::iter::empty(), &mut styles).0);
+        parts.push(sheet_xml(std::iter::empty(), &[], &mut styles).0);
     }
     let mut z = zip::Writer::new();
     z.add("[Content_Types].xml", content_types(n, dynamic).as_bytes());
@@ -292,7 +306,11 @@ impl Styles {
             if fill_id != 0 {
                 xfs.push_str(" applyFill=\"1\"");
             }
-            xfs.push_str("/>");
+            if st.wrap {
+                xfs.push_str(" applyAlignment=\"1\"><alignment wrapText=\"1\"/></xf>");
+            } else {
+                xfs.push_str("/>");
+            }
         }
         let mut s = String::from(DECL);
         let _ = write!(s, "<styleSheet xmlns=\"{NS_MAIN}\">");
@@ -424,11 +442,30 @@ fn needs_preserve(s: &str) -> bool {
     s.starts_with(ws) || s.ends_with(ws) || s.contains('\n')
 }
 
+/// A `<row>` start tag: its number and, when it has one, its height.
+fn open_row(s: &mut String, row: usize, height: Option<&XRow>) {
+    let _ = write!(s, "<row r=\"{}\"", row + 1);
+    if let Some(h) = height {
+        // Points, to the hundredth (Excel's own precision).
+        let pt = (h.height * 100.0).round() / 100.0;
+        let _ = write!(s, " ht=\"{pt}\"");
+        if h.custom {
+            s.push_str(" customHeight=\"1\"");
+        }
+    }
+}
+
 /// The worksheet part, and whether a dynamic-array formula is in it.
 fn sheet_xml<'a>(
     cells: impl IntoIterator<Item = WriteCell<'a>>,
+    rows: &[XRow],
     styles: &mut Styles,
 ) -> (String, bool) {
+    let heights: std::collections::BTreeMap<usize, &XRow> = rows
+        .iter()
+        .filter(|r| r.height.is_finite() && r.height >= 0.0)
+        .map(|r| (r.row, r))
+        .collect();
     let mut cells: Vec<WriteCell> = cells
         .into_iter()
         .filter(|c| {
@@ -462,7 +499,7 @@ fn sheet_xml<'a>(
         _ => "A1".into(),
     };
     let _ = write!(s, "<dimension ref=\"{dim}\"/>");
-    if cells.is_empty() {
+    if cells.is_empty() && heights.is_empty() {
         s.push_str("<sheetData/></worksheet>");
         return (s, false);
     }
@@ -470,18 +507,32 @@ fn sheet_xml<'a>(
         .iter()
         .any(|c| c.formula.is_some() && c.array.is_some());
     s.push_str("<sheetData>");
+    // Rows with a height but no cells go in order among the others.
+    let mut sized = heights.iter().peekable();
+    let mut empty_rows_before = |s: &mut String, row: usize| {
+        while let Some((&r, h)) = sized.next_if(|(r, _)| **r < row) {
+            open_row(s, r, Some(h));
+            s.push_str("/>");
+        }
+    };
     let mut row = None;
     for c in &cells {
         if row != Some(c.row) {
             if row.is_some() {
                 s.push_str("</row>");
             }
-            let _ = write!(s, "<row r=\"{}\">", c.row + 1);
+            empty_rows_before(&mut s, c.row);
+            open_row(&mut s, c.row, heights.get(&c.row).copied());
+            s.push('>');
             row = Some(c.row);
         }
         push_cell(&mut s, c, styles.id(c.style));
     }
-    s.push_str("</row></sheetData></worksheet>");
+    if row.is_some() {
+        s.push_str("</row>");
+    }
+    empty_rows_before(&mut s, usize::MAX);
+    s.push_str("</sheetData></worksheet>");
     (s, dynamic)
 }
 
@@ -754,10 +805,10 @@ mod tests {
             pos,
             [(0, 1, a.clone()), (5, 0, c.clone()), (5, 2, a.clone())]
         );
-        let (xml, _) = sheet_xml(cells.iter().copied(), &mut Styles::default());
+        let (xml, _) = sheet_xml(cells.iter().copied(), &[], &mut Styles::default());
         assert!(xml.contains("<dimension ref=\"A1:C6\"/>"), "{xml}");
         assert!(
-            sheet_xml(std::iter::empty(), &mut Styles::default())
+            sheet_xml(std::iter::empty(), &[], &mut Styles::default())
                 .0
                 .contains("<dimension ref=\"A1\"/><sheetData/>")
         );
@@ -858,5 +909,73 @@ mod tests {
         );
         // Two cells with one style share one cell format.
         assert_eq!(book.sheets[0].cells[1].style, book.sheets[0].cells[2].style);
+    }
+
+    /// Wrap Text and row heights read back as written; a height Excel would
+    /// work out itself (not `custom`) is written but not read back, and a
+    /// height on a row without cells still gets its row.
+    #[test]
+    fn wrap_and_row_heights_round_trip() {
+        let wrap = XStyle {
+            wrap: true,
+            ..Default::default()
+        };
+        let bold_wrap = XStyle {
+            bold: true,
+            wrap: true,
+            ..Default::default()
+        };
+        let t = XValue::Text("one\ntwo".into());
+        let cells = [
+            WriteCell {
+                row: 1,
+                col: 0,
+                value: &t,
+                formula: None,
+                array: None,
+                style: Some(&wrap),
+            },
+            WriteCell {
+                row: 1,
+                col: 1,
+                value: &t,
+                formula: None,
+                array: None,
+                style: Some(&bold_wrap),
+            },
+        ];
+        let rows = [
+            XRow {
+                row: 4,
+                height: 40.5,
+                custom: true,
+            },
+            XRow {
+                row: 1,
+                height: 30.0,
+                custom: false,
+            },
+            XRow {
+                row: 0,
+                height: 9.75,
+                custom: true,
+            },
+        ];
+        let bytes = write_book_rows(vec![("S", cells.iter().copied(), &rows[..])], false);
+        let book = read(&bytes).unwrap();
+        assert_eq!(book.not_preserved, Vec::<String>::new());
+        let sheet = &book.sheets[0];
+        assert_eq!(book.styles[sheet.cells[0].style], wrap);
+        assert_eq!(book.styles[sheet.cells[1].style], bold_wrap);
+        assert_eq!(sheet.rows, [rows[2], rows[0]]);
+        let mut s = Styles::default();
+        let (xml, _) = sheet_xml(cells.iter().copied(), &rows, &mut s);
+        assert!(
+            xml.contains("<row r=\"1\" ht=\"9.75\" customHeight=\"1\"/><row r=\"2\" ht=\"30\">"),
+            "{xml}"
+        );
+        assert!(
+            xml.ends_with("<row r=\"5\" ht=\"40.5\" customHeight=\"1\"/></sheetData></worksheet>")
+        );
     }
 }

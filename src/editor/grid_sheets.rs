@@ -350,6 +350,10 @@ impl Editor {
         for ((r, c), f) in data.formats {
             grid.formats.set(r, c, f);
         }
+        // Heights set by hand; Wrap Text works out the rest.
+        for &(r, h, _) in data.rows.iter().filter(|r| r.2) {
+            grid.view.rows.set(r, h);
+        }
         grid.mark_saved();
         grid.rebuild_formulas();
         let label = self.book_label(book);

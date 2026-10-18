@@ -35,7 +35,7 @@ use std::fmt;
 #[allow(unused_imports)]
 pub use read::read;
 #[allow(unused_imports)]
-pub use write::{WriteCell, write, write_book};
+pub use write::{WriteCell, write, write_book, write_book_rows};
 
 /// A cell's value — for a formula cell, the result cached in the file.
 #[derive(Clone, Debug, PartialEq)]
@@ -91,9 +91,10 @@ pub struct XCell {
 }
 
 /// The cell formatting this module reads and writes: bold, a font color and
-/// a solid fill (ARGB), and a number-format code. A file's cell format
-/// holding anything more (italics, borders, alignment, a named style, …) is
-/// reported in [`Book::not_preserved`] as "cell styles" instead.
+/// a solid fill (ARGB), a number-format code, and Wrap Text. A file's cell
+/// format holding anything more (italics, borders, other alignment, a named
+/// style, …) is reported in [`Book::not_preserved`] as "cell styles"
+/// instead.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct XStyle {
     pub bold: bool,
@@ -101,6 +102,8 @@ pub struct XStyle {
     pub fill: Option<u32>,
     /// `None` is General.
     pub num_fmt: Option<String>,
+    /// `<alignment wrapText="1"/>`.
+    pub wrap: bool,
 }
 
 impl XStyle {
@@ -114,6 +117,21 @@ pub struct XSheet {
     pub name: String,
     /// Row-major order.
     pub cells: Vec<XCell>,
+    /// Rows with a height set by hand (`customHeight`), in order. A height
+    /// Excel worked out itself isn't kept: it is worked out again.
+    pub rows: Vec<XRow>,
+}
+
+/// A row's height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XRow {
+    /// 0-based.
+    pub row: usize,
+    /// In points (`ht`).
+    pub height: f64,
+    /// Set by hand (`customHeight`); otherwise written so other apps show
+    /// it before they lay the row out themselves.
+    pub custom: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

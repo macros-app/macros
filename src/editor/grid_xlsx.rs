@@ -6,9 +6,9 @@
 //! contents, so saving from any of them writes every sheet.
 //!
 //! The `.xlsx` support is deliberately minimal (see `src/xlsx`): values,
-//! formulas and their cached results, and the hand-set formatting a grid
-//! has (bold, palette colors, number formats). A file holding anything this
-//! would drop on a rewrite — charts, other cell styles, hidden sheets, … —
+//! formulas and their cached results, the hand-set formatting a grid has
+//! (bold, palette colors, number formats, Wrap Text), and row heights. A
+//! file holding anything this would drop on a rewrite — charts, other cell styles, hidden sheets, … —
 //! opens *protected*: it can be viewed and edited, and saved as a new file
 //! (`:w copy.xlsx`), but never written back over itself, so the original is
 //! never silently damaged.
@@ -23,7 +23,7 @@ use crate::formula::engine::SheetValues;
 use crate::formula::value::{ErrorKind, Value, general_format};
 use crate::grid::cellfmt::{self, CellFmt, NumCode};
 use crate::grid::model::Workbook;
-use crate::xlsx::{self, WriteCell, XFormula, XStyle, XValue};
+use crate::xlsx::{self, WriteCell, XFormula, XRow, XStyle, XValue};
 
 use gpui::Context;
 
@@ -52,7 +52,14 @@ pub(super) struct SheetData {
     pub spills: Vec<Spill>,
     /// The values spilled into other cells, written as cached values.
     pub spilled: Vec<(usize, usize, Value)>,
+    /// Row heights: `(row, height in 100% px, set by hand)`. Only heights
+    /// set by hand are read back; Wrap Text works the others out again.
+    pub rows: Vec<(usize, f64, bool)>,
 }
+
+/// Points (an `.xlsx` row height) per grid pixel at 100%: Excel's default
+/// 15 pt row is 20 px.
+const PT_PER_PX: f64 = 0.75;
 
 /// A workbook with several sheets, shared by the buffers showing them.
 #[derive(Debug, Default)]
@@ -121,6 +128,8 @@ pub(super) struct Loaded {
     pub text_cells: HashMap<(usize, usize), String>,
     /// The sheet's cell formatting, as the grid's hand-set formats.
     pub formats: Vec<((usize, usize), CellFmt)>,
+    /// The sheet's rows sized by hand: `(row, height)` in 100% px.
+    pub rows: Vec<(usize, f64)>,
     /// Every sheet's contents, in workbook order.
     pub data: Vec<SheetData>,
 }
@@ -137,6 +146,7 @@ fn cell_fmt(st: &XStyle) -> Option<CellFmt> {
         text: color(st.color)?,
         fill: color(st.fill)?,
         num: st.num_fmt.as_deref().and_then(NumCode::intern),
+        wrap: st.wrap,
     })
 }
 
@@ -148,6 +158,7 @@ fn x_style(f: CellFmt) -> XStyle {
         color: argb(f.text),
         fill: argb(f.fill),
         num_fmt: f.num.map(|n| n.code().to_string()),
+        wrap: f.wrap,
     }
 }
 
@@ -247,6 +258,7 @@ pub(super) fn load(
             others: HashMap::new(),
             text_cells: HashMap::new(),
             formats: Vec::new(),
+            rows: Vec::new(),
             data: vec![SheetData::default()],
         });
     }
@@ -308,6 +320,12 @@ pub(super) fn load(
         others,
         text_cells: shown.text.clone(),
         formats: shown.formats.clone(),
+        rows: shown
+            .rows
+            .iter()
+            .filter(|r| r.2)
+            .map(|&(r, h, _)| (r, h))
+            .collect(),
         data,
     })
 }
@@ -418,6 +436,12 @@ fn sheet_data(
         values,
         spills,
         spilled,
+        rows: sheet
+            .rows
+            .iter()
+            .filter(|r| r.custom)
+            .map(|r| (r.row, r.height / PT_PER_PX, true))
+            .collect(),
     }
 }
 
@@ -681,6 +705,15 @@ impl GridDoc {
                 .filter_map(|(r, c)| Some(((r, c), self.formulas.spill_range(r, c)?)))
                 .collect(),
             spilled: self.spilled_cells(|v| v.clone()),
+            // Heights set by hand, and those Wrap Text worked out (so other
+            // apps show wrapped rows tall before laying them out themselves).
+            rows: self
+                .view
+                .rows
+                .overrides()
+                .map(|(r, h)| (r, h, true))
+                .chain(self.view.rows.auto_sized().map(|(r, h)| (r, h, false)))
+                .collect(),
         }
     }
 
@@ -804,11 +837,25 @@ fn owned_cells(d: &SheetData) -> Vec<OwnedCell> {
 /// An `.xlsx` package of `sheets`, in order.
 fn write_sheets(sheets: &[(&str, &SheetData)]) -> Vec<u8> {
     let owned: Vec<Vec<OwnedCell>> = sheets.iter().map(|(_, d)| owned_cells(d)).collect();
-    xlsx::write_book(
+    let rows: Vec<Vec<XRow>> = sheets
+        .iter()
+        .map(|(_, d)| {
+            d.rows
+                .iter()
+                .map(|&(row, px, custom)| XRow {
+                    row,
+                    height: px * PT_PER_PX,
+                    custom,
+                })
+                .collect()
+        })
+        .collect();
+    xlsx::write_book_rows(
         sheets
             .iter()
             .zip(&owned)
-            .map(|((name, _), cells)| {
+            .zip(&rows)
+            .map(|(((name, _), cells), rows)| {
                 let cells = cells.iter().map(|(r, c, v, f, array, st)| WriteCell {
                     row: *r,
                     col: *c,
@@ -817,7 +864,7 @@ fn write_sheets(sheets: &[(&str, &SheetData)]) -> Vec<u8> {
                     array: array.as_deref(),
                     style: st.as_ref(),
                 });
-                (*name, cells)
+                (*name, cells, &rows[..])
             })
             .collect(),
         false,

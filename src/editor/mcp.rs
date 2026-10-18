@@ -950,18 +950,19 @@ fn grid_text(g: &super::grid::GridDoc, lines: Option<(usize, usize)>, faces: boo
             .collect();
         cells.sort_unstable();
         if !cells.is_empty() {
-            out.push_str("--- formatting (cell: bold, text color, fill, number format)\n");
+            out.push_str("--- formatting (cell: bold, text color, fill, number format, wrap)\n");
             for (r, c) in cells {
                 let f = g.formats.get(r, c);
                 let color = |i: Option<u8>| i.map_or("none", color_name);
                 out.push_str(&format!(
-                    "{}: {}, {}, {}, {}\n",
+                    "{}: {}, {}, {}, {}, {}\n",
                     cell_name(r, c),
                     if f.bold { "bold" } else { "normal" },
                     color(f.text),
                     color(f.fill),
                     f.num
-                        .map_or_else(|| "General".into(), |n| n.code().to_string())
+                        .map_or_else(|| "General".into(), |n| n.code().to_string()),
+                    if f.wrap { "wrap" } else { "no wrap" }
                 ));
             }
         }

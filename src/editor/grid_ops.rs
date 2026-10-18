@@ -1149,7 +1149,7 @@ impl Editor {
         );
     }
 
-    /// Bold, text color, fill, a number format, or clear, on the selection
+    /// Bold, text color, fill, a number format, wrap, or clear, on the selection
     /// (or the cursor cell). The new value comes from the cell the selection
     /// started on (Excel's active cell) — the next color after its color,
     /// bold unless it is bold, its format with a decimal place more — so the
@@ -1221,6 +1221,11 @@ impl Editor {
                 let next = cellfmt::next_color(cur.text);
                 g.format_cells(cells, |f| CellFmt { text: next, ..f });
                 format!("Text color: {}", color(next))
+            }
+            (None, GridCmd::ToggleWrap) => {
+                let on = !cur.wrap;
+                g.format_cells(cells, |f| CellFmt { wrap: on, ..f });
+                if on { "Wrap text" } else { "No wrap" }.to_string()
             }
             (None, GridCmd::CycleFillColor) => {
                 let next = cellfmt::next_color(cur.fill);

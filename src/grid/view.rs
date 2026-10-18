@@ -50,10 +50,16 @@ pub const MAX_INDEX: usize = 1 << 31;
 /// `only` (a row filter / narrowing: inside its range, only the listed indices
 /// show). Both stay cheap at a million rows — the filter is a sorted list
 /// searched by bisection, never a per-index override.
+///
+/// A row's size can also be automatic: Wrap Text grows a row to fit its
+/// wrapped cells. Those sizes sit in `overrides` too (so positions need no
+/// second table) and are listed in `auto`; a size set by hand replaces an
+/// automatic one and is never changed by it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Axis {
     pub default: f64,
     overrides: BTreeMap<usize, f64>,
+    auto: BTreeSet<usize>,
     hidden: BTreeSet<usize>,
     only: Option<Arc<Only>>,
 }
@@ -63,6 +69,7 @@ pub struct Axis {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sizing {
     overrides: BTreeMap<usize, f64>,
+    auto: BTreeSet<usize>,
     hidden: BTreeSet<usize>,
 }
 
@@ -79,6 +86,7 @@ impl Axis {
         Self {
             default,
             overrides: BTreeMap::new(),
+            auto: BTreeSet::new(),
             hidden: BTreeSet::new(),
             only: None,
         }
@@ -89,12 +97,27 @@ impl Axis {
         if !self.shown(i) {
             return 0.0;
         }
-        self.base(i)
+        self.sized(i)
     }
 
-    /// The stored size, ignoring hiding and filtering.
+    /// The size set by hand (or the default), ignoring hiding, filtering
+    /// and automatic sizes.
     pub fn base(&self, i: usize) -> f64 {
+        if self.auto.contains(&i) {
+            return self.default;
+        }
         self.overrides.get(&i).copied().unwrap_or(self.default)
+    }
+
+    /// The size on screen when shown: set by hand, else automatic, else the
+    /// default.
+    fn sized(&self, i: usize) -> f64 {
+        self.overrides.get(&i).copied().unwrap_or(self.default)
+    }
+
+    /// Whether index `i`'s size was set by hand.
+    pub fn is_manual(&self, i: usize) -> bool {
+        self.overrides.contains_key(&i) && !self.auto.contains(&i)
     }
 
     /// Not hidden and not filtered out (it may still be dragged to 0).
@@ -108,13 +131,15 @@ impl Axis {
             .is_some_and(|o| i < o.end && o.shown.binary_search(&i).is_err())
     }
 
-    /// Set index `i`'s size; a size equal to the default drops the override.
+    /// Set index `i`'s size by hand; the default drops the override (and
+    /// lets an automatic size apply again).
     pub fn set(&mut self, i: usize, size: f64) {
         let size = if size < MIN_SIZE {
             0.0
         } else {
             size.min(MAX_SIZE)
         };
+        self.auto.remove(&i);
         if (size - self.default).abs() < f64::EPSILON {
             self.overrides.remove(&i);
         } else {
@@ -122,9 +147,39 @@ impl Axis {
         }
     }
 
-    /// The overrides, for persisting.
+    /// Give index `i` an automatic size (the default removes it), unless
+    /// its size was set by hand. Returns whether its size changed.
+    pub fn set_auto(&mut self, i: usize, size: f64) -> bool {
+        if self.is_manual(i) {
+            return false;
+        }
+        let size = size.clamp(MIN_SIZE, MAX_SIZE);
+        if (size - self.default).abs() < f64::EPSILON {
+            self.auto.remove(&i);
+            return self.overrides.remove(&i).is_some();
+        }
+        self.auto.insert(i);
+        self.overrides
+            .insert(i, size)
+            .is_none_or(|old| (old - size).abs() > f64::EPSILON)
+    }
+
+    /// Whether any index has an automatic size.
+    pub fn has_auto(&self) -> bool {
+        !self.auto.is_empty()
+    }
+
+    /// Indices with an automatic size, in order.
+    pub fn auto_sized(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
+        self.auto.iter().map(|&i| (i, self.sized(i)))
+    }
+
+    /// The sizes set by hand, for persisting.
     pub fn overrides(&self) -> impl Iterator<Item = (usize, f64)> + '_ {
-        self.overrides.iter().map(|(&i, &s)| (i, s))
+        self.overrides
+            .iter()
+            .filter(|(i, _)| !self.auto.contains(i))
+            .map(|(&i, &s)| (i, s))
     }
 
     /// Hide or show index `i` (its size is kept for when it shows again).
@@ -145,12 +200,14 @@ impl Axis {
     pub fn sizing(&self) -> Sizing {
         Sizing {
             overrides: self.overrides.clone(),
+            auto: self.auto.clone(),
             hidden: self.hidden.clone(),
         }
     }
 
     pub fn set_sizing(&mut self, sizing: Sizing) {
         self.overrides = sizing.overrides;
+        self.auto = sizing.auto;
         self.hidden = sizing.hidden;
     }
 
@@ -165,6 +222,10 @@ impl Axis {
         self.overrides = std::mem::take(&mut self.overrides)
             .into_iter()
             .filter_map(|(i, s)| Some((map(i)?, s)))
+            .collect();
+        self.auto = std::mem::take(&mut self.auto)
+            .into_iter()
+            .filter_map(&map)
             .collect();
         self.hidden = std::mem::take(&mut self.hidden)
             .into_iter()
@@ -1168,6 +1229,42 @@ mod tests {
         assert_eq!(a.overrides().count(), 0);
         a.set(4, 2.0); // below MIN_SIZE hides
         assert_eq!(a.size(4), 0.0);
+    }
+
+    /// Wrap Text's automatic row heights move positions like any size, but
+    /// a size set by hand wins, isn't changed by them, and is all that's
+    /// persisted; setting the default by hand lets the automatic size back.
+    #[test]
+    fn axis_auto_sizes_yield_to_manual_ones() {
+        let mut a = Axis::new(20.0);
+        assert!(a.set_auto(2, 50.0));
+        assert!(!a.set_auto(2, 50.0), "unchanged");
+        assert_eq!(a.size(2), 50.0);
+        assert_eq!(a.start(3), 90.0);
+        assert_eq!(a.index_at(55.0), 2);
+        assert_eq!(a.base(2), 20.0, "nothing set by hand");
+        assert!(!a.is_manual(2) && a.has_auto());
+        assert_eq!(a.overrides().count(), 0);
+        assert_eq!(a.auto_sized().collect::<Vec<_>>(), [(2, 50.0)]);
+        a.set(2, 30.0);
+        assert!(a.is_manual(2) && !a.has_auto());
+        assert!(!a.set_auto(2, 70.0), "a size set by hand stays");
+        assert_eq!(a.size(2), 30.0);
+        assert_eq!(a.overrides().collect::<Vec<_>>(), [(2, 30.0)]);
+        a.set(2, 20.0);
+        assert!(a.set_auto(2, 70.0));
+        assert_eq!(a.size(2), 70.0);
+        // Back to one line: the automatic size goes.
+        assert!(a.set_auto(2, 20.0));
+        assert!(!a.has_auto() && !a.has_sizing());
+        // Automatic sizes follow their rows and come back with undo.
+        a.set_auto(5, 40.0);
+        let before = a.sizing();
+        a.remap(|i| Some(if i == 5 { 1 } else { i }));
+        assert_eq!(a.size(1), 40.0);
+        assert_eq!(a.size(5), 20.0);
+        a.set_sizing(before);
+        assert_eq!(a.size(5), 40.0);
     }
 
     #[test]

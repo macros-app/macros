@@ -12,7 +12,8 @@
 //! - [`infer`]: column type inference ([`ColType`]).
 //! - [`dialect`]: encoding / delimiter / quoting / header sniffing.
 //! - [`parse`]: the loader. [`write`]: the saver.
-//! - [`cellfmt`]: bold and colors set by hand on single cells.
+//! - [`cellfmt`]: bold, colors, number formats and wrap set by hand on cells.
+//! - [`wrap`]: Wrap Text line breaking and row heights.
 //! - [`scrollbar`]: scrollbar thumb geometry over the infinite sheet.
 //! - [`series`]: continuing a series down a column (copy-down / fill).
 //! - [`dedup`]: Remove duplicates — which rows repeat an earlier one.
@@ -45,6 +46,7 @@ pub mod style;
 #[cfg(test)]
 mod testgen;
 pub mod view;
+pub mod wrap;
 pub mod write;
 
 /// A fast content fingerprint (auto-revert, sidecar names; not a security

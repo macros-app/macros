@@ -193,7 +193,9 @@ pub enum GridCmd {
     CycleTextColor,
     /// Give the selected cells the fill color after the cursor cell's.
     CycleFillColor,
-    /// Remove bold, colors and number formats from the selected cells.
+    /// Wrap Text on the selected cells, or off when the cursor's wraps.
+    ToggleWrap,
+    /// Remove bold, colors, number formats and wrap from the selected cells.
     ClearFormat,
     /// Number formats (display only — the stored values are untouched).
     FormatGeneral,
@@ -364,6 +366,7 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-toggle-bold", ToggleBold),
         ("grid-cycle-text-color", CycleTextColor),
         ("grid-cycle-fill-color", CycleFillColor),
+        ("grid-toggle-wrap", ToggleWrap),
         ("grid-clear-format", ClearFormat),
         ("grid-format-general", FormatGeneral),
         ("grid-format-number", FormatNumber),
@@ -427,6 +430,7 @@ impl GridCmd {
                 | ToggleBold
                 | CycleTextColor
                 | CycleFillColor
+                | ToggleWrap
                 | ClearFormat
                 | FormatGeneral
                 | FormatNumber
@@ -592,6 +596,7 @@ pub enum GridOp {
         fill: Option<Option<u8>>,
         /// A number format code or preset name (`"General"` removes it).
         num: Option<String>,
+        wrap: Option<bool>,
         /// The color name given, when it isn't one of the palette's.
         bad_color: Option<String>,
     },

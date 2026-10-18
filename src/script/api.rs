@@ -611,6 +611,7 @@ mod tests {
             "grid-current-sheet",
             "grid-open-sheet",
             "grid-set-cell-bold",
+            "grid-set-cell-wrap",
             "grid-set-cell-text-color",
             "grid-set-cell-fill-color",
             "grid-clear-cell-formats",

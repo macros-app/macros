@@ -116,6 +116,9 @@
 ;; moves with its cells and is undoable. CSV can't hold it, so saving a
 ;; formatted CSV grid saves it as .xlsx, which keeps it:
 ;;   (grid-set-cell-bold row col #t)
+;;   (grid-set-cell-wrap row col #t)   ; Wrap Text: wrap within the column,
+;;     showing every line (M-RET makes one); the row grows to fit unless its
+;;     height was set by hand. An unwrapped cell shows its first line and ↵.
 ;;   (grid-set-cell-text-color row col 'red)   ; #f or 'none removes it
 ;;   (grid-set-cell-fill-color row col 'yellow)
 ;;     colors: red orange yellow green blue purple — a theme face named
@@ -125,7 +128,7 @@
 ;;     format code, e.g. "#,##0.0", "d mmm yyyy", "0.0%". Display only: the
 ;;     stored value is untouched. 'general removes it.
 ;;   (grid-set-number-format 'percent)   ; the selection (or cursor cell)
-;;   (grid-clear-cell-formats)
+;;   (grid-clear-cell-formats)   ; bold, colors, number formats and wrap
 ;;
 ;; Settings (editor-wide):
 ;;   (grid-default-column-width 80)   (grid-max-autofit-width 400)
@@ -159,13 +162,16 @@
 ;; .xlsx. The color keys step through red → orange → yellow → green → blue →
 ;; purple → none. The number-format keys are Excel's Ctrl+Shift ones:
 ;; ~ general, ! number, $ currency, % percent, # date, @ text; `.`/`,` add or
-;; drop a decimal place, `n` prompts for a preset or format code. `.` repeats.
+;; drop a decimal place, `n` prompts for a preset or format code. `w` turns
+;; Wrap Text on or off: the text wraps within the column and the row grows to
+;; fit (unless its height was set by hand). `.` repeats.
 (define (grid-bind-format km prefix)
   (define-keys km
     (map (lambda (b) (list (string-append prefix " " (car b)) (cadr b)))
          '(("b" grid-toggle-bold)
            ("c" grid-cycle-text-color)
            ("f" grid-cycle-fill-color)
+           ("w" grid-toggle-wrap)
            ("d" grid-clear-format)
            ("n" grid-number-format)
            ("~" grid-format-general)
@@ -891,6 +897,7 @@
             (list "*" "Bold on/off" 'grid-toggle-bold)
             (list "T" "Next text color" 'grid-cycle-text-color)
             (list "F" "Next fill color" 'grid-cycle-fill-color)
+            (list "R" "Wrap text on/off" 'grid-toggle-wrap)
             (list "#" "Number format…" 'grid-number-format)
             (list "+" "More decimals" 'grid-increase-decimals)
             (list "-" "Fewer decimals" 'grid-decrease-decimals)
