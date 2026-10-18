@@ -30,6 +30,10 @@ use gpui::Context;
 use super::Editor;
 use super::grid::{GridDoc, SHEET};
 
+/// A dynamic-array formula's cell, and the range `(r0, c0, r1, c1)` it
+/// spills into.
+pub(super) type Spill = ((usize, usize), (usize, usize, usize, usize));
+
 /// One sheet's contents as a grid holds them: what a sheet with no buffer
 /// open is saved from and opens with.
 #[derive(Clone, Debug, Default)]
@@ -43,6 +47,11 @@ pub(super) struct SheetData {
     /// The values other sheets' formulas read (a formula's result), also
     /// cached in the file for a formula.
     pub values: SheetValues,
+    /// Each dynamic-array formula's cell and the range `(r0, c0, r1, c1)` it
+    /// spills into.
+    pub spills: Vec<Spill>,
+    /// The values spilled into other cells, written as cached values.
+    pub spilled: Vec<(usize, usize, Value)>,
 }
 
 /// A workbook with several sheets, shared by the buffers showing them.
@@ -183,6 +192,42 @@ fn unsupported_names(text: &str, externals: &HashSet<String>) -> Vec<String> {
     out
 }
 
+/// Formula text from a file as this grid shows it: Excel's `_xlfn.`
+/// prefixes and the file forms of `@` and `#` read back. Other text is kept
+/// as written (spacing included), as is text that doesn't parse.
+fn file_formula(text: &str) -> String {
+    match crate::formula::parse::parse(text) {
+        Ok(e) if text.to_ascii_lowercase().contains("_xl") => crate::formula::print::print(&e),
+        _ => text.to_string(),
+    }
+}
+
+/// A formula from a file that isn't a dynamic-array one: as dynamic-array
+/// Excel reads it, with `@` where it intersects instead of spilling (see
+/// [`crate::formula::implicit`]).
+fn legacy_formula(text: &str) -> String {
+    match crate::formula::parse::parse(text) {
+        Ok(mut e) => {
+            let before = e.clone();
+            crate::formula::implicit::mark(&mut e);
+            if e == before {
+                file_formula(text)
+            } else {
+                crate::formula::print::print(&e)
+            }
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
+/// `B2:C9` (or `B2`) as `(r0, c0, r1, c1)`.
+fn range_bounds(range: &str) -> Option<(usize, usize, usize, usize)> {
+    let (a, b) = range.split_once(':').unwrap_or((range, range));
+    let (r0, c0) = xlsx::parse_ref(a.trim())?;
+    let (r1, c1) = xlsx::parse_ref(b.trim())?;
+    Some((r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
+}
+
 /// Load an `.xlsx` package, showing sheet `index` (0 = the first).
 /// `externals` are the Scheme grid functions defined now (upper case):
 /// formulas calling only those and built-ins load live; any other formula
@@ -285,6 +330,26 @@ fn sheet_data(
             masters.insert(*si, (c.row, c.col, text.clone()));
         }
     }
+    // Dynamic-array formulas this grid computes spill again on load: the
+    // values the file cached in their ranges give way to the spill.
+    let spills: Vec<Spill> = sheet
+        .cells
+        .iter()
+        .filter_map(|c| match &c.formula {
+            Some(XFormula::Dynamic { text, range })
+                if unsupported_names(&format!("={text}"), externals).is_empty() =>
+            {
+                Some(((c.row, c.col), range_bounds(range)?))
+            }
+            _ => None,
+        })
+        .collect();
+    let in_spill = |r: usize, c: usize| {
+        spills.iter().any(|&((ar, ac), (r0, c0, r1, c1))| {
+            (r, c) != (ar, ac) && (r0..=r1).contains(&r) && (c0..=c1).contains(&c)
+        })
+    };
+    let mut spilled = Vec::new();
     let mut cells = Vec::with_capacity(sheet.cells.len());
     let mut text_cells = HashMap::new();
     let mut formats = Vec::new();
@@ -298,18 +363,23 @@ fn sheet_data(
                 None => {}
             }
         }
+        if in_spill(c.row, c.col) {
+            spilled.push((c.row, c.col, cached_value(&c.value)));
+            continue;
+        }
         let formula = match &c.formula {
             Some(XFormula::Normal(f)) | Some(XFormula::SharedMaster { text: f, .. }) => {
-                Some(format!("={f}"))
+                Some(legacy_formula(&format!("={f}")))
             }
-            Some(XFormula::Array { text, .. }) => Some(format!("={text}")),
+            Some(XFormula::Array { text, .. }) => Some(legacy_formula(&format!("={text}"))),
             Some(XFormula::SharedChild { si }) => masters.get(si).map(|(mr, mc, f)| {
-                super::grid_formula::translated(
+                legacy_formula(&super::grid_formula::translated(
                     &format!("={f}"),
                     c.row as isize - *mr as isize,
                     c.col as isize - *mc as isize,
-                )
+                ))
             }),
+            Some(XFormula::Dynamic { text, .. }) => Some(file_formula(&format!("={text}"))),
             None => None,
         };
         // A formula we can't evaluate would recalculate to `#NAME?` and
@@ -346,6 +416,8 @@ fn sheet_data(
         text: text_cells,
         formats,
         values,
+        spills,
+        spilled,
     }
 }
 
@@ -542,7 +614,7 @@ impl GridDoc {
     /// This sheet's values as other sheets' formulas read them.
     pub(super) fn sheet_values(&self) -> SheetValues {
         let (rows, cols) = self.used();
-        let mut cells = Vec::new();
+        let mut cells = self.spilled_cells(|v| v.clone());
         for c in 0..cols {
             self.wb.for_each_in_column(SHEET, c, 0..rows, |r, raw| {
                 if raw.is_empty() {
@@ -559,8 +631,31 @@ impl GridDoc {
         SheetValues::from_cells(cells)
     }
 
+    /// Every value a formula spills into another cell, as `(row, col,
+    /// value)`.
+    fn spilled_cells<T>(&self, f: impl Fn(&Value) -> T) -> Vec<(usize, usize, T)> {
+        let mut out = Vec::new();
+        if !self.formulas.has_spills() {
+            return out;
+        }
+        for (ar, ac) in self.formulas.positions() {
+            let Some((r0, c0, r1, c1)) = self.formulas.spill_range(ar, ac) else {
+                continue;
+            };
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    if let Some(v) = self.formulas.spilled_value(r, c) {
+                        out.push((r, c, f(v)));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// This sheet's contents as saved: every non-empty cell, the cells kept
-    /// as text, the formatting, and the values (formula results).
+    /// as text, the formatting, the values (formula results), and what
+    /// dynamic-array formulas spill.
     pub(super) fn sheet_data(&self) -> SheetData {
         let (rows, cols) = self.used();
         let mut cells = Vec::new();
@@ -580,6 +675,12 @@ impl GridDoc {
                 .map(|(r, c)| ((r, c), self.formats.get(r, c)))
                 .collect(),
             values: self.sheet_values(),
+            spills: self
+                .formulas
+                .positions()
+                .filter_map(|(r, c)| Some(((r, c), self.formulas.spill_range(r, c)?)))
+                .collect(),
+            spilled: self.spilled_cells(|v| v.clone()),
         }
     }
 
@@ -614,8 +715,51 @@ impl GridDoc {
     }
 }
 
-/// A cell to write, owned: position, value, formula text, formatting.
-type OwnedCell = (usize, usize, XValue, Option<String>, Option<XStyle>);
+/// A cell to write, owned: position, value, formula text, the range a
+/// dynamic-array formula spills into, formatting.
+type OwnedCell = (
+    usize,
+    usize,
+    XValue,
+    Option<String>,
+    Option<String>,
+    Option<XStyle>,
+);
+
+/// A formula as the file stores it: its text, and for a dynamic-array
+/// formula the range it spills into (`spill`, else its own cell; see
+/// [`crate::formula::implicit`]).
+fn file_formula_of(
+    r: usize,
+    c: usize,
+    raw: &str,
+    spill: Option<(usize, usize, usize, usize)>,
+) -> (String, Option<String>) {
+    let typed = || display_text(raw).trim_start_matches('=').to_string();
+    let Ok(e) = crate::formula::parse::parse(display_text(raw)) else {
+        // It didn't parse: as typed.
+        return (typed(), None);
+    };
+    if crate::formula::implicit::is_legacy(&e) {
+        let mut old = e.clone();
+        crate::formula::implicit::strip(&mut old);
+        let text = crate::formula::print::print_file(&old);
+        // Nothing to spell differently: as typed (spacing included).
+        if old == e && text == crate::formula::print::print(&e)[1..] {
+            return (typed(), None);
+        }
+        return (text, None);
+    }
+    let range = match spill {
+        Some((r0, c0, r1, c1)) => format!(
+            "{}:{}",
+            crate::xlsx::cell_name(r0, c0),
+            crate::xlsx::cell_name(r1, c1)
+        ),
+        None => crate::xlsx::cell_name(r, c),
+    };
+    (crate::formula::print::print_file(&e), Some(range))
+}
 
 /// A sheet's cells as written: formulas with their results cached, cells the
 /// file stored as text kept as text, and formatted cells without a value as
@@ -623,27 +767,35 @@ type OwnedCell = (usize, usize, XValue, Option<String>, Option<XStyle>);
 fn owned_cells(d: &SheetData) -> Vec<OwnedCell> {
     let styles: HashMap<(usize, usize), XStyle> =
         d.formats.iter().map(|&(at, f)| (at, x_style(f))).collect();
+    let spills: HashMap<(usize, usize), (usize, usize, usize, usize)> =
+        d.spills.iter().copied().collect();
     let mut filled = HashSet::new();
-    let mut out = Vec::with_capacity(d.cells.len());
+    let mut out = Vec::with_capacity(d.cells.len() + d.spilled.len());
+    for (r, c, v) in &d.spilled {
+        filled.insert((*r, *c));
+        let style = styles.get(&(*r, *c)).cloned();
+        out.push((*r, *c, result_value(v), None, None, style));
+    }
     for (r, c, raw) in &d.cells {
         if raw.is_empty() {
             continue;
         }
         let (r, c) = (*r, *c);
         filled.insert((r, c));
-        let (value, formula) = if is_formula(raw) {
-            let f = display_text(raw).trim_start_matches('=').to_string();
-            (result_value(&d.values.get(r, c)), Some(f))
+        let (value, formula, array) = if is_formula(raw) {
+            let (f, array) = file_formula_of(r, c, raw, spills.get(&(r, c)).copied());
+            (result_value(&d.values.get(r, c)), Some(f), array)
         } else if d.text.get(&(r, c)).is_some_and(|t| t == raw) {
-            (XValue::Text(raw.to_string()), None)
+            (XValue::Text(raw.to_string()), None, None)
         } else {
-            (plain_value(raw), None)
+            (plain_value(raw), None, None)
         };
-        out.push((r, c, value, formula, styles.get(&(r, c)).cloned()));
+        let style = styles.get(&(r, c)).cloned();
+        out.push((r, c, value, formula, array, style));
     }
     for (&(r, c), st) in &styles {
         if !filled.contains(&(r, c)) {
-            out.push((r, c, XValue::Empty, None, Some(st.clone())));
+            out.push((r, c, XValue::Empty, None, None, Some(st.clone())));
         }
     }
     out
@@ -657,11 +809,12 @@ fn write_sheets(sheets: &[(&str, &SheetData)]) -> Vec<u8> {
             .iter()
             .zip(&owned)
             .map(|((name, _), cells)| {
-                let cells = cells.iter().map(|(r, c, v, f, st)| WriteCell {
+                let cells = cells.iter().map(|(r, c, v, f, array, st)| WriteCell {
                     row: *r,
                     col: *c,
                     value: v,
                     formula: f.as_deref(),
+                    array: array.as_deref(),
                     style: st.as_ref(),
                 });
                 (*name, cells)
@@ -709,6 +862,7 @@ mod tests {
                 col: *c,
                 value: v,
                 formula: f.as_deref(),
+                array: None,
                 style: None,
             }),
             false,
@@ -729,6 +883,7 @@ mod tests {
                 col: *c,
                 value: v,
                 formula: *f,
+                array: None,
                 style: None,
             }),
             false,
@@ -849,5 +1004,51 @@ mod tests {
         assert_eq!(g.wb.cell(SHEET, 0, 0), "12");
         let book = xlsx::read(&g.xlsx_bytes()).unwrap();
         assert_eq!(book.sheets[0].cells[0].value, XValue::Text("12".into()));
+    }
+
+    /// A dynamic-array formula on a sheet no buffer opened is written back
+    /// as one, with its spilled values, when the workbook is saved.
+    #[test]
+    fn an_unopened_sheet_keeps_its_dynamic_arrays() {
+        let one = XValue::Number(1.0);
+        let two = XValue::Number(2.0);
+        let three = XValue::Number(3.0);
+        let cell = |row, value, formula, array| WriteCell {
+            row,
+            col: 0,
+            value,
+            formula,
+            array,
+            style: None,
+        };
+        let bytes = xlsx::write_book(
+            vec![
+                ("First", vec![cell(0, &one, None, None)]),
+                (
+                    "Second",
+                    vec![
+                        cell(0, &one, Some("_xlfn.SEQUENCE(3)"), Some("A1:A3")),
+                        cell(1, &two, None, None),
+                        cell(2, &three, None, None),
+                    ],
+                ),
+            ],
+            false,
+        );
+        let l = load(&bytes, 0, &HashSet::new()).unwrap();
+        assert!(l.lossy.is_empty(), "{:?}", l.lossy);
+        let second = &l.data[1];
+        assert_eq!(second.cells.len(), 1, "spilled cells aren't cells");
+        assert_eq!(second.spills, vec![((0, 0), (0, 0, 2, 0))]);
+        let resaved = write_sheets(&[("First", &l.data[0]), ("Second", second)]);
+        let book = xlsx::read(&resaved).unwrap();
+        assert!(book.not_preserved.is_empty(), "{:?}", book.not_preserved);
+        let cells = &book.sheets[1].cells;
+        assert!(
+            matches!(&cells[0].formula, Some(XFormula::Dynamic { range, .. }) if range == "A1:A3"),
+            "{:?}",
+            cells[0].formula
+        );
+        assert_eq!(cells[2].value, XValue::Number(3.0));
     }
 }

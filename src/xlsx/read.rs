@@ -99,6 +99,13 @@ pub fn read(bytes: &[u8]) -> Result<Book, XlsxError> {
             notes.add(&reason);
         }
     }
+    // Cell metadata marking dynamic-array formulas is written back; any
+    // other kind (data types, pictures in cells) isn't.
+    if let Some(xml) = pkg.get("xl/metadata.xml")?
+        && !only_dynamic_arrays(&xml)
+    {
+        notes.add("cell metadata");
+    }
     // Drawings hold the anchors of charts and images, and VML drawings the
     // boxes of comments: reporting both says the same thing twice.
     if notes.has("charts") || notes.has("images") || notes.has("chart sheets") {
@@ -114,6 +121,16 @@ pub fn read(bytes: &[u8]) -> Result<Book, XlsxError> {
         styles: styles.into_iter().map(Option::unwrap_or_default).collect(),
         application,
         not_preserved: notes.0,
+    })
+}
+
+/// Whether a `metadata.xml` part declares only Excel's dynamic-array cell
+/// metadata (`XLDAPR`).
+fn only_dynamic_arrays(xml: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(xml);
+    text.split("<metadataType ").skip(1).all(|t| {
+        let attrs = t.split('>').next().unwrap_or("");
+        attrs.contains("name=\"XLDAPR\"")
     })
 }
 
@@ -819,6 +836,8 @@ fn cell(
     notes: &mut Notes,
 ) -> Result<Option<XCell>, XmlError> {
     let typ = c.attr("t");
+    // Dynamic-array formulas carry cell metadata.
+    let dynamic = c.attr("cm").is_some();
     let style = match c.attr("s").map(|v| v.trim().parse::<usize>()) {
         None | Some(Ok(0)) => 0,
         Some(Ok(i)) => match styles.get(i) {
@@ -838,7 +857,7 @@ fn cell(
         match t.name {
             "v" => v = Some(r.text()?),
             "is" => inline = Some(rich_text(r, notes)?),
-            "f" => formula = formula_of(r, &t, row, col, notes)?,
+            "f" => formula = formula_of(r, &t, row, col, dynamic, notes)?,
             _ => r.skip()?,
         }
     }
@@ -893,6 +912,7 @@ fn formula_of(
     f: &Tag,
     row: usize,
     col: usize,
+    dynamic: bool,
     notes: &mut Notes,
 ) -> Result<Option<XFormula>, XmlError> {
     let text = decode_xstring(&r.text()?).into_owned();
@@ -910,6 +930,7 @@ fn formula_of(
                 Some(XFormula::SharedMaster { si, text, range })
             }
         }
+        "array" if dynamic => Some(XFormula::Dynamic { text, range }),
         "array" => {
             // Written back as a plain formula: Excel would read it with
             // implicit intersection, and a multi-cell one's other cells as
@@ -1011,7 +1032,8 @@ fn classify_part(name: &str) -> Option<String> {
         _ if prefix("xl/slicers/") || prefix("xl/slicercaches/") => "slicers",
         _ if prefix("xl/timelines/") || prefix("xl/timelinecaches/") => "timelines",
         _ if prefix("xl/richdata/") => "pictures in cells",
-        _ if n == "xl/metadata.xml" => "dynamic array metadata",
+        // Checked by what it holds (see `only_dynamic_arrays`).
+        _ if n == "xl/metadata.xml" => return None,
         _ if prefix("xl/ctrlprops/") => "form controls",
         _ if prefix("xl/activex/") => "ActiveX controls",
         _ if prefix("xl/embeddings/") => "embedded objects",

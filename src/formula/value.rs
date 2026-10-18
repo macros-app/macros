@@ -25,6 +25,9 @@ pub enum ErrorKind {
     Parse,
     Circ,
     Calc,
+    /// A dynamic-array result that can't spill: its range is blocked by
+    /// non-empty cells or runs off the sheet.
+    Spill,
 }
 
 impl ErrorKind {
@@ -41,11 +44,12 @@ impl ErrorKind {
             ErrorKind::Parse => "#ERROR!",
             ErrorKind::Circ => "#CIRC!",
             ErrorKind::Calc => "#CALC!",
+            ErrorKind::Spill => "#SPILL!",
         }
     }
 
     /// Every error kind.
-    pub const ALL: [ErrorKind; 10] = [
+    pub const ALL: [ErrorKind; 11] = [
         ErrorKind::Null,
         ErrorKind::Div0,
         ErrorKind::Value,
@@ -56,6 +60,7 @@ impl ErrorKind {
         ErrorKind::Parse,
         ErrorKind::Circ,
         ErrorKind::Calc,
+        ErrorKind::Spill,
     ];
 
     /// Parse an error literal (case-insensitive, as Excel accepts `#n/a`).
@@ -64,8 +69,8 @@ impl ErrorKind {
     }
 
     /// Excel's error number (`ERROR.TYPE`). This engine's own errors get
-    /// numbers past Excel's: `#ERROR!` (parse) 101, `#CIRC!` 102; `#CALC!`
-    /// is Excel's 14.
+    /// numbers past Excel's: `#ERROR!` (parse) 101, `#CIRC!` 102; `#SPILL!`
+    /// and `#CALC!` are Excel's 9 and 14.
     pub fn code(self) -> u8 {
         match self {
             ErrorKind::Null => 1,
@@ -75,6 +80,7 @@ impl ErrorKind {
             ErrorKind::Name => 5,
             ErrorKind::Num => 6,
             ErrorKind::NA => 7,
+            ErrorKind::Spill => 9,
             ErrorKind::Calc => 14,
             ErrorKind::Parse => 101,
             ErrorKind::Circ => 102,

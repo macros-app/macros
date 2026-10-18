@@ -1233,6 +1233,7 @@ fn xlsx_files_open_with_formulas(cx: &mut TestAppContext) {
             col: *c,
             value: v,
             formula: *f,
+            array: None,
             style: None,
         }),
         false,
@@ -1245,6 +1246,138 @@ fn xlsx_files_open_with_formulas(cx: &mut TestAppContext) {
     settle(&ed, cx);
     assert_eq!(cell(&ed, cx, 2, 0), "16", "recalculated on open");
     assert_eq!(source(&ed, cx, 2, 0), "=A2*A2");
+}
+
+#[gpui::test]
+fn dynamic_arrays_spill_block_and_round_trip_through_xlsx(cx: &mut TestAppContext) {
+    let (ed, path) = setup(cx, "n,v\nb,3\na,1\nc,2\n", true);
+    ed.update(cx, |e, cx| e.grid_goto_address("D1", cx));
+    keys(&ed, cx, "c = s o r t ( a 2 : b 4 , 2 ) escape");
+    // Sorted by v, spilled over D1:E3.
+    let shown = |ed: &Entity<Editor>, cx: &mut TestAppContext| -> Vec<String> {
+        (0..3)
+            .flat_map(|r| [cell(ed, cx, r, 3), cell(ed, cx, r, 4)])
+            .collect()
+    };
+    assert_eq!(shown(&ed, cx), ["a", "1", "c", "2", "b", "3"]);
+    ed.read_with(cx, |e, _| {
+        let g = e.active.grid.as_ref().unwrap();
+        let spill = g.cursor_spill().expect("the anchor's spill is outlined");
+        assert_eq!((spill.r0, spill.c0, spill.r1, spill.c1), (0, 3, 2, 4));
+    });
+    // A spilled cell holds no formula; the bar shows the anchor's, greyed.
+    ed.update(cx, |e, cx| e.grid_goto_address("E2", cx));
+    assert_eq!(source(&ed, cx, 1, 4), "");
+    ed.read_with(cx, |e, _| {
+        let g = e.active.grid.as_ref().unwrap();
+        assert_eq!(g.bar_text().1, "=SORT(A2:B4,2)");
+        assert!(g.bar_ghost());
+        assert_eq!(g.cursor_spill().map(|s| (s.r0, s.c0)), Some((0, 3)));
+    });
+    // `A1#` follows the spill.
+    ed.update(cx, |e, cx| e.grid_goto_address("G1", cx));
+    keys(&ed, cx, "c = s u m ( d 1 # ) escape");
+    assert_eq!(cell(&ed, cx, 0, 6), "6");
+    // Typing into the range blocks it; undoing re-spills.
+    ed.update(cx, |e, cx| e.grid_goto_address("D3", cx));
+    keys(&ed, cx, "c x escape");
+    assert_eq!(cell(&ed, cx, 0, 3), "#SPILL!");
+    assert_eq!(cell(&ed, cx, 1, 4), "");
+    assert_eq!(cell(&ed, cx, 0, 6), "#SPILL!");
+    keys(&ed, cx, "u");
+    assert_eq!(shown(&ed, cx), ["a", "1", "c", "2", "b", "3"]);
+    assert_eq!(cell(&ed, cx, 0, 6), "6");
+
+    // Saved as Excel 365 writes a dynamic array: an array formula over the
+    // spill range with the dynamic-array cell metadata, spilled values cached.
+    let xlsx = path.with_extension("xlsx");
+    ed.update(cx, |e, cx| e.grid_save_as_xlsx(&xlsx.to_string_lossy(), cx));
+    settle(&ed, cx);
+    let bytes = std::fs::read(&xlsx).unwrap();
+    let book = crate::xlsx::read(&bytes).unwrap();
+    assert!(book.not_preserved.is_empty(), "{:?}", book.not_preserved);
+    let at = |r: usize, c: usize| {
+        book.sheets[0]
+            .cells
+            .iter()
+            .find(|x| (x.row, x.col) == (r, c))
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        at(0, 3).formula,
+        Some(crate::xlsx::XFormula::Dynamic {
+            text: "_xlfn._xlws.SORT(A2:B4,2)".into(),
+            range: "D1:E3".into()
+        })
+    );
+    assert_eq!(at(0, 3).value, crate::xlsx::XValue::Text("a".into()));
+    assert_eq!(at(1, 4).formula, None);
+    assert_eq!(at(1, 4).value, crate::xlsx::XValue::Number(2.0));
+    assert_eq!(
+        at(0, 6).formula,
+        Some(crate::xlsx::XFormula::Dynamic {
+            text: "SUM(_xlfn.ANCHORARRAY(D1))".into(),
+            range: "G1".into()
+        })
+    );
+    // And it opens as it was: the anchor's formula spills again.
+    ed.update(cx, |e, cx| {
+        e.open_grid("again.xlsx".into(), xlsx.clone(), bytes, cx)
+    });
+    settle(&ed, cx);
+    assert_eq!(shown(&ed, cx), ["a", "1", "c", "2", "b", "3"]);
+    assert_eq!(source(&ed, cx, 0, 3), "=SORT(A2:B4,2)");
+    assert_eq!(source(&ed, cx, 1, 4), "", "the cached values give way");
+    assert_eq!(source(&ed, cx, 0, 6), "=SUM(D1#)");
+    assert_eq!(cell(&ed, cx, 0, 6), "6");
+}
+
+#[gpui::test]
+fn xlsx_formulas_from_before_dynamic_arrays_keep_intersecting(cx: &mut TestAppContext) {
+    let (ed, path) = setup(cx, "a\n1\n", true);
+    let x = path.with_extension("xlsx");
+    let cells = [
+        (0, 0, crate::xlsx::XValue::Number(1.0), None),
+        (1, 0, crate::xlsx::XValue::Number(2.0), None),
+        (2, 0, crate::xlsx::XValue::Number(3.0), None),
+        (1, 1, crate::xlsx::XValue::Number(20.0), Some("A1:A3*10")),
+        (1, 2, crate::xlsx::XValue::Number(6.0), Some("SUM(A1:A3)")),
+    ];
+    let bytes = crate::xlsx::write(
+        "Data",
+        cells.iter().map(|(r, c, v, f)| crate::xlsx::WriteCell {
+            row: *r,
+            col: *c,
+            value: v,
+            formula: *f,
+            array: None,
+            style: None,
+        }),
+        false,
+    );
+    std::fs::write(&x, &bytes).unwrap();
+    ed.update(cx, |e, cx| {
+        e.open_grid("old.xlsx".into(), x.clone(), bytes, cx)
+    });
+    settle(&ed, cx);
+    // `@` where the old formula intersected: one value, no spill.
+    assert_eq!(source(&ed, cx, 1, 1), "=@A1:A3*10");
+    assert_eq!(cell(&ed, cx, 1, 1), "20");
+    assert_eq!(cell(&ed, cx, 2, 1), "");
+    assert_eq!(source(&ed, cx, 1, 2), "=SUM(A1:A3)");
+    // Saved back the old way.
+    save(&ed, cx);
+    let book = crate::xlsx::read(&std::fs::read(&x).unwrap()).unwrap();
+    let b2 = book.sheets[0]
+        .cells
+        .iter()
+        .find(|c| (c.row, c.col) == (1, 1))
+        .unwrap();
+    assert_eq!(
+        b2.formula,
+        Some(crate::xlsx::XFormula::Normal("A1:A3*10".into()))
+    );
 }
 
 #[gpui::test]
@@ -2219,6 +2352,7 @@ fn regression_formula_book(n: usize) -> Vec<u8> {
             col: *c,
             value: v,
             formula: f.as_deref(),
+            array: None,
             style: None,
         }),
         false,
@@ -2314,6 +2448,7 @@ fn regression_revert_to_unreadable_xlsx_claims_success(cx: &mut TestAppContext) 
             col: *c,
             value: v,
             formula: *f,
+            array: None,
             style: None,
         }),
         false,
@@ -2391,6 +2526,7 @@ fn regression_write_xlsx_grid_as_csv_writes_a_zip(cx: &mut TestAppContext) {
             col: *c,
             value: v,
             formula: *f,
+            array: None,
             style: None,
         }),
         false,
@@ -2593,6 +2729,7 @@ fn write_sheets_fixture(csv: &std::path::Path) -> PathBuf {
                     col: *c,
                     value: v,
                     formula: f.as_deref(),
+                    array: None,
                     style: None,
                 });
                 (*name, cells)
