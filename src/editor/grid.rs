@@ -1538,6 +1538,8 @@ impl GridDoc {
             | IncreaseDecimals | DecreaseDecimals | TracePrecedents | TraceDependents
             | GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
             | Recalculate => {}
+            // Range fill: the editor's too.
+            FillDown | FillRight | FillSelection => {}
         }
         Ok(Outcome::default())
     }
@@ -2931,6 +2933,9 @@ impl Editor {
                 return self.grid_change_case(super::grid_ops::CaseOp::Capitalize, cx);
             }
             CopyDown => return self.grid_copy_down(flag, cx),
+            FillDown => return self.grid_fill(Axis::Rows, cx),
+            FillRight => return self.grid_fill(Axis::Cols, cx),
+            FillSelection => return self.grid_fill_selection(cx),
             CompleteCell => return self.grid_complete_cell(cx),
             MoveLine(d) => {
                 return match d.axis() {
@@ -3148,6 +3153,14 @@ impl Editor {
         self.grid_after(cx);
     }
 
+    /// Whether the active grid has more than one cell selected.
+    fn grid_has_range(&self) -> bool {
+        self.active
+            .grid
+            .as_deref()
+            .is_some_and(|g| g.view.anchor.is_some() && !g.selection().is_single())
+    }
+
     pub(super) fn grid_cancel_edit(&mut self, cx: &mut Context<Self>) {
         if let Some(g) = self.active.grid.as_deref_mut() {
             g.view.edit = None;
@@ -3201,7 +3214,8 @@ impl Editor {
         }
         let (r, c) = g.view.cursor;
         let original = g.source(r, c).to_string();
-        g.deselect();
+        // The selection stays (as in Excel) for `C-RET` to fill; a plain
+        // commit drops it.
         g.view.edit = Some(CellEdit::new(r, c, &original, text.to_string(), true));
         g.view.reveal_cursor();
         self.grid_after(cx);
@@ -3968,6 +3982,14 @@ impl Editor {
             "ctrl-g" => self.grid_cancel_edit(cx),
             "shift-enter" => self.grid_commit_edit(-1, 0, cx),
             "shift-tab" => self.grid_commit_edit(0, -1, cx),
+            // Excel's Ctrl+Enter: with a range selected, the entry goes into
+            // every selected cell; on one cell it's a line break.
+            "ctrl-enter" if self.grid_has_range() => {
+                if let Some(g) = self.active.grid.as_deref_mut() {
+                    g.last_repeat = Some(RepeatOp::Cmd(GridCmd::FillSelection));
+                }
+                self.grid_fill_selection(cx);
+            }
             "alt-enter" | "ctrl-enter" | "ctrl-j" => self.grid_edit_input("\n", cx),
             "ctrl-a" => self.grid_caret_edit(CellEdit::home, cx),
             "ctrl-e" => self.grid_caret_edit(CellEdit::end, cx),

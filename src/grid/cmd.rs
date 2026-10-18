@@ -145,6 +145,13 @@ pub enum GridCmd {
     /// `S-RET`: copy the cell down one row, continuing a series (org-table's
     /// copy-down); over a multi-row selection, fill it down.
     CopyDown,
+    /// Excel's Ctrl+D / Ctrl+R: fill the selection from its first row
+    /// (column), or the cell from the one above (to the left).
+    FillDown,
+    FillRight,
+    /// Excel's Ctrl+Enter: write the cell being edited (or the cursor cell)
+    /// into every selected cell.
+    FillSelection,
     /// `M-y` after a paste: replace it with the previous kill.
     YankPop,
     /// Complete the cell's value from the column's choices or its values.
@@ -302,6 +309,9 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-downcase", Downcase),
         ("grid-capitalize", Capitalize),
         ("grid-copy-down", CopyDown),
+        ("grid-fill-down", FillDown),
+        ("grid-fill-right", FillRight),
+        ("grid-fill-selection", FillSelection),
         ("grid-yank-pop", YankPop),
         ("grid-complete-cell", CompleteCell),
         ("grid-move-row-up", MoveLine(Up)),
@@ -365,6 +375,9 @@ impl GridCmd {
                 | Downcase
                 | Capitalize
                 | CopyDown
+                | FillDown
+                | FillRight
+                | FillSelection
                 | YankPop
                 | MoveLine(_)
                 | ToggleBold

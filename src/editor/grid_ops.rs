@@ -458,6 +458,172 @@ impl Editor {
         self.grid_after(cx);
     }
 
+    /// `grid-fill-down` / `grid-fill-right` (Excel's Ctrl+D / Ctrl+R): copy
+    /// the selection's first row (column) into the rest of it, with its
+    /// formatting. Values copy as they are (no series); formulas move their
+    /// relative references. A selection one row (column) deep — or the
+    /// cursor cell — fills from the shown row above (column to the left).
+    /// Rows a filter hides, hidden columns and the header row are skipped.
+    pub(super) fn grid_fill(&mut self, axis: Axis, cx: &mut Context<Self>) {
+        let Some(g) = self.active.grid.as_deref_mut() else {
+            return;
+        };
+        let sel = g.selection();
+        let down = axis == Axis::Rows;
+        let rows = g.used().0;
+        let first = if down {
+            usize::from(g.wb.header(SHEET))
+        } else {
+            0
+        };
+        let row_shown = |g: &GridDoc, r: usize| r >= rows || g.row_shown(r);
+        // `lines` run along the fill (rows down, columns right); `across` is
+        // the other way.
+        let line_shown = |g: &GridDoc, i: usize| {
+            if down {
+                row_shown(g, i)
+            } else {
+                g.view.cols.shown(i)
+            }
+        };
+        let (lo, hi) = sel.span(axis);
+        let lines: Vec<usize> = (lo.max(first)..=hi).filter(|&i| line_shown(g, i)).collect();
+        let (alo, ahi) = sel.span(if down { Axis::Cols } else { Axis::Rows });
+        let across: Vec<usize> = (alo..=ahi)
+            .filter(|&j| {
+                if down {
+                    g.view.cols.shown(j)
+                } else {
+                    j >= first && row_shown(g, j)
+                }
+            })
+            .collect();
+        let (src, targets) = match lines.as_slice() {
+            [] => (None, Vec::new()),
+            [only] => (
+                (first..*only).rev().find(|&i| line_shown(g, i)),
+                vec![*only],
+            ),
+            [src, rest @ ..] => (Some(*src), rest.to_vec()),
+        };
+        let Some(src) = src.filter(|_| !across.is_empty()) else {
+            let msg = if down {
+                "Nothing above to fill from"
+            } else {
+                "Nothing to the left to fill from"
+            };
+            return self.echo(msg, cx);
+        };
+        if targets.len().saturating_mul(across.len()) > MAX_FORMAT_CELLS {
+            let msg = format!("Too many cells to fill at once (over {MAX_FORMAT_CELLS})");
+            return self.echo(msg, cx);
+        }
+        let at = |line: usize, j: usize| if down { (line, j) } else { (j, line) };
+        let mut edits = Vec::new();
+        let mut formats = Vec::new();
+        for &j in &across {
+            let (sr, sc) = at(src, j);
+            let text = g.source(sr, sc).to_string();
+            let formula = g.is_formula_at(sr, sc);
+            let cells: Vec<Pos> = targets.iter().map(|&t| at(t, j)).collect();
+            for &(r, c) in &cells {
+                let v = if formula {
+                    super::grid_formula::translated(
+                        &text,
+                        r as isize - sr as isize,
+                        c as isize - sc as isize,
+                    )
+                } else {
+                    text.clone()
+                };
+                edits.push((r, c, v));
+            }
+            formats.push((g.formats.get(sr, sc), cells));
+        }
+        let n = edits.len();
+        g.grouped(|g| {
+            g.set_cells_tracked(&edits);
+            for (fmt, cells) in formats {
+                g.format_cells(cells, |_| fmt);
+            }
+        });
+        self.echo(
+            format!(
+                "Filled {n} cell{} {}",
+                if n == 1 { "" } else { "s" },
+                if down { "down" } else { "right" }
+            ),
+            cx,
+        );
+        self.grid_after(cx);
+    }
+
+    /// `grid-fill-selection` (Excel's Ctrl+Enter, `C-RET` while editing):
+    /// write one entry into every selected cell — the text being typed when
+    /// a cell is being edited, else the cursor cell's. A formula's relative
+    /// references move with each cell. Rows a filter hides and hidden
+    /// columns are skipped; the cursor and selection stay.
+    pub(super) fn grid_fill_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(g) = self.active.grid.as_deref_mut() else {
+            return;
+        };
+        let (text, (sr, sc)) = match g.view.edit.take() {
+            Some(e) => (e.text, (e.row, e.col)),
+            None => {
+                let (r, c) = g.view.cursor;
+                (g.source(r, c).to_string(), (r, c))
+            }
+        };
+        let sel = g.selection();
+        let (rows, _) = g.used();
+        // Whole-column selections take in the header: leave it alone unless
+        // the entry comes from it.
+        let first = if sr >= usize::from(g.wb.header(SHEET)) {
+            usize::from(g.wb.header(SHEET))
+        } else {
+            0
+        };
+        let cells: Vec<Pos> = (sel.r0.max(first)..=sel.r1)
+            .filter(|&r| r >= rows || g.row_shown(r))
+            .flat_map(|r| (sel.c0..=sel.c1).map(move |c| (r, c)))
+            .filter(|&(_, c)| g.view.cols.shown(c))
+            .collect();
+        if cells.len() > MAX_FORMAT_CELLS {
+            let msg = format!("Too many cells to fill at once (over {MAX_FORMAT_CELLS})");
+            return self.echo(msg, cx);
+        }
+        // A formula as typed (`=sum(a1`) in its stored form, so each copy's
+        // references can move; anything else is written as typed.
+        let formula = (text.len() > 1 && text.starts_with('='))
+            .then(|| {
+                let stored = super::grid_formula::stored_input(&text);
+                crate::formula::engine::input_text(&stored).into_owned()
+            })
+            .filter(|f| f.starts_with('='));
+        let edits: Vec<(usize, usize, String)> = cells
+            .iter()
+            .map(|&(r, c)| {
+                let v = match &formula {
+                    Some(f) => super::grid_formula::translated(
+                        f,
+                        r as isize - sr as isize,
+                        c as isize - sc as isize,
+                    ),
+                    None => text.clone(),
+                };
+                (r, c, v)
+            })
+            .collect();
+        let n = edits.len();
+        g.set_cells_tracked(&edits);
+        g.view.reveal_cursor();
+        self.echo(
+            format!("Filled {n} cell{}", if n == 1 { "" } else { "s" }),
+            cx,
+        );
+        self.grid_after(cx);
+    }
+
     // --- Selection & view ------------------------------------------------------
 
     /// `C-x C-x`: swap the cursor with the selection's other corner.

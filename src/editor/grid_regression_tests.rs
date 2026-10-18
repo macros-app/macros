@@ -797,3 +797,66 @@ fn regression_set_cell_far_away_is_silent(cx: &mut TestAppContext) {
         eval(&ed, cx, "(grid-dimensions)")
     );
 }
+
+// ---- range fill ------------------------------------------------------------
+
+#[gpui::test]
+fn regression_fill_down_keeps_literal_equals_text_as_text(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, LIT, false);
+    // B3 holds the literal text "=1+1": filling it down must not make a
+    // formula of it.
+    scheme(&ed, cx, "(grid-select-range 2 1 3 1)");
+    scheme(&ed, cx, "(grid-fill-down)");
+    assert!(
+        !is_formula(&ed, cx, 3, 1),
+        "shows {:?}",
+        cell(&ed, cx, 3, 1)
+    );
+    assert_eq!(cell(&ed, cx, 3, 1), "=1+1");
+    // Nor the fill-selection commit (`'=…` is Excel's escape for it).
+    scheme(&ed, cx, "(grid-select-range 1 0 2 0)");
+    keys(&ed, cx, "' = 2 ctrl-enter");
+    assert!(!is_formula(&ed, cx, 1, 0) && !is_formula(&ed, cx, 2, 0));
+    assert_eq!(
+        (cell(&ed, cx, 1, 0), cell(&ed, cx, 2, 0)),
+        ("=2".into(), "=2".into())
+    );
+}
+
+#[gpui::test]
+fn regression_fill_down_over_whole_columns_spares_the_header(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, "k,v\nx,1\ny,2\nz,3\n", false);
+    // A whole-column selection starts at the header: fill from row 2.
+    scheme(&ed, cx, "(grid-select-range 0 1 3 1)");
+    scheme(&ed, cx, "(grid-fill-down)");
+    assert_eq!(cell(&ed, cx, 0, 1), "v", "the header stays");
+    assert_eq!(
+        (cell(&ed, cx, 2, 1), cell(&ed, cx, 3, 1)),
+        ("1".into(), "1".into())
+    );
+    // The fill-selection command leaves it alone too.
+    scheme(&ed, cx, "(grid-select-range 0 0 3 0)");
+    scheme(&ed, cx, "(grid-fill-selection)");
+    assert_eq!(cell(&ed, cx, 0, 0), "k");
+    assert_eq!(cell(&ed, cx, 1, 0), "z", "from the cursor cell, A4");
+}
+
+#[gpui::test]
+fn regression_fill_cancel_and_formula_errors(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, "a,b\n1,2\n3,4\n", false);
+    // Typing over a range, then C-g, changes nothing.
+    scheme(&ed, cx, "(grid-select-range 1 0 2 1)");
+    keys(&ed, cx, "9 ctrl-g");
+    assert_eq!(cell(&ed, cx, 1, 0), "1");
+    assert_eq!(cell(&ed, cx, 2, 1), "4");
+    scheme(&ed, cx, "(grid-set-cell 2 1 \"=A1\")");
+    scheme(&ed, cx, "(grid-select-range 2 0 2 1)");
+    scheme(&ed, cx, "(grid-fill-right)");
+    assert_eq!(cell(&ed, cx, 2, 1), "3", "B3 from A3, a value");
+    // `=A1` typed in B3 and committed over A2:B3: A2's copy moves up a row
+    // and left a column, off the sheet.
+    scheme(&ed, cx, "(grid-select-range 1 0 2 1)");
+    keys(&ed, cx, "= a 1 ctrl-enter");
+    assert_eq!(cell(&ed, cx, 1, 0), "#REF!", "{:?}", stored(&ed, cx, 1, 0));
+    assert_eq!(cell(&ed, cx, 2, 0), "#REF!", "A3 = A1 one column left");
+}

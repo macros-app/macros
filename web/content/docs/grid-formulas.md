@@ -38,7 +38,7 @@ Type `=` in a grid cell and you're writing an Excel formula. The engine was writ
 | <kbd>C-c C-p</kbd> | <kbd>gp</kbd> | Jump to the next error |
 | <kbd>F9</kbd> | <kbd>F9</kbd> | Recalculate everything (for `NOW`, `RAND`, …) |
 
-The formula bar shows a cell's formula; the cell shows its result. Copying, pasting, filling down (<kbd>S-RET</kbd>), and sorting move formulas with their relative references adjusted, and inserting or deleting rows and columns updates every reference that crosses the edit — a reference to a deleted cell becomes `#REF!`. Copied ranges reach other apps as values, and paste back into a grid as formulas.
+The formula bar shows a cell's formula; the cell shows its result. Copying, pasting, filling down (<kbd>S-RET</kbd>, <kbd>C-c d</kbd>) or right (<kbd>C-c r</kbd>), filling a selection (<kbd>C-RET</kbd>), and sorting move formulas with their relative references adjusted, and inserting or deleting rows and columns updates every reference that crosses the edit — a reference to a deleted cell becomes `#REF!`. Copied ranges reach other apps as values, and paste back into a grid as formulas.
 
 Recalculation follows a dependency graph, so an edit only recomputes the formulas downstream of it: 100,000 formulas recalculate in about 50 ms, and an edit feeding 10,000 dependents in about 5 ms.
 

@@ -69,7 +69,7 @@ With a range selected, the mode line shows `24 cells · Sum 1,204 · Avg 50.2 ·
 | <kbd>C-d</kbd> / <kbd>Delete</kbd> | <kbd>x</kbd> | Clear the selection |
 | <kbd>C-c '</kbd> | <kbd>ge</kbd> | Edit the cell in a full buffer (<kbd>C-c C-c</kbd> writes it back) |
 
-While editing a cell: <kbd>Esc</kbd> saves the edit, <kbd>C-g</kbd> cancels it, <kbd>RET</kbd> / <kbd>Tab</kbd> save and move down / right (<kbd>S-RET</kbd> / <kbd>S-Tab</kbd> go back), <kbd>M-RET</kbd> inserts a newline, and the usual line-editing keys (<kbd>C-a</kbd> <kbd>C-e</kbd> <kbd>M-f</kbd> <kbd>M-b</kbd> <kbd>C-w</kbd> <kbd>C-k</kbd>) work.
+While editing a cell: <kbd>Esc</kbd> saves the edit, <kbd>C-g</kbd> cancels it, <kbd>RET</kbd> / <kbd>Tab</kbd> save and move down / right (<kbd>S-RET</kbd> / <kbd>S-Tab</kbd> go back), <kbd>M-RET</kbd> inserts a newline, <kbd>C-RET</kbd> with a range selected writes the entry into every selected cell (Excel's <kbd>Ctrl</kbd>+<kbd>Enter</kbd>; see [Filling ranges](#filling-ranges)), and the usual line-editing keys (<kbd>C-a</kbd> <kbd>C-e</kbd> <kbd>M-f</kbd> <kbd>M-b</kbd> <kbd>C-w</kbd> <kbd>C-k</kbd>) work.
 
 ## Rows, columns, and structure
 
@@ -82,8 +82,18 @@ While editing a cell: <kbd>Esc</kbd> saves the edit, <kbd>C-g</kbd> cancels it, 
 | <kbd>C-c C-s</kbd> / <kbd>C-c C-r</kbd> | <kbd>S</kbd> / <kbd>gS</kbd> | Sort by the column, ascending / descending |
 | <kbd>C-c ^</kbd> | <kbd>gs</kbd> | Sort, choosing alpha, numeric, or time |
 | <kbd>S-RET</kbd> | <kbd>S-RET</kbd> | Copy down, continuing a series (`1, 2, …`, dates, `Q1, Q2, …`) |
+| <kbd>C-c d</kbd> / <kbd>C-c r</kbd> | <kbd>M-d</kbd> / <kbd>M-r</kbd> | Fill the selection down / right from its first row / column |
+| <kbd>C-RET</kbd> | <kbd>C-RET</kbd> | Fill the selection with the cursor cell |
 | <kbd>C-w</kbd> <kbd>M-w</kbd> <kbd>C-y</kbd> <kbd>M-y</kbd> | <kbd>y</kbd> <kbd>p</kbd> | Cut / copy / paste through the kill ring |
 | <kbd>C-/</kbd> / <kbd>C-?</kbd> | <kbd>u</kbd> / <kbd>C-r</kbd>, <kbd>.</kbd> | Undo / redo (every command is one step), repeat |
+
+### Filling ranges
+
+`grid-fill-down` (<kbd>C-c d</kbd>, evil and helix <kbd>M-d</kbd>) is Excel's <kbd>Ctrl</kbd>+<kbd>D</kbd>: it copies the selection's first row into every other row of it, and `grid-fill-right` (<kbd>C-c r</kbd>, <kbd>M-r</kbd>) copies its first column across, like <kbd>Ctrl</kbd>+<kbd>R</kbd>. Values are copied as they are — <kbd>S-RET</kbd> is the one that continues a series — along with the cells' formatting, and formulas move their relative references the way a paste does: `=B2*$C$1` filled down becomes `=B3*$C$1`, `=B4*$C$1`, … With only one row selected, or nothing selected, the cells copy from the row above (or the column to the left).
+
+To put one entry in many cells, select them, type the value or formula, and press <kbd>C-RET</kbd> instead of <kbd>RET</kbd> (Excel's <kbd>Ctrl</kbd>+<kbd>Enter</kbd>): every selected cell gets it, a formula adjusted for each cell. Outside the cell editor, <kbd>C-RET</kbd> (`grid-fill-selection`) does the same with the cursor cell. On a single cell, <kbd>C-RET</kbd> while editing still inserts a line break.
+
+All three skip rows hidden by a filter (and hidden columns), never write over the header row, and undo as one step.
 
 Copies go to the system clipboard as tab-separated values, so pasting into Excel, Numbers, or Google Sheets — or from them — just works. Copy a range out as a table with <kbd>C-c C-e o</kbd> (org), <kbd>C-c C-e m</kbd> (Markdown), or <kbd>C-c C-e j</kbd> (JSON).
 

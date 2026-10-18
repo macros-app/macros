@@ -2462,3 +2462,159 @@ fn helix_grid_format_keys(cx: &mut TestAppContext) {
     keys(&ed, cx, "f ~");
     assert_eq!(shown(&ed, cx, 1, 1), None);
 }
+
+// --- Range fill (Excel's Ctrl+D / Ctrl+R / Ctrl+Enter) ---------------------
+
+const FILL: &str = "item,price,qty,total\na,2,3,\nb,4,5,\nc,6,7,\nd,8,9,\n";
+
+fn hist_len(editor: &Entity<Editor>, cx: &mut TestAppContext) -> usize {
+    editor.read_with(cx, |e, _| e.active.grid.as_ref().unwrap().hist_len())
+}
+
+#[gpui::test]
+fn fill_down_copies_values_formulas_and_formats_as_one_step(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, FILL, false);
+    // Values copy as they are: no series (that's S-RET).
+    scheme(&ed, cx, "(grid-select-range 1 1 4 1)");
+    keys(&ed, cx, "ctrl-c d");
+    for r in 1..=4 {
+        assert_eq!(cell(&ed, cx, r, 1), "2", "B{}", r + 1);
+    }
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(cell(&ed, cx, 4, 1), "8", "undone");
+    // A formula moves its relative references; `$` ones stay.
+    scheme(&ed, cx, "(grid-set-cell 1 3 \"=B2*C2+$B$2\")");
+    scheme(&ed, cx, "(grid-set-cell-bold 1 3 #t)");
+    scheme(&ed, cx, "(grid-set-cell-number-format 1 3 'currency)");
+    let before = hist_len(&ed, cx);
+    scheme(&ed, cx, "(grid-select-range 1 3 4 3)");
+    keys(&ed, cx, "ctrl-c d");
+    assert_eq!(source(&ed, cx, 2, 3), "=B3*C3+$B$2");
+    assert_eq!(source(&ed, cx, 4, 3), "=B5*C5+$B$2");
+    assert_eq!(
+        source(&ed, cx, 1, 3),
+        "=B2*C2+$B$2",
+        "the first row is the source"
+    );
+    assert_eq!(cell(&ed, cx, 4, 3), "74", "8*9+2");
+    assert!(fmt(&ed, cx, 3, 3).bold, "formatting is copied too");
+    assert!(fmt(&ed, cx, 4, 3).num.is_some());
+    assert_eq!(
+        fmt(&ed, cx, 4, 3).num,
+        fmt(&ed, cx, 1, 3).num,
+        "the number format"
+    );
+    assert_eq!(hist_len(&ed, cx), before + 1, "one undo step");
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(source(&ed, cx, 2, 3), "");
+    assert_eq!(source(&ed, cx, 4, 3), "");
+    assert!(!fmt(&ed, cx, 3, 3).bold, "the formats undo with the values");
+    assert!(fmt(&ed, cx, 1, 3).bold, "the source keeps its own");
+}
+
+#[gpui::test]
+fn fill_right_and_fill_without_a_selection(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, FILL, true);
+    // Fill right from the first column of D2:F2.
+    scheme(&ed, cx, "(grid-set-cell 1 3 \"=B2*$C2\")");
+    scheme(&ed, cx, "(grid-select-range 1 3 1 5)");
+    keys(&ed, cx, "alt-r");
+    assert_eq!(source(&ed, cx, 1, 4), "=C2*$C2");
+    assert_eq!(source(&ed, cx, 1, 5), "=D2*$C2");
+    // No selection: M-d copies from the cell above, M-r from the left.
+    scheme(&ed, cx, "(grid-move-to 2 1)");
+    keys(&ed, cx, "alt-d");
+    assert_eq!(cell(&ed, cx, 2, 1), "2", "B3 from B2");
+    scheme(&ed, cx, "(grid-move-to 3 2)");
+    keys(&ed, cx, "alt-r");
+    assert_eq!(cell(&ed, cx, 3, 2), "6", "C4 from B4");
+    // The first data row has only the header above it: nothing to fill.
+    scheme(&ed, cx, "(grid-move-to 1 0)");
+    keys(&ed, cx, "alt-d");
+    assert_eq!(cell(&ed, cx, 1, 0), "a", "the header isn't copied");
+    // One selected row fills from the row above (Excel's Ctrl+D).
+    scheme(&ed, cx, "(grid-select-range 4 0 4 1)");
+    keys(&ed, cx, "alt-d");
+    assert_eq!(
+        (cell(&ed, cx, 4, 0), cell(&ed, cx, 4, 1)),
+        ("c".into(), "6".into())
+    );
+}
+
+#[gpui::test]
+fn fill_down_skips_filtered_rows(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, FILL, false);
+    scheme(&ed, cx, "(grid-set-cell 1 3 \"=B2*C2\")");
+    // Hide row 4 (qty 7).
+    scheme(&ed, cx, "(grid-filter-rows \"C\" \"!=\" \"7\")");
+    scheme(&ed, cx, "(grid-select-range 1 3 4 3)");
+    keys(&ed, cx, "ctrl-c d");
+    assert_eq!(source(&ed, cx, 2, 3), "=B3*C3");
+    assert_eq!(source(&ed, cx, 3, 3), "", "the hidden row is left alone");
+    assert_eq!(source(&ed, cx, 4, 3), "=B5*C5");
+    // The fill-selection commit skips it too.
+    scheme(&ed, cx, "(grid-select-range 1 0 4 0)");
+    keys(&ed, cx, "z ctrl-enter");
+    assert_eq!(cell(&ed, cx, 2, 0), "z");
+    assert_eq!(cell(&ed, cx, 3, 0), "c", "hidden");
+    assert_eq!(cell(&ed, cx, 4, 0), "z");
+}
+
+#[gpui::test]
+fn ctrl_enter_writes_the_entry_into_every_selected_cell(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, FILL, false);
+    // Select B2:C3 with the cursor ending on C3, type a formula, C-RET.
+    keys(&ed, cx, "down right shift-down shift-right");
+    assert_eq!(cursor(&ed, cx), (2, 2));
+    let before = hist_len(&ed, cx);
+    keys(&ed, cx, "= b 2 + $ b $ 2 ctrl-enter");
+    assert_eq!(source(&ed, cx, 2, 2), "=B2+$B$2", "the cell typed in");
+    assert_eq!(source(&ed, cx, 1, 1), "=A1+$B$2");
+    assert_eq!(source(&ed, cx, 1, 2), "=B1+$B$2");
+    assert_eq!(source(&ed, cx, 2, 1), "=A2+$B$2");
+    assert_eq!(hist_len(&ed, cx), before + 1, "one undo step");
+    assert_eq!(cursor(&ed, cx), (2, 2), "the cursor stays");
+    assert_eq!(
+        eval(&ed, cx, "(grid-selection)"),
+        "(1 1 2 2)",
+        "so does the selection"
+    );
+    // A plain value, over the same selection.
+    keys(&ed, cx, "7 ctrl-enter");
+    for (r, c) in [(1, 1), (1, 2), (2, 1), (2, 2)] {
+        assert_eq!(cell(&ed, cx, r, c), "7");
+    }
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(source(&ed, cx, 1, 1), "=A1+$B$2", "undo is one step");
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(
+        (cell(&ed, cx, 1, 1), cell(&ed, cx, 2, 2)),
+        ("2".into(), "5".into())
+    );
+    // Outside the editor, C-RET fills the selection with the cursor cell.
+    scheme(&ed, cx, "(grid-select-range 1 1 2 2)");
+    keys(&ed, cx, "ctrl-enter");
+    assert_eq!(
+        (cell(&ed, cx, 1, 1), cell(&ed, cx, 1, 2)),
+        ("5".into(), "5".into())
+    );
+    // On one cell C-RET is still a line break, and RET commits.
+    keys(&ed, cx, "ctrl-g down x ctrl-enter y enter");
+    assert_eq!(cell(&ed, cx, 3, 2), "x\ny");
+}
+
+#[gpui::test]
+fn evil_fill_selection_after_visual_change(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, FILL, true);
+    keys(&ed, cx, "j l v j c 9 ctrl-enter");
+    assert_eq!(
+        (cell(&ed, cx, 1, 1), cell(&ed, cx, 2, 1)),
+        ("9".into(), "9".into())
+    );
+    assert_eq!(cell(&ed, cx, 3, 1), "6");
+    keys(&ed, cx, "u");
+    assert_eq!(
+        (cell(&ed, cx, 1, 1), cell(&ed, cx, 2, 1)),
+        ("2".into(), "4".into())
+    );
+}
