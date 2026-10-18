@@ -488,6 +488,7 @@ impl Editor {
                 | MinibufferPurpose::ExCommand
                 | MinibufferPurpose::GridGoto
                 | MinibufferPurpose::GridSearch(_)
+                | MinibufferPurpose::GridSelectMatching
                 | MinibufferPurpose::GridSaveAsXlsx
                 | MinibufferPurpose::GridFilter(_)
                 | MinibufferPurpose::EvalExpression
@@ -663,6 +664,11 @@ impl Editor {
             MinibufferPurpose::GridSearch(dir) => {
                 if !input.is_empty() {
                     self.grid_search(&input, dir.is_forward(), cx);
+                }
+            }
+            MinibufferPurpose::GridSelectMatching => {
+                if !input.is_empty() {
+                    self.grid_select_matching(&input, cx);
                 }
             }
             MinibufferPurpose::GridFilter(col) => self.grid_filter_submit(col, &input, cx),
