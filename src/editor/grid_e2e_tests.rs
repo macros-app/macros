@@ -1496,7 +1496,7 @@ fn mcp_buffer_text_shows_a_grid(cx: &mut TestAppContext) {
         "cursor: B2 (row 1, column 1, 0-based)  selection: A2:B2",
         "---\n\tA\tB\n1\titem\tn\n2\tx\\ty\t1\n3\tb\t2\n4\ttotal\t3\n",
         "--- formulas (cell: formula)\nB4: =SUM(B2:B3)\n",
-        "--- formatting (cell: bold, text color, fill, number format)\nB4: bold, none, yellow, General\n",
+        "--- formatting (cell: bold, text color, fill, number format, wrap)\nB4: bold, none, yellow, General, no wrap\n",
     ] {
         assert!(text.contains(want), "missing {want:?} in:\n{text}");
     }
@@ -2461,4 +2461,84 @@ fn helix_grid_format_keys(cx: &mut TestAppContext) {
     assert_eq!(shown(&ed, cx, 1, 1), Some(("123450.0%".to_string(), true)));
     keys(&ed, cx, "f ~");
     assert_eq!(shown(&ed, cx, 1, 1), None);
+}
+
+/// Wrap Text: `M-o w` (`f w` under evil) and `grid-set-cell-wrap`, one undo
+/// step each; the flag and the row's automatic height move with a sort; an
+/// `.xlsx` keeps the flag and heights set by hand, and opens unprotected.
+#[gpui::test]
+fn wrap_text_toggles_follows_sorts_and_saves_to_xlsx(cx: &mut TestAppContext) {
+    use crate::grid::view::DEFAULT_ROW_HEIGHT;
+    let (ed, path) = setup(cx, NUMS, false);
+    keys(&ed, cx, "ctrl-n ctrl-f alt-o w");
+    assert!(fmt(&ed, cx, 1, 1).wrap);
+    assert!(ed.read_with(cx, |e, _| e.status.contains("Wrap text")));
+    keys(&ed, cx, "ctrl-/");
+    assert!(!fmt(&ed, cx, 1, 1).wrap);
+    keys(&ed, cx, "ctrl-shift-/");
+    assert!(fmt(&ed, cx, 1, 1).wrap);
+    scheme(
+        &ed,
+        cx,
+        "(begin (grid-set-cell 1 0 \"one two three four five six\")
+                (grid-set-cell-wrap 1 0 #t))",
+    );
+    assert!(fmt(&ed, cx, 1, 0).wrap);
+    let m = crate::grid::wrap::Metrics {
+        char_px: 8.0,
+        line_px: 18.0,
+        pad_px: 3.0,
+    };
+    let fit = |cx: &mut TestAppContext| {
+        ed.update(cx, |e, _| {
+            let g = e.active.grid.as_deref_mut().unwrap();
+            g.view.cols.set(0, 64.0);
+            g.fit_wrapped_rows(0..6, m);
+        })
+    };
+    let height = |cx: &mut TestAppContext, r| {
+        ed.read_with(cx, |e, _| e.active.grid.as_ref().unwrap().view.rows.size(r))
+    };
+    fit(cx);
+    // "one two" / "three" / "four" / "five" / "six".
+    let tall = DEFAULT_ROW_HEIGHT + 4.0 * 18.0;
+    assert_eq!(height(cx, 1), tall);
+    // Sorting n descending takes row 2 (n = 1) to the bottom, wrap and
+    // height and all; undo brings them back.
+    keys(&ed, cx, "ctrl-c ctrl-r");
+    assert_eq!(cell(&ed, cx, 4, 0), "one two three four five six");
+    assert!(fmt(&ed, cx, 4, 0).wrap && fmt(&ed, cx, 4, 1).wrap);
+    assert!(!fmt(&ed, cx, 1, 0).wrap);
+    assert_eq!(height(cx, 4), tall);
+    assert_eq!(height(cx, 1), DEFAULT_ROW_HEIGHT);
+    keys(&ed, cx, "ctrl-/");
+    assert!(fmt(&ed, cx, 1, 0).wrap && !fmt(&ed, cx, 4, 0).wrap);
+    fit(cx);
+    assert_eq!(height(cx, 1), tall);
+    // A height set by hand wins, and saves.
+    scheme(&ed, cx, "(grid-set-row-height 2 45)");
+    let xlsx = path.with_extension("xlsx");
+    ed.update(cx, |e, cx| e.grid_save_as_xlsx(&xlsx.to_string_lossy(), cx));
+    settle(&ed, cx);
+    let l = super::grid_xlsx::load(&std::fs::read(&xlsx).unwrap(), 0, &Default::default()).unwrap();
+    assert!(l.lossy.is_empty(), "{:?}", l.lossy);
+    let wrapped: Vec<_> = l
+        .formats
+        .iter()
+        .filter(|(_, f)| f.wrap)
+        .map(|(at, _)| *at)
+        .collect();
+    assert_eq!(wrapped.len(), 2);
+    assert!(wrapped.contains(&(1, 0)) && wrapped.contains(&(1, 1)));
+    assert_eq!(l.rows, [(2, 45.0)], "only heights set by hand read back");
+    assert_eq!(l.wb.cell(SHEET, 1, 0), "one two three four five six");
+}
+
+#[gpui::test]
+fn evil_wrap_text_key(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, NUMS, true);
+    keys(&ed, cx, "j f w");
+    assert!(fmt(&ed, cx, 1, 0).wrap);
+    keys(&ed, cx, "f d");
+    assert!(fmt(&ed, cx, 1, 0).is_plain());
 }

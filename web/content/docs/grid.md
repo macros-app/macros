@@ -104,13 +104,14 @@ Column widths, zoom, frozen rows, and the header choice are remembered per file,
 
 ## Formatting cells
 
-Format cells as you move around, the way you would with Excel's bold, font-color, fill and number-format buttons. The keys use Emacs's facemenu prefix, <kbd>M-o</kbd>, in every editing style; under evil and helix the same keys also work after <kbd>f</kbd> (<kbd>f b</kbd>, <kbd>f $</kbd>, …):
+Format cells as you move around, the way you would with Excel's bold, font-color, fill, number-format and Wrap Text buttons. The keys use Emacs's facemenu prefix, <kbd>M-o</kbd>, in every editing style; under evil and helix the same keys also work after <kbd>f</kbd> (<kbd>f b</kbd>, <kbd>f $</kbd>, …):
 
 | Keys | Command | Action |
 | --- | --- | --- |
 | <kbd>M-o b</kbd> (evil: also <kbd>g b</kbd>) | `grid-toggle-bold` | Bold on / off |
 | <kbd>M-o c</kbd> | `grid-cycle-text-color` | Next text color |
 | <kbd>M-o f</kbd> | `grid-cycle-fill-color` | Next fill color |
+| <kbd>M-o w</kbd> | `grid-toggle-wrap` | Wrap Text on / off |
 | <kbd>M-o n</kbd> | `grid-number-format` | Pick a number format, or type a format code |
 | <kbd>M-o ~</kbd> | `grid-format-general` | General (no number format) |
 | <kbd>M-o !</kbd> | `grid-format-number` | Number: `1,234.50` |
@@ -123,6 +124,8 @@ Format cells as you move around, the way you would with Excel's bold, font-color
 
 The number-format keys are Excel's <kbd>Ctrl</kbd>+<kbd>Shift</kbd> ones. A number format only changes how a cell looks: the value you typed is kept exactly, and the formula bar shows it. <kbd>M-o n</kbd> offers the presets above and takes any Excel format code too — `#,##0.0`, `0.000 "kg"`, `d mmm yyyy`, `[Red]-0.00;0.00`. A date format shows a number as an Excel date serial and reads text such as `3/1/2024` as a date. Numbers and dates under a format align right; text stays left.
 
+**Wrap Text** wraps a cell's text at spaces to fit its column (a word wider than the column breaks where it must), and every line the cell holds shows — <kbd>M-RET</kbd> adds one while editing. The row grows to fit its tallest wrapped cell, and shrinks back when you turn wrap off, widen the column, or shorten the text; zooming keeps it fitted. A row whose height you set yourself (`grid-taller-row` / `grid-shorter-row`, dragging its border, `grid-set-row-height`) keeps that height, and the wrapped text is cut off at its bottom edge. Numbers never wrap: like Excel, a number too wide shows as `###`. A cell *without* Wrap Text that holds several lines shows only its first, followed by `↵`; the formula bar shows all of it.
+
 To put them on other keys, bind the commands in the grid keymaps — for example, on an evil leader in grids only:
 
 ```scheme
@@ -134,7 +137,7 @@ To put them on other keys, bind the commands in the grid keymaps — for example
 
 The color keys step through red, orange, yellow, green, blue, purple, and back to none, and <kbd>.</kbd> repeats the last one in evil. With a range selected, every cell gets the same result, decided by the cell the selection started on. The commands are also in the <kbd>C-c ?</kbd> menu, under Format.
 
-Formatting moves with its cells when you sort, move rows and columns, or insert and delete them, and each change is one undo step. CSV can't store formatting, so saving a formatted CSV grid becomes a **Save As `.xlsx`**, which keeps it; an `.xlsx` saves it in place and opens with it again. From Scheme: `(grid-set-cell-bold row col #t)`, `(grid-set-cell-text-color row col 'red)`, `(grid-set-cell-fill-color row col 'yellow)` (`#f` removes a color), `(grid-set-cell-number-format row col 'currency)` (a preset or a format code; `'general` removes it), `(grid-set-number-format 'percent)` for the selection, and `(grid-clear-cell-formats)`. A theme can change any palette color by setting the face `grid-red`, `grid-blue`, and so on.
+Formatting moves with its cells when you sort, move rows and columns, or insert and delete them, and each change is one undo step. CSV can't store formatting, so saving a formatted CSV grid becomes a **Save As `.xlsx`**, which keeps it; an `.xlsx` saves it in place and opens with it again. Row heights save in the `.xlsx` too. From Scheme: `(grid-set-cell-bold row col #t)`, `(grid-set-cell-wrap row col #t)`, `(grid-set-cell-text-color row col 'red)`, `(grid-set-cell-fill-color row col 'yellow)` (`#f` removes a color), `(grid-set-cell-number-format row col 'currency)` (a preset or a format code; `'general` removes it), `(grid-set-number-format 'percent)` for the selection, and `(grid-clear-cell-formats)`. A theme can change any palette color by setting the face `grid-red`, `grid-blue`, and so on.
 
 ## Styling from Scheme
 

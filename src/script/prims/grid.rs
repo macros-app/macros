@@ -335,6 +335,26 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
                 text: None,
                 fill: None,
                 num: None,
+                wrap: None,
+                bad_color: None,
+            })
+        },
+    );
+    // `(grid-set-cell-wrap row col #t)`: Wrap Text on a cell, or off — as
+    // `grid-toggle-wrap` does. The text wraps within the column and the row
+    // grows to fit, unless its height was set by hand.
+    let p = push(queue);
+    reg.register_fn(
+        "grid-set-cell-wrap",
+        move |row: SteelVal, col: SteelVal, on: bool| {
+            p(GridOp::CellFormat {
+                row: steel_index(&row),
+                col: steel_col(&col),
+                bold: None,
+                text: None,
+                fill: None,
+                num: None,
+                wrap: Some(on),
                 bad_color: None,
             })
         },
@@ -359,6 +379,7 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
                     text: (!fill).then_some(color),
                     fill: fill.then_some(color),
                     num: None,
+                    wrap: None,
                     bad_color,
                 })
             },
@@ -379,6 +400,7 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
                 text: None,
                 fill: None,
                 num: Some(steel_name(&code)),
+                wrap: None,
                 bad_color: None,
             })
         },

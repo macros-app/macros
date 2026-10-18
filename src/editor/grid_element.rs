@@ -20,6 +20,7 @@ use super::grid::{BAR_HEIGHT, GridDoc, GridDrag, GridGeom, NAME_BOX_WIDTH, SHEET
 use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt};
 use crate::grid::view::{self, CellEdit, CellRange, VisibleLine, col_name};
+use crate::grid::wrap;
 use crate::theme::Theme;
 
 /// Horizontal padding inside a cell, unzoomed px.
@@ -182,7 +183,8 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
 }
 
 /// The first `max_chars` chars of `s`'s first line, with a `↵` marking any
-/// further lines (cells keep a uniform row height; the bar shows it all).
+/// further lines: an unwrapped cell stays one line high (Wrap Text shows
+/// them all; so does the formula bar).
 fn display_text(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     let mut more_lines = false;
@@ -233,6 +235,7 @@ impl Element for GridElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        self.fit_wrapped_rows(bounds, window, cx);
         let theme = cx.global::<Theme>();
         let settings = cx.global::<crate::settings::Settings>();
         let popup = PopupSettings {
@@ -390,6 +393,60 @@ struct PopupSettings {
     kind: bool,
 }
 
+impl GridElement {
+    /// Grow the rows about to be drawn to fit their wrapped cells, before
+    /// anything is laid out (so a row never draws at its old height first).
+    fn fit_wrapped_rows(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let Some(zoom) = self
+            .editor
+            .read(cx)
+            .pane_grid(self.pane)
+            .filter(|g| g.formats.any_wrapped() || g.view.rows.has_auto())
+            .map(|g| g.view.zoom.max(0.1))
+        else {
+            return;
+        };
+        let settings = cx.global::<crate::settings::Settings>();
+        let base_size = settings.font_size();
+        let regular = font(settings.font_family().to_string());
+        let char_w = char_advance(window, &regular, px((base_size * zoom).max(3.0)));
+        let m = wrap::Metrics {
+            char_px: (char_w / zoom) as f64,
+            line_px: wrap_line_px(base_size),
+            pad_px: CELL_PAD as f64,
+        };
+        let height = f32::from(bounds.size.height);
+        self.editor.update(cx, |editor, _| {
+            let Some(g) = editor.pane_grid_mut(self.pane) else {
+                return;
+            };
+            // Growing a row can push others off screen and pull none on,
+            // or shrinking it the reverse: settle in a few rounds.
+            for _ in 0..3 {
+                let rows: Vec<usize> = g.view.visible_rows(height).iter().map(|l| l.idx).collect();
+                if !g.fit_wrapped_rows(rows, m) {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+/// One `0`'s advance in `font` at `size`: the grid's character width.
+fn char_advance(window: &mut Window, font: &Font, size: Pixels) -> f32 {
+    let zero =
+        window
+            .text_system()
+            .shape_line("0".into(), size, &[run(1, font, Hsla::default())], None);
+    f32::from(zero.x_for_index(1)).max(1.0)
+}
+
+/// The pitch (100% px) of a wrapped cell's lines for editor font size
+/// `base_size`.
+fn wrap_line_px(base_size: f32) -> f64 {
+    (base_size as f64 * 1.3).round().max(1.0)
+}
+
 /// Everything one frame's layout shares: the grid, the theme, fonts, and
 /// the pane's geometry (screen px), worked out once in [`Frame::new`].
 struct Frame<'a> {
@@ -408,6 +465,8 @@ struct Frame<'a> {
     font_size: Pixels,
     /// One monospace advance at `font_size`.
     char_w: f32,
+    /// Wrap Text layout, as the row-height pass measured it.
+    wrap: wrap::Metrics,
     /// The formula bar's (unzoomed chrome) font size and advance.
     chrome_size: Pixels,
     chrome_char_w: f32,
@@ -483,17 +542,8 @@ impl<'a> Frame<'a> {
             let ts = window.text_system();
             ts.resolve_font(&bold) == ts.resolve_font(&regular)
         };
-        let advance = |window: &mut Window, size: Pixels| {
-            let zero = window.text_system().shape_line(
-                "0".into(),
-                size,
-                &[run(1, &regular, pal.fg)],
-                None,
-            );
-            f32::from(zero.x_for_index(1)).max(1.0)
-        };
-        let char_w = advance(window, font_size);
-        let chrome_char_w = advance(window, chrome_size);
+        let char_w = char_advance(window, &regular, font_size);
+        let chrome_char_w = char_advance(window, &regular, chrome_size);
 
         let (used_rows, used_cols) = g.used();
         let bar_h = if v.bar_visible { BAR_HEIGHT } else { 0.0 };
@@ -529,6 +579,11 @@ impl<'a> Frame<'a> {
             zoom,
             font_size,
             char_w,
+            wrap: wrap::Metrics {
+                char_px: (char_w / zoom) as f64,
+                line_px: wrap_line_px(base_size),
+                pad_px: CELL_PAD as f64,
+            },
             chrome_size,
             chrome_char_w,
             truncate,
@@ -749,6 +804,34 @@ impl<'a> Frame<'a> {
             (None, None) => g.right_aligned(c),
         } && !header_row;
         let center = !header_row && g.style.align(c) == Some(crate::grid::style::Align::Center);
+        let mut color = face.map_or(pal.fg, |f| theme.color(f, pal.fg));
+        if face.is_none() && matches!(result, Some(crate::formula::value::Value::Error(_))) {
+            color = theme.color("error", pal.warn);
+        }
+        if let Some(i) = fmt.text {
+            color = palette_color(theme, i);
+        }
+        let row_font = if header_row {
+            &self.bold
+        } else {
+            &self.regular
+        };
+        let cell_font = if fmt.bold { &self.bold } else { row_font };
+        if fmt.wrap && !g.wrap_text(r, c, fmt).1 {
+            let lines = wrap::wrap_lines(value, self.wrap.chars(self.v.cols.size(c)));
+            let align = (right, center);
+            self.wrapped_lines(
+                row,
+                (x, w),
+                &lines,
+                align,
+                (cell_font, color),
+                fmt,
+                layer,
+                window,
+            );
+            return None;
+        }
         // Left-aligned text spills into empty cells to its right, as in
         // Excel; right-aligned numbers and centered text never do.
         let mut avail = w - 2.0 * pad;
@@ -783,19 +866,6 @@ impl<'a> Frame<'a> {
             let keep = fits.saturating_sub(truncate_len);
             shown = shown.chars().take(keep).collect::<String>() + self.truncate;
         }
-        let mut color = face.map_or(pal.fg, |f| theme.color(f, pal.fg));
-        if face.is_none() && matches!(result, Some(crate::formula::value::Value::Error(_))) {
-            color = theme.color("error", pal.warn);
-        }
-        if let Some(i) = fmt.text {
-            color = palette_color(theme, i);
-        }
-        let row_font = if header_row {
-            &self.bold
-        } else {
-            &self.regular
-        };
-        let cell_font = if fmt.bold { &self.bold } else { row_font };
         // A number too wide shrinks or turns to ###; text (right-aligned by
         // its column) is clipped like any text.
         let numeric = match result {
@@ -847,6 +917,68 @@ impl<'a> Frame<'a> {
             line_height: cell_lh,
         });
         overflow
+    }
+
+    /// A wrapped cell's lines, one under another, centered as a block in
+    /// the row (from its top when they don't all fit), each aligned in the
+    /// cell like a single line would be.
+    #[allow(clippy::too_many_arguments)]
+    fn wrapped_lines(
+        &self,
+        row: RowAt,
+        (x, w): (f32, f32),
+        lines: &[&str],
+        (right, center): (bool, bool),
+        (font, color): (&Font, Hsla),
+        fmt: CellFmt,
+        layer: &mut Layer,
+        window: &mut Window,
+    ) {
+        let RowAt { y, h, .. } = row;
+        let zoom = self.zoom;
+        let pad = CELL_PAD * zoom;
+        let pitch = self.wrap.line_px as f32 * zoom;
+        let line_h = self.header_h.max(1.0);
+        let total = line_h + lines.len().saturating_sub(1) as f32 * pitch;
+        let top = if total > h { y } else { y + (h - total) / 2.0 };
+        let clip = rect(x, y, w, h);
+        for (k, text) in lines.iter().enumerate() {
+            let ty = top + k as f32 * pitch;
+            if ty >= y + h {
+                break;
+            }
+            if text.is_empty() {
+                continue;
+            }
+            let line = window.text_system().shape_line(
+                SharedString::from(text.to_string()),
+                self.font_size,
+                &[run(text.len(), font, color)],
+                None,
+            );
+            let tw = f32::from(line.width);
+            let tx = if right {
+                x + w - pad - tw
+            } else if center {
+                x + ((w - tw) / 2.0).max(pad)
+            } else {
+                x + pad
+            };
+            if fmt.bold && self.fake_bold {
+                layer.texts.push(Text {
+                    line: line.clone(),
+                    origin: point(px(tx + (0.6 * zoom).max(0.4)), px(ty)),
+                    clip,
+                    line_height: px(line_h),
+                });
+            }
+            layer.texts.push(Text {
+                line,
+                origin: point(px(tx), px(ty)),
+                clip,
+                line_height: px(line_h),
+            });
+        }
     }
 
     /// Gridlines, and the stronger line under the frozen band.

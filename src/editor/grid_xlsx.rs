@@ -4,8 +4,8 @@
 //! of its own (`grid-open-sheet`, `report.xlsx<Costs>`).
 //!
 //! The `.xlsx` support is deliberately minimal (see `src/xlsx`): values,
-//! formulas and their cached results, and the hand-set formatting a grid
-//! has (bold, palette colors, number formats). A file holding anything this
+//! formulas and their cached results, the hand-set formatting a grid has
+//! (bold, palette colors, number formats, Wrap Text), and row heights. A file holding anything this
 //! would drop on a rewrite — charts, other cell styles, more sheets, … — opens
 //! *protected*: it can be viewed and edited, and saved as a new file
 //! (`:w copy.xlsx`), but never written back over itself, so the original is
@@ -19,7 +19,7 @@ use crate::formula::engine::SheetValues;
 use crate::formula::value::{ErrorKind, Value, general_format};
 use crate::grid::cellfmt::{self, CellFmt, NumCode};
 use crate::grid::model::Workbook;
-use crate::xlsx::{self, WriteCell, XFormula, XStyle, XValue};
+use crate::xlsx::{self, WriteCell, XFormula, XRow, XStyle, XValue};
 
 use gpui::Context;
 
@@ -41,7 +41,13 @@ pub(super) struct Loaded {
     pub text_cells: HashMap<(usize, usize), String>,
     /// The sheet's cell formatting, as the grid's hand-set formats.
     pub formats: Vec<((usize, usize), CellFmt)>,
+    /// Rows sized by hand: `(row, height)` in 100% px.
+    pub rows: Vec<(usize, f64)>,
 }
+
+/// Points (an `.xlsx` row height) per grid pixel at 100%: Excel's default
+/// 15 pt row is 20 px.
+const PT_PER_PX: f64 = 0.75;
 
 /// A file's cell format as a grid format; `None` when a color isn't one of
 /// the palette's.
@@ -55,6 +61,7 @@ fn cell_fmt(st: &XStyle) -> Option<CellFmt> {
         text: color(st.color)?,
         fill: color(st.fill)?,
         num: st.num_fmt.as_deref().and_then(NumCode::intern),
+        wrap: st.wrap,
     })
 }
 
@@ -66,6 +73,7 @@ fn x_style(f: CellFmt) -> XStyle {
         color: argb(f.text),
         fill: argb(f.fill),
         num_fmt: f.num.map(|n| n.code().to_string()),
+        wrap: f.wrap,
     }
 }
 
@@ -128,6 +136,7 @@ pub(super) fn load(
             others: HashMap::new(),
             text_cells: HashMap::new(),
             formats: Vec::new(),
+            rows: Vec::new(),
         });
     }
     let book = xlsx::read(bytes).map_err(|e| e.to_string())?;
@@ -247,6 +256,12 @@ pub(super) fn load(
         others,
         text_cells,
         formats,
+        rows: sheet
+            .rows
+            .iter()
+            .filter(|r| r.custom)
+            .map(|r| (r.row, r.height / PT_PER_PX))
+            .collect(),
     })
 }
 
@@ -384,6 +399,9 @@ impl Editor {
         grid.xlsx.text = l.text_cells;
         for ((r, c), f) in l.formats {
             grid.formats.set(r, c, f);
+        }
+        for (r, h) in l.rows {
+            grid.view.rows.set(r, h);
         }
         grid.mark_saved();
         grid.rebuild_formulas();
@@ -573,7 +591,20 @@ impl GridDoc {
                     style: Some(st),
                 },
             ));
-        xlsx::write(&self.wb.sheet(SHEET).name, cells, false)
+        // Heights set by hand, and those Wrap Text worked out (so other
+        // apps show wrapped rows tall before laying them out themselves).
+        let rows = &self.view.rows;
+        let px_rows: Vec<XRow> = rows
+            .overrides()
+            .map(|(row, px)| (row, px, true))
+            .chain(rows.auto_sized().map(|(row, px)| (row, px, false)))
+            .map(|(row, px, custom)| XRow {
+                row,
+                height: px * PT_PER_PX,
+                custom,
+            })
+            .collect();
+        xlsx::write_rows(&self.wb.sheet(SHEET).name, cells, &px_rows, false)
     }
 }
 
