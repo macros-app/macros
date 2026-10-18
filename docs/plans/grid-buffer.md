@@ -713,5 +713,10 @@ Each one needs a `deny.toml` license check and an entry in
   same buffer between grid and raw text in place. It keeps the file and any
   unsaved changes, but not the undo history. It works for UTF-8 files only.
 - **Helix:** the overlay shares the vim motions, plus `x` for rows, `%` for
-  all and `d` to clear. Multi-cursor column editing (`C`) is not built yet.
+  all and `d` to clear. Multiple cursors (`src/editor/grid_cursors.rs`): `C`
+  / `M-C` add one below / above each cursor, `s` selects matching cells as
+  cursors, `,` / `Esc` keep the primary, `M-,` drops it, and `(` / `)`
+  rotate it. Motions move them all; `i` / `a` / `c` show the typed text in
+  every cursor's cell live and write them all on commit (formulas shifted
+  per cell, like copy-down), and `d` clears them, each one undo step.
 - **Scrollbars** are position indicators only (not draggable).

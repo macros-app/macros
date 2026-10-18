@@ -538,6 +538,24 @@ pub struct GridView {
     /// The cells-area viewport (excluding headers and the formula bar) in
     /// *screen* px, as last painted. Used to keep the cursor in view.
     pub viewport: (f64, f64),
+    /// Helix's extra cursors (`C`, `s`), each one cell, in no particular
+    /// order; `cursor` is the primary. A cell edit spreads to all of them.
+    pub cursors: Vec<Pos>,
+    /// How the open edit spreads to [`Self::cursors`].
+    pub spread: Spread,
+}
+
+/// How a cell edit made with several cursors applies to the other cursors'
+/// cells.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Spread {
+    /// `c` (or typing over a cell): every cell gets the typed text.
+    #[default]
+    Replace,
+    /// `i`: what's typed before the cell's text goes before each cell's.
+    Insert,
+    /// `a`: what's typed after the cell's text goes after each cell's.
+    Append,
 }
 
 impl Default for GridView {
@@ -557,6 +575,8 @@ impl Default for GridView {
             show_formulas: false,
             trace: Vec::new(),
             viewport: (800.0, 600.0),
+            cursors: Vec::new(),
+            spread: Spread::Replace,
         }
     }
 }

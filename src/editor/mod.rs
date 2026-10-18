@@ -41,6 +41,7 @@ mod evil;
 mod ex;
 mod grammars;
 mod grid;
+mod grid_cursors;
 #[cfg(test)]
 mod grid_e2e_tests;
 mod grid_element;
@@ -196,6 +197,8 @@ enum MinibufferPurpose {
     /// Grid `/` (forward) / `C-r` / `?` (backward): search cell contents
     /// (regex).
     GridSearch(Direction),
+    /// Grid helix `s`: put a cursor on each selected cell matching a regex.
+    GridSelectMatching,
     /// Saving a CSV grid that holds formulas: the `.xlsx` path to save as.
     GridSaveAsXlsx,
     /// Grid `grid-filter`: a filter for column `.0`.
