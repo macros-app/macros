@@ -2772,6 +2772,257 @@ fn evil_wrap_text_key(cx: &mut TestAppContext) {
     assert!(fmt(&ed, cx, 1, 0).is_plain());
 }
 
+// --- Scrollbars --------------------------------------------------------------
+
+/// A grid in a window, so the element paints and reports its scrollbars.
+fn windowed<'a>(
+    cx: &'a mut TestAppContext,
+    csv: &str,
+) -> (Entity<Editor>, &'a mut gpui::VisualTestContext) {
+    cx.update(|cx| {
+        cx.set_global(crate::theme::Theme::default());
+        cx.set_global(crate::settings::Settings::default());
+    });
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "macros-grid-e2e-bars-{}-{}.csv",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, csv).unwrap();
+    let (ed, vcx) = cx.add_window_view(|_w, cx| Editor::new(cx));
+    ed.update(vcx, |e, cx| {
+        for src in crate::runtime::startup_scripts() {
+            e.run_script_blocking(src, cx);
+        }
+        e.mark_config_loaded(cx);
+        e.open_grid("data.csv".into(), path.clone(), csv.as_bytes().to_vec(), cx);
+    });
+    vcx.run_until_parked();
+    paint_grid(&ed, vcx);
+    (ed, vcx)
+}
+
+/// Repaint the window and return the geometry pane 0 reported.
+fn paint_grid(ed: &Entity<Editor>, vcx: &mut gpui::VisualTestContext) -> super::grid::GridGeom {
+    for _ in 0..2 {
+        ed.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+    }
+    ed.read_with(vcx, |e, _| *e.grid_ui.geom.get(&0).expect("painted"))
+}
+
+/// The cells area's right and bottom edges: where the bars run.
+fn edges(geo: &super::grid::GridGeom) -> (f32, f32) {
+    (
+        f32::from(geo.origin.x) + geo.width,
+        f32::from(geo.origin.y) + geo.height,
+    )
+}
+
+/// `rows` × `cols` of numbers: well past one screen each way.
+fn big_csv(rows: usize, cols: usize) -> String {
+    (0..rows)
+        .map(|r| {
+            (0..cols)
+                .map(|c| (r * cols + c).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn scroll(ed: &Entity<Editor>, vcx: &mut gpui::VisualTestContext) -> (f64, f64) {
+    ed.read_with(vcx, |e, _| {
+        let v = &e.active.grid.as_ref().unwrap().view;
+        (v.scroll_x, v.scroll_y)
+    })
+}
+
+fn vcursor(ed: &Entity<Editor>, vcx: &mut gpui::VisualTestContext) -> (usize, usize) {
+    ed.read_with(vcx, |e, _| e.active.grid.as_ref().unwrap().view.cursor)
+}
+
+fn mouse(ed: &Entity<Editor>, vcx: &mut gpui::VisualTestContext, ev: &str, x: f32, y: f32) {
+    let pos = gpui::point(gpui::px(x), gpui::px(y));
+    ed.update(vcx, |e, cx| match ev {
+        "down" => assert!(e.grid_mouse_down(pos, gpui::MouseButton::Left, 1, false, cx)),
+        "move" => {
+            e.grid_mouse_move(pos, cx);
+        }
+        _ => e.grid_mouse_up(cx),
+    });
+}
+
+#[gpui::test]
+fn dragging_the_vertical_thumb_scrolls_without_moving_the_cursor(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 3));
+    let geo = paint_grid(&ed, vcx);
+    assert!(geo.hbar.is_none(), "three columns fit across");
+    let bar = geo.vbar.expect("300 rows overflow the pane");
+    let x = edges(&geo).0 - 3.0;
+    let grab = bar.thumb_start() + bar.thumb_len() / 2.0;
+    mouse(&ed, vcx, "down", x, grab);
+    mouse(&ed, vcx, "move", x, grab + 100.0);
+    let want = bar.offset_at(bar.thumb_start() + 100.0);
+    assert!((scroll(&ed, vcx).1 - want).abs() < 1e-6);
+    assert!(
+        want > 100.0,
+        "the drag moves further than the pointer ({want})"
+    );
+    // The painted thumb follows the pointer.
+    let moved = paint_grid(&ed, vcx).vbar.unwrap();
+    assert!((moved.thumb_start() - (bar.thumb_start() + 100.0)).abs() < 0.01);
+    // Past the end of the track: the end of the data, not beyond.
+    mouse(&ed, vcx, "move", x, 5000.0);
+    assert!((scroll(&ed, vcx).1 - bar.max_offset()).abs() < 1e-6);
+    mouse(&ed, vcx, "move", x, -5000.0);
+    assert_eq!(scroll(&ed, vcx).1, 0.0);
+    mouse(&ed, vcx, "move", x, grab + 40.0);
+    mouse(&ed, vcx, "up", x, grab + 40.0);
+    ed.read_with(vcx, |e, _| assert!(e.grid_ui.drag.is_none()));
+    assert_eq!(
+        vcursor(&ed, vcx),
+        (0, 0),
+        "scrolling leaves the cursor alone"
+    );
+    assert_eq!(scroll(&ed, vcx).0, 0.0, "no horizontal drift");
+}
+
+#[gpui::test]
+fn dragging_the_horizontal_thumb_scrolls_columns(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 60));
+    let geo = paint_grid(&ed, vcx);
+    let (v, h) = (geo.vbar.unwrap(), geo.hbar.expect("60 columns overflow"));
+    // The two bars leave their shared corner free.
+    let (right, bottom) = edges(&geo);
+    let gap = crate::grid::scrollbar::HOT_WIDTH;
+    assert!(h.track_start + h.track_len <= right - gap + 0.01);
+    assert!(v.track_start + v.track_len <= bottom - gap + 0.01);
+    let y = edges(&geo).1 - 3.0;
+    let grab = h.thumb_start() + 5.0;
+    mouse(&ed, vcx, "down", grab, y);
+    mouse(&ed, vcx, "move", grab + 80.0, y);
+    mouse(&ed, vcx, "up", grab + 80.0, y);
+    let (sx, sy) = scroll(&ed, vcx);
+    assert!((sx - h.offset_at(h.thumb_start() + 80.0)).abs() < 1e-6);
+    assert!(sx > 0.0);
+    assert_eq!(sy, 0.0);
+    assert_eq!(vcursor(&ed, vcx), (0, 0));
+}
+
+#[gpui::test]
+fn clicking_the_track_pages_toward_the_click(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 3));
+    let geo = paint_grid(&ed, vcx);
+    let bar = geo.vbar.unwrap();
+    let x = edges(&geo).0 - 3.0;
+    let below = bar.thumb_start() + bar.thumb_len() + 20.0;
+    mouse(&ed, vcx, "down", x, below);
+    mouse(&ed, vcx, "up", x, below);
+    ed.read_with(vcx, |e, _| {
+        assert!(e.grid_ui.drag.is_none(), "a page, not a drag")
+    });
+    assert!(
+        (scroll(&ed, vcx).1 - bar.view).abs() < 1e-6,
+        "one viewport down"
+    );
+    mouse(&ed, vcx, "down", x, below + 200.0);
+    mouse(&ed, vcx, "up", x, below + 200.0);
+    assert!((scroll(&ed, vcx).1 - 2.0 * bar.view).abs() < 1e-6);
+    let bar = paint_grid(&ed, vcx).vbar.unwrap();
+    mouse(&ed, vcx, "down", x, bar.thumb_start() - 2.0);
+    mouse(&ed, vcx, "up", x, bar.thumb_start() - 2.0);
+    assert!((scroll(&ed, vcx).1 - bar.view).abs() < 1e-6, "and back up");
+    assert_eq!(vcursor(&ed, vcx), (0, 0));
+}
+
+#[gpui::test]
+fn past_the_data_the_drag_keeps_the_extent_it_started_with(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 3));
+    // Wheel far past the last row: the thumb rests at the end of the track.
+    ed.update(vcx, |e, cx| {
+        e.grid_scroll(
+            gpui::point(gpui::px(400.), gpui::px(300.)),
+            0.0,
+            -30_000.0,
+            false,
+            false,
+            cx,
+        );
+    });
+    let geo = paint_grid(&ed, vcx);
+    let bar = geo.vbar.unwrap();
+    assert!((bar.thumb_start() + bar.thumb_len() - (bar.track_start + bar.track_len)).abs() < 0.01);
+    assert!((bar.extent - (30_000.0 + bar.view)).abs() < 1e-6);
+    let x = edges(&geo).0 - 3.0;
+    let grab = bar.thumb_start() + 4.0;
+    mouse(&ed, vcx, "down", x, grab);
+    mouse(&ed, vcx, "move", x, grab - 50.0);
+    let want = bar.offset_at(bar.thumb_start() - 50.0);
+    assert!((scroll(&ed, vcx).1 - want).abs() < 1e-6);
+    let mid = paint_grid(&ed, vcx).vbar.unwrap();
+    assert_eq!(mid.extent, bar.extent, "frozen while the button is down");
+    assert!((mid.thumb_start() - (bar.thumb_start() - 50.0)).abs() < 0.01);
+    mouse(&ed, vcx, "up", x, grab - 50.0);
+    let after = paint_grid(&ed, vcx).vbar.unwrap();
+    assert!(after.extent < bar.extent, "shrinks back once released");
+}
+
+#[gpui::test]
+fn frozen_rows_stay_pinned_while_the_thumb_drags(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 3));
+    ed.update(vcx, |e, _| {
+        e.active.grid.as_mut().unwrap().view.frozen_rows = 2
+    });
+    let geo = paint_grid(&ed, vcx);
+    let bar = geo.vbar.unwrap();
+    let (_, cells_top) = geo.cells_origin();
+    assert!(
+        (bar.track_start - (cells_top + 40.0)).abs() < 0.01,
+        "track starts below the frozen rows"
+    );
+    let x = edges(&geo).0 - 3.0;
+    let grab = bar.thumb_start() + 4.0;
+    mouse(&ed, vcx, "down", x, grab);
+    mouse(&ed, vcx, "move", x, grab + 150.0);
+    mouse(&ed, vcx, "up", x, grab + 150.0);
+    ed.read_with(vcx, |e, _| {
+        let v = &e.active.grid.as_ref().unwrap().view;
+        assert!(v.scroll_y > 0.0);
+        assert_eq!(v.frozen_rows, 2);
+        assert_eq!(
+            (v.row_y(0), v.row_y(1)),
+            (0.0, 20.0),
+            "frozen rows don't move"
+        );
+        assert!(v.top_row() > 2);
+    });
+}
+
+#[gpui::test]
+fn hovering_a_scrollbar_highlights_it(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 3));
+    let geo = paint_grid(&ed, vcx);
+    let bar = geo.vbar.unwrap();
+    let hover = |ed: &Entity<Editor>, vcx: &mut gpui::VisualTestContext| {
+        ed.read_with(vcx, |e, _| e.grid_ui.bar_hover)
+    };
+    mouse(
+        &ed,
+        vcx,
+        "move",
+        edges(&geo).0 - 2.0,
+        bar.track_start + 30.0,
+    );
+    assert_eq!(hover(&ed, vcx), Some((0, crate::formula::refs::Axis::Rows)));
+    mouse(&ed, vcx, "move", 400.0, 300.0);
+    assert_eq!(hover(&ed, vcx), None);
+}
+
 /// A grid under helix bindings.
 fn setup_helix(cx: &mut TestAppContext, csv: &str) -> Entity<Editor> {
     let (ed, _) = setup(cx, csv, true);
@@ -3053,4 +3304,34 @@ fn replace_matches_a_formula_by_its_text(cx: &mut TestAppContext) {
     // The displayed value is not what's matched.
     scheme(&ed, cx, "(grid-replace-all \"8\" \"9\" 'literal 'sheet)");
     assert_eq!(source(&ed, cx, 1, 1), "=A3*2");
+}
+
+#[gpui::test]
+fn frozen_columns_stay_pinned_while_the_thumb_drags(cx: &mut TestAppContext) {
+    let (ed, vcx) = windowed(cx, &big_csv(300, 60));
+    ed.update(vcx, |e, _| {
+        e.active.grid.as_mut().unwrap().view.frozen_cols = 2
+    });
+    let geo = paint_grid(&ed, vcx);
+    let bar = geo.hbar.unwrap();
+    let (cells_left, _) = geo.cells_origin();
+    assert!(
+        (bar.track_start - (cells_left + 128.0)).abs() < 0.01,
+        "track starts right of the frozen columns"
+    );
+    let y = edges(&geo).1 - 3.0;
+    let grab = bar.thumb_start() + 4.0;
+    mouse(&ed, vcx, "down", grab, y);
+    mouse(&ed, vcx, "move", grab + 150.0, y);
+    mouse(&ed, vcx, "up", grab + 150.0, y);
+    ed.read_with(vcx, |e, _| {
+        let v = &e.active.grid.as_ref().unwrap().view;
+        assert!((v.scroll_x - bar.offset_at(bar.thumb_start() + 150.0)).abs() < 1e-6);
+        assert!(v.scroll_x > 0.0);
+        assert_eq!(
+            (v.col_x(0), v.col_x(1)),
+            (0.0, 64.0),
+            "frozen columns don't move"
+        );
+    });
 }

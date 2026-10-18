@@ -14,6 +14,7 @@
 //! - [`parse`]: the loader. [`write`]: the saver.
 //! - [`cellfmt`]: bold, colors, number formats and wrap set by hand on cells.
 //! - [`wrap`]: Wrap Text line breaking and row heights.
+//! - [`scrollbar`]: scrollbar thumb geometry over the infinite sheet.
 //! - [`series`]: continuing a series down a column (copy-down / fill).
 //! - [`dedup`]: Remove duplicates — which rows repeat an earlier one.
 //! - [`export`]: cells as org / Markdown / JSON / CSV, and org tables back.
@@ -37,6 +38,7 @@ pub mod parse;
 #[cfg(test)]
 mod regression_tests;
 pub mod replace;
+pub mod scrollbar;
 pub mod series;
 pub mod sheet;
 pub mod sidecar;
