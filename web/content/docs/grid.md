@@ -71,6 +71,20 @@ With a range selected, the mode line shows `24 cells · Sum 1,204 · Avg 50.2 ·
 
 While editing a cell: <kbd>Esc</kbd> saves the edit, <kbd>C-g</kbd> cancels it, <kbd>RET</kbd> / <kbd>Tab</kbd> save and move down / right (<kbd>S-RET</kbd> / <kbd>S-Tab</kbd> go back), <kbd>M-RET</kbd> inserts a newline, and the usual line-editing keys (<kbd>C-a</kbd> <kbd>C-e</kbd> <kbd>M-f</kbd> <kbd>M-b</kbd> <kbd>C-w</kbd> <kbd>C-k</kbd>) work.
 
+### Multiple cursors (helix)
+
+Under helix, a grid has helix's multiple selections, one cell each:
+
+| Helix | Action |
+| --- | --- |
+| <kbd>C</kbd> / <kbd>M-C</kbd> | Add a cursor on the cell below / above each cursor (the new one becomes the primary) |
+| <kbd>s</kbd> | A cursor on every selected cell matching a regex (the whole sheet when one cell is selected) |
+| <kbd>,</kbd> / <kbd>Esc</kbd> | Keep only the primary cursor |
+| <kbd>M-,</kbd> | Drop the primary cursor |
+| <kbd>(</kbd> / <kbd>)</kbd> | Make the previous / next cursor the primary |
+
+The other cursors are drawn more faintly than the primary, and <kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> move them all. <kbd>c</kbd> edits every cursor's cell at once: what you type shows in each cell as you type it and is saved into all of them with <kbd>Esc</kbd>. <kbd>i</kbd> and <kbd>a</kbd> add what you type before or after each cell's own text, and <kbd>d</kbd> clears every cursor's cell. A formula typed this way moves with each cell, the way copy-down moves it: `=A4*2` in row 4 becomes `=A2*2` in row 2. Each of these edits undoes in one step.
+
 ## Rows, columns, and structure
 
 | Emacs | Evil | Action |
