@@ -118,6 +118,42 @@ fn unsupported_names(text: &str, externals: &HashSet<String>) -> Vec<String> {
     out
 }
 
+/// Formula text from a file as this grid shows it: Excel's `_xlfn.`
+/// prefixes and the file forms of `@` and `#` read back. Other text is kept
+/// as written (spacing included), as is text that doesn't parse.
+fn file_formula(text: &str) -> String {
+    match crate::formula::parse::parse(text) {
+        Ok(e) if text.to_ascii_lowercase().contains("_xl") => crate::formula::print::print(&e),
+        _ => text.to_string(),
+    }
+}
+
+/// A formula from a file that isn't a dynamic-array one: as dynamic-array
+/// Excel reads it, with `@` where it intersects instead of spilling (see
+/// [`crate::formula::implicit`]).
+fn legacy_formula(text: &str) -> String {
+    match crate::formula::parse::parse(text) {
+        Ok(mut e) => {
+            let before = e.clone();
+            crate::formula::implicit::mark(&mut e);
+            if e == before {
+                file_formula(text)
+            } else {
+                crate::formula::print::print(&e)
+            }
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
+/// `B2:C9` (or `B2`) as `(r0, c0, r1, c1)`.
+fn range_bounds(range: &str) -> Option<(usize, usize, usize, usize)> {
+    let (a, b) = range.split_once(':').unwrap_or((range, range));
+    let (r0, c0) = xlsx::parse_ref(a.trim())?;
+    let (r1, c1) = xlsx::parse_ref(b.trim())?;
+    Some((r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
+}
+
 /// Load sheet `index` (0 = the first) of an `.xlsx` package. `externals` are
 /// the Scheme grid functions defined now (upper case): formulas calling only
 /// those and built-ins load live; any other formula keeps the result Excel
@@ -160,6 +196,26 @@ pub(super) fn load(
             masters.insert(*si, (c.row, c.col, text.clone()));
         }
     }
+    // Dynamic-array formulas this grid computes spill again on load: the
+    // values the file cached in their ranges give way to the spill.
+    type Spill = (usize, usize, (usize, usize, usize, usize));
+    let spills: Vec<Spill> = sheet
+        .cells
+        .iter()
+        .filter_map(|c| match &c.formula {
+            Some(XFormula::Dynamic { text, range })
+                if unsupported_names(&format!("={text}"), externals).is_empty() =>
+            {
+                Some((c.row, c.col, range_bounds(range)?))
+            }
+            _ => None,
+        })
+        .collect();
+    let spilled = |r: usize, c: usize| {
+        spills.iter().any(|&(ar, ac, (r0, c0, r1, c1))| {
+            (r, c) != (ar, ac) && (r0..=r1).contains(&r) && (c0..=c1).contains(&c)
+        })
+    };
     let mut cells = Vec::with_capacity(sheet.cells.len());
     let mut text_cells = HashMap::new();
     let mut formats = Vec::new();
@@ -175,18 +231,22 @@ pub(super) fn load(
                 None => {}
             }
         }
+        if spilled(c.row, c.col) {
+            continue;
+        }
         let formula = match &c.formula {
             Some(XFormula::Normal(f)) | Some(XFormula::SharedMaster { text: f, .. }) => {
-                Some(format!("={f}"))
+                Some(legacy_formula(&format!("={f}")))
             }
-            Some(XFormula::Array { text, .. }) => Some(format!("={text}")),
+            Some(XFormula::Array { text, .. }) => Some(legacy_formula(&format!("={text}"))),
             Some(XFormula::SharedChild { si }) => masters.get(si).map(|(mr, mc, f)| {
-                super::grid_formula::translated(
+                legacy_formula(&super::grid_formula::translated(
                     &format!("={f}"),
                     c.row as isize - *mr as isize,
                     c.col as isize - *mc as isize,
-                )
+                ))
             }),
+            Some(XFormula::Dynamic { text, .. }) => Some(file_formula(&format!("={text}"))),
             None => None,
         };
         // A formula we can't evaluate would recalculate to `#NAME?` and
@@ -523,7 +583,7 @@ impl GridDoc {
     /// This sheet's values as other sheets' formulas read them.
     pub(super) fn sheet_values(&self) -> SheetValues {
         let (rows, cols) = self.used();
-        let mut cells = Vec::new();
+        let mut cells = self.spilled_cells(|v| v.clone());
         for c in 0..cols {
             self.wb.for_each_in_column(SHEET, c, 0..rows, |r, raw| {
                 if raw.is_empty() {
@@ -540,12 +600,68 @@ impl GridDoc {
         SheetValues::from_cells(cells)
     }
 
+    /// Every value a formula spills into another cell, as `(row, col,
+    /// value)`.
+    fn spilled_cells<T>(&self, f: impl Fn(&Value) -> T) -> Vec<(usize, usize, T)> {
+        let mut out = Vec::new();
+        if !self.formulas.has_spills() {
+            return out;
+        }
+        for (ar, ac) in self.formulas.positions() {
+            let Some((r0, c0, r1, c1)) = self.formulas.spill_range(ar, ac) else {
+                continue;
+            };
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    if let Some(v) = self.formulas.spilled_value(r, c) {
+                        out.push((r, c, f(v)));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A formula as the file stores it: its text, and for a dynamic-array
+    /// formula the range it spills into (see [`crate::formula::implicit`]).
+    fn file_formula_of(&self, r: usize, c: usize, raw: &str) -> (String, Option<String>) {
+        let Some(e) = self.formulas.expr(r, c) else {
+            // It didn't parse: as typed.
+            return (display_text(raw).trim_start_matches('=').to_string(), None);
+        };
+        if crate::formula::implicit::is_legacy(e) {
+            let mut old = e.clone();
+            crate::formula::implicit::strip(&mut old);
+            let text = crate::formula::print::print_file(&old);
+            // Nothing to spell differently: as typed (spacing included).
+            if old == *e && text == crate::formula::print::print(e)[1..] {
+                return (display_text(raw).trim_start_matches('=').to_string(), None);
+            }
+            return (text, None);
+        }
+        let range = match self.formulas.spill_range(r, c) {
+            Some((r0, c0, r1, c1)) => format!(
+                "{}:{}",
+                crate::xlsx::cell_name(r0, c0),
+                crate::xlsx::cell_name(r1, c1)
+            ),
+            None => crate::xlsx::cell_name(r, c),
+        };
+        (crate::formula::print::print_file(e), Some(range))
+    }
+
     /// The grid as an `.xlsx` package: every non-empty cell, formulas with
     /// their current results cached (so other apps show values at once),
-    /// and every formatted cell's formatting.
+    /// values spilled from dynamic-array formulas, and every formatted
+    /// cell's formatting.
     pub(super) fn xlsx_bytes(&self) -> Vec<u8> {
         let (rows, cols) = self.used();
-        let mut owned: Vec<(usize, usize, XValue, Option<String>)> = Vec::new();
+        type Owned = (usize, usize, XValue, Option<String>, Option<String>);
+        let mut owned: Vec<Owned> = self
+            .spilled_cells(result_value)
+            .into_iter()
+            .map(|(r, c, v)| (r, c, v, None, None))
+            .collect();
         for c in 0..cols {
             self.wb.for_each_in_column(SHEET, c, 0..rows, |r, raw| {
                 if raw.is_empty() {
@@ -556,12 +672,12 @@ impl GridDoc {
                         .formulas
                         .result(r, c)
                         .map_or(XValue::Empty, result_value);
-                    let f = display_text(raw).trim_start_matches('=').to_string();
-                    owned.push((r, c, value, Some(f)));
+                    let (f, array) = self.file_formula_of(r, c, raw);
+                    owned.push((r, c, value, Some(f), array));
                 } else if self.xlsx.text.get(&(r, c)).is_some_and(|t| t == raw) {
-                    owned.push((r, c, XValue::Text(raw.to_string()), None));
+                    owned.push((r, c, XValue::Text(raw.to_string()), None, None));
                 } else {
-                    owned.push((r, c, plain_value(raw), None));
+                    owned.push((r, c, plain_value(raw), None, None));
                 }
             });
         }
@@ -575,11 +691,12 @@ impl GridDoc {
         let empty = XValue::Empty;
         let cells = owned
             .iter()
-            .map(|(r, c, v, f)| WriteCell {
+            .map(|(r, c, v, f, array)| WriteCell {
                 row: *r,
                 col: *c,
                 value: v,
                 formula: f.as_deref(),
+                array: array.as_deref(),
                 style: styles.get(&(*r, *c)),
             })
             .chain(styles.iter().filter(|(at, _)| !filled.contains(at)).map(
@@ -588,6 +705,7 @@ impl GridDoc {
                     col,
                     value: &empty,
                     formula: None,
+                    array: None,
                     style: Some(st),
                 },
             ));
@@ -646,6 +764,7 @@ mod tests {
                 col: *c,
                 value: v,
                 formula: f.as_deref(),
+                array: None,
                 style: None,
             }),
             false,
@@ -666,6 +785,7 @@ mod tests {
                 col: *c,
                 value: v,
                 formula: *f,
+                array: None,
                 style: None,
             }),
             false,

@@ -81,6 +81,10 @@ pub struct Ref {
 pub enum UnOp {
     Neg,
     Plus,
+    /// `@`, implicit intersection: one value from a range or array (the
+    /// cell in the formula's own row or column), as pre-dynamic-array Excel
+    /// read every formula. Files store it as `_xlfn.SINGLE(…)`.
+    At,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +145,10 @@ pub enum Expr {
     Unary(UnOp, Box<Expr>),
     /// Postfix `%`.
     Percent(Box<Expr>),
+    /// Postfix `#` on a cell reference, the spill-range operator: `A1#` is
+    /// the whole range the formula in `A1` spills into. Files store it as
+    /// `_xlfn.ANCHORARRAY(A1)`.
+    Spill(Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     /// A function call; the name is upper-cased (as Excel stores it).
     Call(Arc<str>, Vec<Expr>),
@@ -159,7 +167,7 @@ impl Expr {
     /// walk finds nothing there — but every walk agrees).
     pub fn for_each_child(&self, f: &mut impl FnMut(&Expr)) {
         match self {
-            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => f(e),
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Spill(e) | Expr::Paren(e) => f(e),
             Expr::Binary(_, a, b) => {
                 f(a);
                 f(b);
@@ -179,7 +187,7 @@ impl Expr {
     /// [`Self::for_each_child`], mutably.
     pub fn for_each_child_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
         match self {
-            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Paren(e) => f(e),
+            Expr::Unary(_, e) | Expr::Percent(e) | Expr::Spill(e) | Expr::Paren(e) => f(e),
             Expr::Binary(_, a, b) => {
                 f(a);
                 f(b);
