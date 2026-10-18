@@ -459,6 +459,11 @@ impl Workbook {
         &self.sheets[sheet]
     }
 
+    /// Rename a sheet (the workbook's tab; not an undoable cell edit).
+    pub fn rename_sheet(&mut self, sheet: usize, name: &str) {
+        self.sheets[sheet].name = name.to_string();
+    }
+
     /// The CSV dialect the workbook saves with.
     pub fn dialect(&self) -> &Dialect {
         match &self.format {

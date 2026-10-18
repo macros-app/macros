@@ -29,7 +29,7 @@
 ;;   (grid-header-names)   (grid-column-type col) → "int"/"float"/"bool"/"date"/"text"
 ;;   (grid-frozen-rows)   (grid-frozen-columns)   (grid-zoom) → percent
 ;;   (grid-editing?)
-;;   (grid-sheets) → an .xlsx's sheet names   (grid-current-sheet) → the one shown
+;;   (grid-sheets) → a workbook's sheet names   (grid-current-sheet) → the one shown
 ;;   (grid-cell row col)   (grid-row-values row)   (grid-column-values col)
 ;;     — any cell, synchronously, for grids up to a million cells (a copy
 ;;     made after each edit); a bigger grid raises an error: use
@@ -64,6 +64,14 @@
 ;;   (grid-set-header #t)   (grid-set-zoom 125)
 ;;   (grid-set-column-hidden col #t)
 ;;   (grid-open-sheet "Costs")  — show another sheet (see "Workbook sheets")
+;;
+;; Workbook sheets — each one undo step (see "Workbook sheets" below):
+;;   (grid-add-sheet "Costs")  — add an empty sheet (no argument: prompt)
+;;   (grid-rename-sheet "Q1 Sales")  (grid-rename-sheet "Costs" "Q1 Sales")
+;;     — rename the sheet shown (or Costs), rewriting every reference to it
+;;   (grid-delete-sheet "Costs")  — delete without asking; references to it
+;;     become #REF! (no argument: confirm, then delete the sheet shown)
+;;   (grid-move-sheet -1)  — move the sheet shown one place left
 ;;   (grid-filter-rows col op value)  — show only rows whose col passes; the
 ;;     ops are the highlight-rule ones; filters stack; (grid-widen) clears
 ;;   (grid-column-choices col '("open" "closed"))  — what grid-complete-cell
@@ -264,7 +272,13 @@
       ("ctrl-c ctrl-e m" grid-copy-as-markdown)
       ("ctrl-c ctrl-e j" grid-copy-as-json)
       ("ctrl-c ?" grid-dispatch)
-      ("ctrl-c t" helm-grid-sheets)))
+      ("ctrl-c t" helm-grid-sheets)
+      ;; Sheets, next to the C-c t picker: add, rename, delete, move.
+      ("ctrl-c shift-t a" grid-add-sheet)
+      ("ctrl-c shift-t r" grid-rename-sheet)
+      ("ctrl-c shift-t d" grid-delete-sheet)
+      ("ctrl-c shift-t b" grid-move-sheet-left)
+      ("ctrl-c shift-t f" grid-move-sheet-right)))
   ;; Formatting, on Emacs's facemenu prefix (M-o b is bold there too).
   (grid-bind-format km "alt-o"))
 
@@ -386,7 +400,13 @@
       ("g /" grid-filter)
       ("g *" grid-filter-by-value)
       ("g b" grid-toggle-bold)
-      ("g t" helm-grid-sheets)))
+      ("g t" helm-grid-sheets)
+      ;; Sheets, next to the g t picker: add, rename, delete, move.
+      ("g shift-t a" grid-add-sheet)
+      ("g shift-t r" grid-rename-sheet)
+      ("g shift-t d" grid-delete-sheet)
+      ("g shift-t h" grid-move-sheet-left)
+      ("g shift-t l" grid-move-sheet-right)))
   (grid-bind-format km "alt-o")
   (grid-bind-format km "f"))
 
@@ -690,20 +710,85 @@
              'grid-sort-prompt--key))
 
 ;; --- Workbook sheets (.xlsx tabs) ----------------------------------------------
-;; (grid-sheets) lists an .xlsx's sheet names, (grid-current-sheet) names the
+;; (grid-sheets) lists a workbook's sheet names, (grid-current-sheet) names the
 ;; one shown, and (grid-open-sheet "Costs") shows another: the first sheet is
 ;; the file's own buffer, each other one opens as a buffer of its own,
-;; "report.xlsx<Costs>" (reused while it's open).
+;; "report.xlsx<Costs>" (reused while it's open). Saving from any of them
+;; saves every sheet.
+;;
+;; Adding, renaming, deleting and moving sheets is one undo step each, taken
+;; in the buffer shown after it (deleting the sheet shown: in the sheet shown
+;; next). A CSV grid can grow a second sheet; it then saves as .xlsx.
 ;;
 ;; `C-c t` / `g t`: pick a sheet with Helm; the one shown is marked "current".
+;; M-a there renames, deletes or moves the picked sheet.
 (define (helm-grid-sheets--candidate s)
   (if (equal? s (grid-current-sheet)) (list s "current") s))
 (define-command (helm-grid-sheets)
   (let ((sheets (grid-sheets)))
     (if (null? sheets)
-        (message "No sheets here: only .xlsx workbooks have them")
+        (message "One sheet here (C-c T a / g T a adds another)")
         (helm (list (list "Sheets" (map helm-grid-sheets--candidate sheets)
-                          'grid-open-sheet))))))
+                          (list (list "Open sheet" 'grid-open-sheet)
+                                (list "Rename sheet…" 'grid-rename-sheet--prompt)
+                                (list "Delete sheet…" 'grid-delete-sheet--confirm)
+                                (list "Add a sheet…" 'grid-add-sheet--from-helm))))))))
+
+;; The name a new sheet is offered: Sheet2, Sheet3, … whichever is free.
+(define (grid-next-sheet-name)
+  (let ((taken (map string-downcase (grid-sheets))))
+    (define (try n)
+      (let ((name (string-append "Sheet" (number->string n))))
+        (if (member (string-downcase name) taken) (try (+ n 1)) name)))
+    (try (max 2 (+ (length taken) 1)))))
+
+;; `C-c T a` / `g T a`: add an empty sheet after the last and show it; the
+;; prompt offers the next free SheetN (RET takes it).
+(define-command (grid-add-sheet . args)
+  (if (null? args)
+      (let ((suggested (grid-next-sheet-name)))
+        (read-string "Add sheet: "
+                     (lambda (name)
+                       (grid-add-sheet-impl
+                         (if (equal? (string-trim name) "") suggested name)))
+                     suggested))
+      (grid-add-sheet-impl (car args))))
+(define (grid-add-sheet--from-helm sheet) (grid-add-sheet))
+
+;; `C-c T r` / `g T r`: rename the sheet shown; every formula referring to it
+;; (in any sheet) follows, and so does its buffer's name.
+(define-command (grid-rename-sheet . args)
+  (cond ((null? args) (grid-rename-sheet--prompt (grid-current-sheet)))
+        ((null? (cdr args)) (grid-rename-sheet-impl "" (car args)))
+        (else (grid-rename-sheet-impl (car args) (cadr args)))))
+(define (grid-rename-sheet--prompt from)
+  (if (equal? from "")
+      (grid-rename-sheet-impl "" "")
+      (read-string (string-append "Rename sheet " from " to: ")
+                   (lambda (to)
+                     (when (not (equal? (string-trim to) ""))
+                       (grid-rename-sheet-impl from to)))
+                   from)))
+
+;; `C-c T d` / `g T d`: delete the sheet shown, after asking; formulas
+;; referring to it show #REF!. The last sheet can't be deleted.
+(define-command (grid-delete-sheet . args)
+  (if (null? args)
+      (grid-delete-sheet--confirm (grid-current-sheet))
+      (grid-delete-sheet-impl (car args))))
+(define (grid-delete-sheet--confirm name)
+  (if (< (length (grid-sheets)) 2)
+      (grid-delete-sheet-impl name)
+      (y-or-n-p (string-append "Delete sheet " name "? (references to it become #REF!) ")
+                (callback->name
+                  (lambda (answer)
+                    (when (equal? answer "yes") (grid-delete-sheet-impl name)))))))
+
+;; `C-c T b`/`C-c T f` (`g T h`/`g T l`): move the sheet shown left or right.
+(define-command (grid-move-sheet . args)
+  (grid-move-sheet-impl (if (null? args) 1 (car args))))
+(define-command (grid-move-sheet-left) (grid-move-sheet-impl -1))
+(define-command (grid-move-sheet-right) (grid-move-sheet-impl 1))
 
 ;; `?` / `C-c ?`: every grid command in one menu (magit-style).
 (define-command (grid-dispatch)
@@ -711,7 +796,6 @@
     (list
       (list "Move"
             (list "g" "Go to cell…" 'grid-goto)
-            (list "G" "Go to sheet…" 'helm-grid-sheets)
             (list "j" "Jump to column…" 'grid-jump-to-column)
             (list "s" "Search…" 'grid-search-forward)
             (list "r" "Search backward…" 'grid-search-backward)
@@ -763,6 +847,13 @@
             (list "+" "More decimals" 'grid-increase-decimals)
             (list "-" "Fewer decimals" 'grid-decrease-decimals)
             (list "x" "Clear formatting" 'grid-clear-format))
+      (list "Sheets"
+            (list "G" "Go to sheet…" 'helm-grid-sheets)
+            (list "A" "Add sheet…" 'grid-add-sheet)
+            (list "R" "Rename sheet…" 'grid-rename-sheet)
+            (list "D" "Delete sheet…" 'grid-delete-sheet)
+            (list "<" "Move sheet left" 'grid-move-sheet-left)
+            (list ">" "Move sheet right" 'grid-move-sheet-right))
       (list "Copy as"
             (list "X" "Org table" 'grid-copy-as-org)
             (list "M" "Markdown table" 'grid-copy-as-markdown)

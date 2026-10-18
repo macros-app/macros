@@ -463,6 +463,31 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     reg.register_fn("grid-open-sheet", move |name: String| {
         p(GridOp::OpenSheet(name))
     });
+    // The workbook's sheets (wrapped by `grid-add-sheet`, `grid-rename-sheet`,
+    // `grid-delete-sheet` and `grid-move-sheet` in grid.scm, which prompt
+    // when called without arguments). Each is one undo step.
+    // `(grid-add-sheet-impl "Costs")`: add an empty sheet ("" = SheetN).
+    let p = push(queue);
+    reg.register_fn("grid-add-sheet-impl", move |name: String| {
+        p(GridOp::AddSheet(name))
+    });
+    // `(grid-rename-sheet-impl "Costs" "Q1 Sales")` ("" = the sheet shown),
+    // rewriting every reference to it.
+    let p = push(queue);
+    reg.register_fn("grid-rename-sheet-impl", move |from: String, to: String| {
+        p(GridOp::RenameSheet { from, to })
+    });
+    // `(grid-delete-sheet-impl "Costs")` ("" = the sheet shown), without
+    // asking; references to it become #REF!.
+    let p = push(queue);
+    reg.register_fn("grid-delete-sheet-impl", move |name: String| {
+        p(GridOp::DeleteSheet(name))
+    });
+    // `(grid-move-sheet-impl -1)`: move the sheet shown one place left.
+    let p = push(queue);
+    reg.register_fn("grid-move-sheet-impl", move |by: isize| {
+        p(GridOp::MoveSheet(by))
+    });
     // `(grid-clear-cell-formats)`: remove all hand-set bold, colors and
     // number formats from this grid (one undo step).
     let p = push(queue);

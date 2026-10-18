@@ -575,6 +575,17 @@ pub enum GridOp {
     ClearCellFormats,
     /// Show the workbook's sheet with this name (`grid-open-sheet`).
     OpenSheet(String),
+    /// Add an empty sheet with this name (`""`: the next SheetN).
+    AddSheet(String),
+    /// Rename sheet `from` (`""`: the one shown) to `to`.
+    RenameSheet {
+        from: String,
+        to: String,
+    },
+    /// Delete the sheet with this name (`""`: the one shown).
+    DeleteSheet(String),
+    /// Move the sheet shown this many places (negative: left).
+    MoveSheet(isize),
     /// Give the selection (or the cursor cell) this number format: a code
     /// or a preset name (`grid-set-number-format`).
     NumberFormat(String),

@@ -1,19 +1,23 @@
-//! `.xlsx` files as grid buffers: loading one sheet of a workbook (values
-//! and formulas) into a [`Workbook`], and saving a grid back as `.xlsx`.
-//! Opening a file shows its first sheet; each other sheet opens as a buffer
-//! of its own (`grid-open-sheet`, `report.xlsx<Costs>`).
+//! `.xlsx` files as grid buffers: loading a workbook's sheets (values and
+//! formulas) into [`Workbook`]s, and saving a grid back as `.xlsx`. Opening
+//! a file shows its first sheet; each other sheet opens as a buffer of its
+//! own (`grid-open-sheet`, `report.xlsx<Costs>`). The sheet buffers of one
+//! workbook share a [`BookStore`]: the sheet list and every sheet's
+//! contents, so saving from any of them writes every sheet.
 //!
 //! The `.xlsx` support is deliberately minimal (see `src/xlsx`): values,
 //! formulas and their cached results, the hand-set formatting a grid has
-//! (bold, palette colors, number formats, Wrap Text), and row heights. A file holding anything this
-//! would drop on a rewrite — charts, other cell styles, more sheets, … — opens
-//! *protected*: it can be viewed and edited, and saved as a new file
+//! (bold, palette colors, number formats, Wrap Text), and row heights. A
+//! file holding anything this would drop on a rewrite — charts, other cell styles, hidden sheets, … —
+//! opens *protected*: it can be viewed and edited, and saved as a new file
 //! (`:w copy.xlsx`), but never written back over itself, so the original is
 //! never silently damaged.
 
 use crate::formula::engine::{MARK, display_text, is_formula, store_formula};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::formula::engine::SheetValues;
 use crate::formula::value::{ErrorKind, Value, general_format};
@@ -25,6 +29,89 @@ use gpui::Context;
 
 use super::Editor;
 use super::grid::{GridDoc, SHEET};
+
+/// A dynamic-array formula's cell, and the range `(r0, c0, r1, c1)` it
+/// spills into.
+pub(super) type Spill = ((usize, usize), (usize, usize, usize, usize));
+
+/// One sheet's contents as a grid holds them: what a sheet with no buffer
+/// open is saved from and opens with.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SheetData {
+    /// Every non-empty cell's text (a formula with its leading MARK).
+    pub cells: Vec<(usize, usize, String)>,
+    /// Cells to save as text although they read as another type (see
+    /// [`XlsxState::text`](super::grid::XlsxState)).
+    pub text: HashMap<(usize, usize), String>,
+    pub formats: Vec<((usize, usize), CellFmt)>,
+    /// The values other sheets' formulas read (a formula's result), also
+    /// cached in the file for a formula.
+    pub values: SheetValues,
+    /// Each dynamic-array formula's cell and the range `(r0, c0, r1, c1)` it
+    /// spills into.
+    pub spills: Vec<Spill>,
+    /// The values spilled into other cells, written as cached values.
+    pub spilled: Vec<(usize, usize, Value)>,
+    /// Row heights: `(row, height in 100% px, set by hand)`. Only heights
+    /// set by hand are read back; Wrap Text works the others out again.
+    pub rows: Vec<(usize, f64, bool)>,
+}
+
+/// Points (an `.xlsx` row height) per grid pixel at 100%: Excel's default
+/// 15 pt row is 20 px.
+const PT_PER_PX: f64 = 0.75;
+
+/// A workbook with several sheets, shared by the buffers showing them.
+#[derive(Debug, Default)]
+pub(super) struct BookStore {
+    /// The sheet names, in workbook order.
+    pub names: Vec<String>,
+    /// The names as last loaded or saved: the workbook is modified while
+    /// they differ (a sheet added, renamed, deleted or moved).
+    pub saved_names: Vec<String>,
+    /// Each sheet's contents by lower-case name, as of the last load or
+    /// save plus sheet operations (renames rewrite references here too). An
+    /// open sheet buffer holds the live contents of its sheet.
+    pub sheets: HashMap<String, SheetData>,
+    /// The `.xlsx` file the workbook saves to (`None`: a CSV that grew a
+    /// sheet, saved with a Save As .xlsx first).
+    pub path: Option<PathBuf>,
+}
+
+pub(super) type Book = Rc<RefCell<BookStore>>;
+
+impl BookStore {
+    /// A store for `names`, every sheet's data in `data` (same order).
+    pub fn new(names: Vec<String>, data: Vec<SheetData>, path: Option<PathBuf>) -> Book {
+        let sheets = names.iter().map(|n| n.to_lowercase()).zip(data).collect();
+        Rc::new(RefCell::new(BookStore {
+            saved_names: names.clone(),
+            names,
+            sheets,
+            path,
+        }))
+    }
+
+    /// A sheet added, renamed, deleted or moved since the last save.
+    pub fn structure_modified(&self) -> bool {
+        self.names != self.saved_names
+    }
+
+    /// Whether a save must go through the workbook (every sheet, and the
+    /// sheet list) rather than one buffer's own: it has several sheets, its
+    /// list changed, or the buffer saving it has no file of its own.
+    pub fn saves_whole(&self, has_own_file: bool) -> bool {
+        self.names.len() > 1 || self.structure_modified() || !has_own_file
+    }
+
+    /// The index of sheet `name` (exact, else ignoring case).
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|s| s == name).or_else(|| {
+            let lower = name.to_lowercase();
+            self.names.iter().position(|s| s.to_lowercase() == lower)
+        })
+    }
+}
 
 /// A loaded `.xlsx`: the grid workbook, and what a rewrite would lose.
 pub(super) struct Loaded {
@@ -41,13 +128,11 @@ pub(super) struct Loaded {
     pub text_cells: HashMap<(usize, usize), String>,
     /// The sheet's cell formatting, as the grid's hand-set formats.
     pub formats: Vec<((usize, usize), CellFmt)>,
-    /// Rows sized by hand: `(row, height)` in 100% px.
+    /// The sheet's rows sized by hand: `(row, height)` in 100% px.
     pub rows: Vec<(usize, f64)>,
+    /// Every sheet's contents, in workbook order.
+    pub data: Vec<SheetData>,
 }
-
-/// Points (an `.xlsx` row height) per grid pixel at 100%: Excel's default
-/// 15 pt row is 20 px.
-const PT_PER_PX: f64 = 0.75;
 
 /// A file's cell format as a grid format; `None` when a color isn't one of
 /// the palette's.
@@ -154,10 +239,11 @@ fn range_bounds(range: &str) -> Option<(usize, usize, usize, usize)> {
     Some((r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
 }
 
-/// Load sheet `index` (0 = the first) of an `.xlsx` package. `externals` are
-/// the Scheme grid functions defined now (upper case): formulas calling only
-/// those and built-ins load live; any other formula keeps the result Excel
-/// saved for it (see [`unsupported_names`]).
+/// Load an `.xlsx` package, showing sheet `index` (0 = the first).
+/// `externals` are the Scheme grid functions defined now (upper case):
+/// formulas calling only those and built-ins load live; any other formula
+/// keeps the result Excel saved for it (see [`unsupported_names`]). Every
+/// sheet is read, since a save writes every sheet.
 pub(super) fn load(
     bytes: &[u8],
     index: usize,
@@ -173,6 +259,7 @@ pub(super) fn load(
             text_cells: HashMap::new(),
             formats: Vec::new(),
             rows: Vec::new(),
+            data: vec![SheetData::default()],
         });
     }
     let book = xlsx::read(bytes).map_err(|e| e.to_string())?;
@@ -187,10 +274,75 @@ pub(super) fn load(
     if book.date1904 {
         lossy.push("the 1904 date system".into());
     }
+    // Names this grid can't evaluate, across the workbook (sorted for the
+    // message).
+    let mut unsupported = std::collections::BTreeSet::new();
+    let data: Vec<SheetData> = book
+        .sheets
+        .iter()
+        .map(|s| sheet_data(&book, s, externals, &mut lossy, &mut unsupported))
+        .collect();
+    let shown = &data[index];
+    // Stored densely: a single far-away cell (XFD1048576) would ask for a
+    // vast grid.
+    let (rows, cols) = shown.cells.iter().fold((0, 0), |(r, c), (row, col, _)| {
+        (r.max(row + 1), c.max(col + 1))
+    });
+    if !crate::grid::model::fits(rows, cols) {
+        return Err(format!(
+            "sheet \"{}\" spans {rows} rows × {cols} columns, too large to open",
+            sheet.name
+        ));
+    }
+    if !unsupported.is_empty() {
+        const SHOWN: usize = 5;
+        let mut names: Vec<_> = unsupported.iter().take(SHOWN).cloned().collect();
+        if unsupported.len() > SHOWN {
+            names.push(format!("{} more", unsupported.len() - SHOWN));
+        }
+        lossy.push(format!(
+            "formulas using {} (unsupported here; showing their saved results)",
+            names.join(", ")
+        ));
+    }
+    let wb = Workbook::from_cells(&sheet.name, shown.cells.clone());
+    let others = sheets
+        .iter()
+        .zip(&data)
+        .enumerate()
+        .filter(|&(i, _)| i != index)
+        .map(|(_, (name, d))| (name.to_lowercase(), d.values.clone()))
+        .collect();
+    Ok(Loaded {
+        wb,
+        lossy,
+        sheets,
+        others,
+        text_cells: shown.text.clone(),
+        formats: shown.formats.clone(),
+        rows: shown
+            .rows
+            .iter()
+            .filter(|r| r.2)
+            .map(|&(r, h, _)| (r, h))
+            .collect(),
+        data,
+    })
+}
+
+/// One sheet of a read workbook as grid contents, noting in `lossy` what a
+/// rewrite would lose and in `unsupported` the names its formulas use that
+/// this grid can't evaluate.
+fn sheet_data(
+    book: &xlsx::Book,
+    sheet: &xlsx::XSheet,
+    externals: &HashSet<String>,
+    lossy: &mut Vec<String>,
+    unsupported: &mut std::collections::BTreeSet<String>,
+) -> SheetData {
     // Shared formulas: the master carries the text; each child is the
     // master's formula moved to the child's cell.
-    let mut masters: std::collections::HashMap<u32, (usize, usize, String)> =
-        std::collections::HashMap::new();
+    let mut masters: HashMap<u32, (usize, usize, String)> = HashMap::new();
     for c in &sheet.cells {
         if let Some(XFormula::SharedMaster { si, text, .. }) = &c.formula {
             masters.insert(*si, (c.row, c.col, text.clone()));
@@ -198,7 +350,6 @@ pub(super) fn load(
     }
     // Dynamic-array formulas this grid computes spill again on load: the
     // values the file cached in their ranges give way to the spill.
-    type Spill = (usize, usize, (usize, usize, usize, usize));
     let spills: Vec<Spill> = sheet
         .cells
         .iter()
@@ -206,21 +357,20 @@ pub(super) fn load(
             Some(XFormula::Dynamic { text, range })
                 if unsupported_names(&format!("={text}"), externals).is_empty() =>
             {
-                Some((c.row, c.col, range_bounds(range)?))
+                Some(((c.row, c.col), range_bounds(range)?))
             }
             _ => None,
         })
         .collect();
-    let spilled = |r: usize, c: usize| {
-        spills.iter().any(|&(ar, ac, (r0, c0, r1, c1))| {
+    let in_spill = |r: usize, c: usize| {
+        spills.iter().any(|&((ar, ac), (r0, c0, r1, c1))| {
             (r, c) != (ar, ac) && (r0..=r1).contains(&r) && (c0..=c1).contains(&c)
         })
     };
+    let mut spilled = Vec::new();
     let mut cells = Vec::with_capacity(sheet.cells.len());
     let mut text_cells = HashMap::new();
     let mut formats = Vec::new();
-    // Names this grid can't evaluate, across the sheet (sorted for the message).
-    let mut unsupported = std::collections::BTreeSet::new();
     for c in &sheet.cells {
         if let Some(st) = book.styles.get(c.style).filter(|s| !s.is_default()) {
             match cell_fmt(st) {
@@ -231,7 +381,8 @@ pub(super) fn load(
                 None => {}
             }
         }
-        if spilled(c.row, c.col) {
+        if in_spill(c.row, c.col) {
+            spilled.push((c.row, c.col, cached_value(&c.value)));
             continue;
         }
         let formula = match &c.formula {
@@ -272,57 +423,26 @@ pub(super) fn load(
             cells.push((c.row, c.col, text));
         }
     }
-    // Stored densely: a single far-away cell (XFD1048576) would ask for a
-    // vast grid.
-    let (rows, cols) = cells.iter().fold((0, 0), |(r, c), (row, col, _)| {
-        (r.max(row + 1), c.max(col + 1))
-    });
-    if !crate::grid::model::fits(rows, cols) {
-        return Err(format!(
-            "sheet \"{}\" spans {rows} rows × {cols} columns, too large to open",
-            sheet.name
-        ));
-    }
-    if !unsupported.is_empty() {
-        const SHOWN: usize = 5;
-        let mut names: Vec<_> = unsupported.iter().take(SHOWN).cloned().collect();
-        if unsupported.len() > SHOWN {
-            names.push(format!("{} more", unsupported.len() - SHOWN));
-        }
-        lossy.push(format!(
-            "formulas using {} (unsupported here; showing their saved results)",
-            names.join(", ")
-        ));
-    }
-    let wb = Workbook::from_cells(&sheet.name, cells);
-    let others = book
-        .sheets
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| i != index)
-        .map(|(_, s)| {
-            let values = SheetValues::from_cells(
-                s.cells
-                    .iter()
-                    .map(|c| (c.row, c.col, cached_value(&c.value))),
-            );
-            (s.name.to_lowercase(), values)
-        })
-        .collect();
-    Ok(Loaded {
-        wb,
-        lossy,
-        sheets,
-        others,
-        text_cells,
+    let values = SheetValues::from_cells(
+        sheet
+            .cells
+            .iter()
+            .map(|c| (c.row, c.col, cached_value(&c.value))),
+    );
+    SheetData {
+        cells,
+        text: text_cells,
         formats,
+        values,
+        spills,
+        spilled,
         rows: sheet
             .rows
             .iter()
             .filter(|r| r.custom)
-            .map(|r| (r.row, r.height / PT_PER_PX))
+            .map(|r| (r.row, r.height / PT_PER_PX, true))
             .collect(),
-    })
+    }
 }
 
 /// A number from the file as cell text: as Excel shows it (15 significant
@@ -376,119 +496,54 @@ fn result_value(v: &Value) -> XValue {
 impl Editor {
     /// `grid-open-sheet`: show sheet `name` of the active grid's workbook.
     /// The first sheet is the file's own buffer; every other sheet opens as
-    /// a buffer of its own, `report.xlsx<Costs>`, which visits no file (the
-    /// workbook as a whole can't be rewritten yet), so `:w copy.xlsx` saves
-    /// that sheet as a workbook of its own. An open sheet buffer is reused.
+    /// a buffer of its own, `report.xlsx<Costs>`, which visits no file:
+    /// saving it saves the whole workbook. An open sheet buffer is reused.
     pub(super) fn grid_open_sheet(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(g) = self.active.grid.as_deref() else {
             self.echo("grid-open-sheet: the current buffer is not a grid", cx);
             return;
         };
-        let Some(path) = self.active.path.clone().or_else(|| g.xlsx.source.clone()) else {
-            self.echo("grid-open-sheet: this grid isn't from an .xlsx file", cx);
+        let name = name.trim();
+        let Some(book) = g.xlsx.book.clone() else {
+            match g.xlsx.sheets.first() {
+                Some(only) if only.eq_ignore_ascii_case(name) => {
+                    self.echo(format!("Already showing sheet {only}"), cx);
+                }
+                Some(only) => self.echo(format!("No sheet named {name:?} (sheets: {only})"), cx),
+                None => self.echo(
+                    "grid-open-sheet: this grid has one sheet (grid-add-sheet adds another)",
+                    cx,
+                ),
+            }
             return;
         };
-        if g.xlsx.sheets.is_empty() {
-            self.echo("grid-open-sheet: only .xlsx workbooks have sheets", cx);
-            return;
-        }
-        let name = name.trim();
-        let Some(index) = g.xlsx.sheets.iter().position(|s| s == name).or_else(|| {
-            g.xlsx
-                .sheets
-                .iter()
-                .position(|s| s.eq_ignore_ascii_case(name))
-        }) else {
-            let all = g.xlsx.sheets.join(", ");
+        let (index, all) = {
+            let b = book.borrow();
+            (b.index_of(name), b.names.join(", "))
+        };
+        let Some(index) = index else {
             self.echo(format!("No sheet named {name:?} (sheets: {all})"), cx);
             return;
         };
-        let sheet = g.xlsx.sheets[index].clone();
         if index == g.xlsx.sheet {
+            let sheet = g.sheet_name_shown().to_string();
             self.echo(format!("Already showing sheet {sheet}"), cx);
             return;
         }
-        if index == 0 {
-            // The file's own buffer, opened again if it was killed.
-            if !self.switch_to_visiting(&super::buffers::file_identity(&path), cx) {
-                self.find_file(&path.to_string_lossy(), cx);
-            }
-            return;
-        }
-        let base = path
-            .file_name()
-            .map_or_else(|| "workbook".into(), |f| f.to_string_lossy().to_string());
-        // Reuse this workbook's buffer for the sheet — found by file, not by
-        // name: two workbooks can share a file name.
-        let book = super::buffers::file_identity(&path);
-        let open = self.inactive.iter().find(|d| {
-            d.grid.as_deref().is_some_and(|g| {
-                g.xlsx.sheet == index
-                    && g.xlsx
-                        .source
-                        .as_deref()
-                        .is_some_and(|p| super::buffers::file_identity(p) == book)
-            })
+        // Reuse this workbook's buffer for the sheet — found by workbook,
+        // not by name: two workbooks can share a file name.
+        let open = self.book_slots(&book).into_iter().find(|&s| {
+            self.doc_at(s)
+                .grid
+                .as_deref()
+                .is_some_and(|g| g.xlsx.sheet == index)
         });
-        if let Some(doc) = open {
-            let name = doc.name.clone();
+        if let Some(s) = open {
+            let name = self.doc_at(s).name.clone();
             self.switch_to_buffer(&name, cx);
             return;
         }
-        let buffer = self.unique_buffer_name(&format!("{base}<{sheet}>"), &path);
-        let loaded = std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                let l = load(&bytes, index, &self.grid_fn_names())?;
-                Ok((l, super::grid::bytes_hash(&bytes)))
-            });
-        let (l, hash) = match loaded {
-            Ok(l) => l,
-            Err(e) => {
-                self.echo(format!("Could not open sheet {sheet}: {e}"), cx);
-                return;
-            }
-        };
-        let count = l.sheets.len();
-        let mut grid = GridDoc::new(l.wb, Some("xlsx".into()), hash, &self.grid_ui.opts);
-        grid.xlsx.lossy = l.lossy;
-        grid.xlsx.sheets = l.sheets;
-        grid.xlsx.sheet = index;
-        grid.xlsx.source = Some(path);
-        grid.xlsx.other_sheets = l.others;
-        grid.xlsx.text = l.text_cells;
-        for ((r, c), f) in l.formats {
-            grid.formats.set(r, c, f);
-        }
-        for (r, h) in l.rows {
-            grid.view.rows.set(r, h);
-        }
-        grid.mark_saved();
-        grid.rebuild_formulas();
-        self.install_grid_doc(buffer.clone(), None, grid, true, cx);
-        self.echo(
-            format!(
-                "Sheet {sheet} ({} of {count}) — :w copy.xlsx saves it as a workbook of its own",
-                index + 1
-            ),
-            cx,
-        );
-        self.grid_after(cx);
-        // Sheets already open may hold unsaved edits: read theirs, not the
-        // file's. They hand their values over again even if unchanged since
-        // they last did (there was no one to give them to then).
-        let book = workbook_of(&self.active);
-        for d in &mut self.inactive {
-            if workbook_of(d).is_some()
-                && workbook_of(d) == book
-                && let Some(g) = d.grid.as_deref_mut()
-            {
-                g.xlsx.sheet_published = None;
-            }
-        }
-        let open: Vec<Option<usize>> = (0..self.inactive.len()).map(Some).collect();
-        self.grid_sync_sheets_from(open, cx);
-        self.grid_fire_load();
+        self.grid_install_sheet(&book, index, cx);
     }
 
     /// Hand each listed sheet buffer's values (`None` = the active buffer)
@@ -508,9 +563,10 @@ impl Editor {
             if rounds > 64 {
                 break;
             }
-            let Some(book) = workbook_of(self.doc_at(from)) else {
+            let book = workbook_of(self.doc_at(from));
+            if book.is_none() {
                 continue;
-            };
+            }
             let (index, name, values) = {
                 let Some(g) = self.doc_at_mut(from).grid.as_deref_mut() else {
                     continue;
@@ -522,7 +578,7 @@ impl Editor {
                 g.xlsx.sheet_published = Some(key);
                 (
                     g.xlsx.sheet,
-                    g.xlsx.sheets[g.xlsx.sheet].clone(),
+                    g.sheet_name_shown().to_string(),
                     g.sheet_values(),
                 )
             };
@@ -532,7 +588,7 @@ impl Editor {
                 .filter(|&s| s != from)
                 .collect();
             for to in slots {
-                if workbook_of(self.doc_at(to)).as_ref() != Some(&book) {
+                if !same_book(&workbook_of(self.doc_at(to)), &book) {
                     continue;
                 }
                 let Some(g) = self.doc_at_mut(to).grid.as_deref_mut() else {
@@ -553,14 +609,14 @@ impl Editor {
         }
     }
 
-    fn doc_at(&self, slot: Option<usize>) -> &super::Document {
+    pub(super) fn doc_at(&self, slot: Option<usize>) -> &super::Document {
         match slot {
             None => &self.active,
             Some(i) => &self.inactive[i],
         }
     }
 
-    fn doc_at_mut(&mut self, slot: Option<usize>) -> &mut super::Document {
+    pub(super) fn doc_at_mut(&mut self, slot: Option<usize>) -> &mut super::Document {
         match slot {
             None => &mut self.active,
             Some(i) => &mut self.inactive[i],
@@ -568,15 +624,14 @@ impl Editor {
     }
 }
 
-/// The workbook file a grid buffer shows one sheet of, when the workbook has
-/// several sheets (as a file identity, so two paths to it agree).
-fn workbook_of(doc: &super::Document) -> Option<PathBuf> {
-    let g = doc.grid.as_deref()?;
-    if g.xlsx.sheets.len() < 2 {
-        return None;
-    }
-    let path = doc.path.as_ref().or(g.xlsx.source.as_ref())?;
-    Some(super::buffers::file_identity(path))
+/// The workbook a grid buffer shows one sheet of, when it has a store.
+fn workbook_of(doc: &super::Document) -> Option<Book> {
+    doc.grid.as_deref()?.xlsx.book.clone()
+}
+
+/// Whether two buffers' workbooks are the same one.
+fn same_book(a: &Option<Book>, b: &Option<Book>) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if Rc::ptr_eq(a, b))
 }
 
 impl GridDoc {
@@ -622,108 +677,198 @@ impl GridDoc {
         out
     }
 
-    /// A formula as the file stores it: its text, and for a dynamic-array
-    /// formula the range it spills into (see [`crate::formula::implicit`]).
-    fn file_formula_of(&self, r: usize, c: usize, raw: &str) -> (String, Option<String>) {
-        let Some(e) = self.formulas.expr(r, c) else {
-            // It didn't parse: as typed.
-            return (display_text(raw).trim_start_matches('=').to_string(), None);
-        };
-        if crate::formula::implicit::is_legacy(e) {
-            let mut old = e.clone();
-            crate::formula::implicit::strip(&mut old);
-            let text = crate::formula::print::print_file(&old);
-            // Nothing to spell differently: as typed (spacing included).
-            if old == *e && text == crate::formula::print::print(e)[1..] {
-                return (display_text(raw).trim_start_matches('=').to_string(), None);
-            }
-            return (text, None);
+    /// This sheet's contents as saved: every non-empty cell, the cells kept
+    /// as text, the formatting, the values (formula results), and what
+    /// dynamic-array formulas spill.
+    pub(super) fn sheet_data(&self) -> SheetData {
+        let (rows, cols) = self.used();
+        let mut cells = Vec::new();
+        for c in 0..cols {
+            self.wb.for_each_in_column(SHEET, c, 0..rows, |r, raw| {
+                if !raw.is_empty() {
+                    cells.push((r, c, raw.to_string()));
+                }
+            });
         }
-        let range = match self.formulas.spill_range(r, c) {
-            Some((r0, c0, r1, c1)) => format!(
-                "{}:{}",
-                crate::xlsx::cell_name(r0, c0),
-                crate::xlsx::cell_name(r1, c1)
-            ),
-            None => crate::xlsx::cell_name(r, c),
-        };
-        (crate::formula::print::print_file(e), Some(range))
+        SheetData {
+            cells,
+            text: self.xlsx.text.clone(),
+            formats: self
+                .formats
+                .positions()
+                .map(|(r, c)| ((r, c), self.formats.get(r, c)))
+                .collect(),
+            values: self.sheet_values(),
+            spills: self
+                .formulas
+                .positions()
+                .filter_map(|(r, c)| Some(((r, c), self.formulas.spill_range(r, c)?)))
+                .collect(),
+            spilled: self.spilled_cells(|v| v.clone()),
+            // Heights set by hand, and those Wrap Text worked out (so other
+            // apps show wrapped rows tall before laying them out themselves).
+            rows: self
+                .view
+                .rows
+                .overrides()
+                .map(|(r, h)| (r, h, true))
+                .chain(self.view.rows.auto_sized().map(|(r, h)| (r, h, false)))
+                .collect(),
+        }
     }
 
     /// The grid as an `.xlsx` package: every non-empty cell, formulas with
     /// their current results cached (so other apps show values at once),
-    /// values spilled from dynamic-array formulas, and every formatted
-    /// cell's formatting.
+    /// and every formatted cell's formatting. A sheet of a workbook with
+    /// several sheets writes them all: this one as it is now, the others
+    /// from the shared [`BookStore`] (which the editor brings up to date
+    /// with their open buffers before a save; see
+    /// [`Editor::grid_flush_book`]).
     pub(super) fn xlsx_bytes(&self) -> Vec<u8> {
-        let (rows, cols) = self.used();
-        type Owned = (usize, usize, XValue, Option<String>, Option<String>);
-        let mut owned: Vec<Owned> = self
-            .spilled_cells(result_value)
-            .into_iter()
-            .map(|(r, c, v)| (r, c, v, None, None))
-            .collect();
-        for c in 0..cols {
-            self.wb.for_each_in_column(SHEET, c, 0..rows, |r, raw| {
-                if raw.is_empty() {
-                    return;
-                }
-                if is_formula(raw) {
-                    let value = self
-                        .formulas
-                        .result(r, c)
-                        .map_or(XValue::Empty, result_value);
-                    let (f, array) = self.file_formula_of(r, c, raw);
-                    owned.push((r, c, value, Some(f), array));
-                } else if self.xlsx.text.get(&(r, c)).is_some_and(|t| t == raw) {
-                    owned.push((r, c, XValue::Text(raw.to_string()), None, None));
-                } else {
-                    owned.push((r, c, plain_value(raw), None, None));
-                }
-            });
-        }
-        let styles: HashMap<(usize, usize), XStyle> = self
-            .formats
-            .positions()
-            .map(|(r, c)| ((r, c), x_style(self.formats.get(r, c))))
-            .collect();
-        // Formatted cells without a value are written as formatting only.
-        let filled: HashSet<(usize, usize)> = owned.iter().map(|(r, c, ..)| (*r, *c)).collect();
-        let empty = XValue::Empty;
-        let cells = owned
+        let own = self.sheet_data();
+        let Some(book) = self.xlsx.book.as_ref() else {
+            return write_sheets(&[(&self.wb.sheet(SHEET).name, &own)]);
+        };
+        let b = book.borrow();
+        let me = self.xlsx.sheets.get(self.xlsx.sheet);
+        let empty = SheetData::default();
+        let sheets: Vec<(&str, &SheetData)> = b
+            .names
             .iter()
-            .map(|(r, c, v, f, array)| WriteCell {
-                row: *r,
-                col: *c,
-                value: v,
-                formula: f.as_deref(),
-                array: array.as_deref(),
-                style: styles.get(&(*r, *c)),
-            })
-            .chain(styles.iter().filter(|(at, _)| !filled.contains(at)).map(
-                |(&(row, col), st)| WriteCell {
-                    row,
-                    col,
-                    value: &empty,
-                    formula: None,
-                    array: None,
-                    style: Some(st),
-                },
-            ));
-        // Heights set by hand, and those Wrap Text worked out (so other
-        // apps show wrapped rows tall before laying them out themselves).
-        let rows = &self.view.rows;
-        let px_rows: Vec<XRow> = rows
-            .overrides()
-            .map(|(row, px)| (row, px, true))
-            .chain(rows.auto_sized().map(|(row, px)| (row, px, false)))
-            .map(|(row, px, custom)| XRow {
-                row,
-                height: px * PT_PER_PX,
-                custom,
+            .map(|n| {
+                let data = if Some(n) == me {
+                    &own
+                } else {
+                    b.sheets.get(&n.to_lowercase()).unwrap_or(&empty)
+                };
+                (n.as_str(), data)
             })
             .collect();
-        xlsx::write_rows(&self.wb.sheet(SHEET).name, cells, &px_rows, false)
+        write_sheets(&sheets)
     }
+}
+
+/// A cell to write, owned: position, value, formula text, the range a
+/// dynamic-array formula spills into, formatting.
+type OwnedCell = (
+    usize,
+    usize,
+    XValue,
+    Option<String>,
+    Option<String>,
+    Option<XStyle>,
+);
+
+/// A formula as the file stores it: its text, and for a dynamic-array
+/// formula the range it spills into (`spill`, else its own cell; see
+/// [`crate::formula::implicit`]).
+fn file_formula_of(
+    r: usize,
+    c: usize,
+    raw: &str,
+    spill: Option<(usize, usize, usize, usize)>,
+) -> (String, Option<String>) {
+    let typed = || display_text(raw).trim_start_matches('=').to_string();
+    let Ok(e) = crate::formula::parse::parse(display_text(raw)) else {
+        // It didn't parse: as typed.
+        return (typed(), None);
+    };
+    if crate::formula::implicit::is_legacy(&e) {
+        let mut old = e.clone();
+        crate::formula::implicit::strip(&mut old);
+        let text = crate::formula::print::print_file(&old);
+        // Nothing to spell differently: as typed (spacing included).
+        if old == e && text == crate::formula::print::print(&e)[1..] {
+            return (typed(), None);
+        }
+        return (text, None);
+    }
+    let range = match spill {
+        Some((r0, c0, r1, c1)) => format!(
+            "{}:{}",
+            crate::xlsx::cell_name(r0, c0),
+            crate::xlsx::cell_name(r1, c1)
+        ),
+        None => crate::xlsx::cell_name(r, c),
+    };
+    (crate::formula::print::print_file(&e), Some(range))
+}
+
+/// A sheet's cells as written: formulas with their results cached, cells the
+/// file stored as text kept as text, and formatted cells without a value as
+/// formatting only.
+fn owned_cells(d: &SheetData) -> Vec<OwnedCell> {
+    let styles: HashMap<(usize, usize), XStyle> =
+        d.formats.iter().map(|&(at, f)| (at, x_style(f))).collect();
+    let spills: HashMap<(usize, usize), (usize, usize, usize, usize)> =
+        d.spills.iter().copied().collect();
+    let mut filled = HashSet::new();
+    let mut out = Vec::with_capacity(d.cells.len() + d.spilled.len());
+    for (r, c, v) in &d.spilled {
+        filled.insert((*r, *c));
+        let style = styles.get(&(*r, *c)).cloned();
+        out.push((*r, *c, result_value(v), None, None, style));
+    }
+    for (r, c, raw) in &d.cells {
+        if raw.is_empty() {
+            continue;
+        }
+        let (r, c) = (*r, *c);
+        filled.insert((r, c));
+        let (value, formula, array) = if is_formula(raw) {
+            let (f, array) = file_formula_of(r, c, raw, spills.get(&(r, c)).copied());
+            (result_value(&d.values.get(r, c)), Some(f), array)
+        } else if d.text.get(&(r, c)).is_some_and(|t| t == raw) {
+            (XValue::Text(raw.to_string()), None, None)
+        } else {
+            (plain_value(raw), None, None)
+        };
+        let style = styles.get(&(r, c)).cloned();
+        out.push((r, c, value, formula, array, style));
+    }
+    for (&(r, c), st) in &styles {
+        if !filled.contains(&(r, c)) {
+            out.push((r, c, XValue::Empty, None, None, Some(st.clone())));
+        }
+    }
+    out
+}
+
+/// An `.xlsx` package of `sheets`, in order.
+fn write_sheets(sheets: &[(&str, &SheetData)]) -> Vec<u8> {
+    let owned: Vec<Vec<OwnedCell>> = sheets.iter().map(|(_, d)| owned_cells(d)).collect();
+    let rows: Vec<Vec<XRow>> = sheets
+        .iter()
+        .map(|(_, d)| {
+            d.rows
+                .iter()
+                .map(|&(row, px, custom)| XRow {
+                    row,
+                    height: px * PT_PER_PX,
+                    custom,
+                })
+                .collect()
+        })
+        .collect();
+    xlsx::write_book_rows(
+        sheets
+            .iter()
+            .zip(&owned)
+            .zip(&rows)
+            .map(|(((name, _), cells), rows)| {
+                let cells = cells.iter().map(|(r, c, v, f, array, st)| WriteCell {
+                    row: *r,
+                    col: *c,
+                    value: v,
+                    formula: f.as_deref(),
+                    array: array.as_deref(),
+                    style: st.as_ref(),
+                });
+                (*name, cells, &rows[..])
+            })
+            .collect(),
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -906,5 +1051,51 @@ mod tests {
         assert_eq!(g.wb.cell(SHEET, 0, 0), "12");
         let book = xlsx::read(&g.xlsx_bytes()).unwrap();
         assert_eq!(book.sheets[0].cells[0].value, XValue::Text("12".into()));
+    }
+
+    /// A dynamic-array formula on a sheet no buffer opened is written back
+    /// as one, with its spilled values, when the workbook is saved.
+    #[test]
+    fn an_unopened_sheet_keeps_its_dynamic_arrays() {
+        let one = XValue::Number(1.0);
+        let two = XValue::Number(2.0);
+        let three = XValue::Number(3.0);
+        let cell = |row, value, formula, array| WriteCell {
+            row,
+            col: 0,
+            value,
+            formula,
+            array,
+            style: None,
+        };
+        let bytes = xlsx::write_book(
+            vec![
+                ("First", vec![cell(0, &one, None, None)]),
+                (
+                    "Second",
+                    vec![
+                        cell(0, &one, Some("_xlfn.SEQUENCE(3)"), Some("A1:A3")),
+                        cell(1, &two, None, None),
+                        cell(2, &three, None, None),
+                    ],
+                ),
+            ],
+            false,
+        );
+        let l = load(&bytes, 0, &HashSet::new()).unwrap();
+        assert!(l.lossy.is_empty(), "{:?}", l.lossy);
+        let second = &l.data[1];
+        assert_eq!(second.cells.len(), 1, "spilled cells aren't cells");
+        assert_eq!(second.spills, vec![((0, 0), (0, 0, 2, 0))]);
+        let resaved = write_sheets(&[("First", &l.data[0]), ("Second", second)]);
+        let book = xlsx::read(&resaved).unwrap();
+        assert!(book.not_preserved.is_empty(), "{:?}", book.not_preserved);
+        let cells = &book.sheets[1].cells;
+        assert!(
+            matches!(&cells[0].formula, Some(XFormula::Dynamic { range, .. }) if range == "A1:A3"),
+            "{:?}",
+            cells[0].formula
+        );
+        assert_eq!(cells[2].value, XValue::Number(3.0));
     }
 }

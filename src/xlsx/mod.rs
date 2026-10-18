@@ -8,7 +8,7 @@
 //! - [`xml`]: a pull tokenizer and the escaping SpreadsheetML needs.
 //! - [`read`](mod@read): package → [`Book`] — every worksheet's cells with
 //!   cached values and formulas, plus a list of what a rewrite would lose.
-//! - [`write`](mod@write): one sheet of cells → a minimal package that Excel,
+//! - [`write`](mod@write): sheets of cells → a minimal package that Excel,
 //!   LibreOffice and Google Sheets open without repair prompts.
 //!
 //! Formula text is passed through untouched (without the leading `=`); the
@@ -35,9 +35,7 @@ use std::fmt;
 #[allow(unused_imports)]
 pub use read::read;
 #[allow(unused_imports)]
-#[cfg(test)]
-pub use write::write;
-pub use write::{WriteCell, write_rows};
+pub use write::{WriteCell, write, write_book, write_book_rows};
 
 /// A cell's value — for a formula cell, the result cached in the file.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,7 +148,7 @@ pub struct Book {
     /// files we wrote).
     pub application: Option<String>,
     /// Everything in the package this module would NOT preserve on a
-    /// rewrite, as short human-readable reasons ("2 sheets", "charts",
+    /// rewrite, as short human-readable reasons ("charts",
     /// "cell styles", "merged cells", "unknown part xl/foo.xml", …), each
     /// listed once in order of discovery. Empty means a rewrite with
     /// [`write`] loses nothing.
