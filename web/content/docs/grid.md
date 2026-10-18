@@ -25,11 +25,26 @@ The delimiter, quoting, encoding (UTF-8, UTF-16, Windows-1252), and header row a
 
 ## Workbooks with several sheets
 
-An `.xlsx` opens on its first sheet. <kbd>C-c t</kbd> (evil: <kbd>g t</kbd>, or <kbd>M-x helm-grid-sheets</kbd>) lists the workbook's sheets in Helm, with the one you're on marked *current*; pick one to open it. Each other sheet opens as a buffer of its own, named like `report.xlsx<Costs>`, so you can switch between sheets with your usual buffer keys. A sheet that's already open is reused, and picking the first sheet returns to the file's own buffer.
+An `.xlsx` opens on its first sheet. <kbd>C-c t</kbd> (evil and helix: <kbd>g t</kbd>, or <kbd>M-x helm-grid-sheets</kbd>) lists the workbook's sheets in Helm, with the one you're on marked *current*; pick one to open it, or press <kbd>M-a</kbd> to rename or delete it instead. Each other sheet opens as a buffer of its own, named like `report.xlsx<Costs>`, so you can switch between sheets with your usual buffer keys. A sheet that's already open is reused, and picking the first sheet returns to the file's own buffer.
 
-Because saving would drop the other sheets, a workbook with several sheets opens protected (quietly — saving over it is what tells you why): you can edit any sheet and save it as a workbook of its own with `:w costs.xlsx`, but the original file is never overwritten. Formulas can read other sheets, as in Excel: `=Costs!B2`, `=SUM('Q1 Sales'!C:C)`. Until a sheet is open, its values are the ones last saved in the file; once it's open in a buffer, edits there update the formulas reading it right away, saved or not.
+Saving from any sheet's buffer saves the **whole workbook**: every open sheet with its unsaved edits, and every other sheet as it was loaded, with formulas, their results and formatting. All the workbook's buffers are then unmodified. Formulas can read other sheets, as in Excel: `=Costs!B2`, `=SUM('Q1 Sales'!C:C)`. Until a sheet is open, its values are the ones last saved in the file; once it's open in a buffer, edits there update the formulas reading it right away, saved or not.
 
-From Scheme, `(grid-sheets)` lists the sheet names, `(grid-current-sheet)` names the one shown, and `(grid-open-sheet "Costs")` opens one.
+Sheets can be added, renamed, deleted and moved. The keys sit next to the sheet picker:
+
+| Emacs | evil / helix | |
+|---|---|---|
+| <kbd>C-c T a</kbd> | <kbd>g T a</kbd> | Add an empty sheet after the last, and show it (the prompt offers `Sheet2`, `Sheet3`, …) |
+| <kbd>C-c T r</kbd> | <kbd>g T r</kbd> | Rename the sheet shown: every formula referring to it, in every sheet, follows (`='Q1 Sales'!A1` quoting included), and so does its buffer's name |
+| <kbd>C-c T d</kbd> | <kbd>g T d</kbd> | Delete the sheet shown, after asking: formulas referring to it show `#REF!`. The last sheet can't be deleted |
+| <kbd>C-c T b</kbd> / <kbd>C-c T f</kbd> | <kbd>g T h</kbd> / <kbd>g T l</kbd> | Move the sheet shown left / right |
+
+They're in the <kbd>C-c ?</kbd> menu too, under *Sheets*. Each is one undo step, taken in the buffer you ran it from (deleting the sheet you're on moves you to the next one, and the undo is there): undoing a rename renames it back, undoing a delete brings the sheet back with its contents and the references to it, and undoing an add removes the sheet again. Reference rewrites in *other* open sheet buffers are reversed as edits of their own in those buffers. The sheet names are part of the workbook, so a rename, delete or move leaves every one of its buffers modified until it's saved.
+
+A CSV grid can grow a second sheet too (<kbd>C-c T a</kbd>). CSV can't hold more than one sheet, so saving then asks for an `.xlsx` to save the workbook as; the CSV file is left as it was, and its buffer visits the new file.
+
+A workbook holding something the grid can't write back — charts, borders and other cell styles, hidden sheets, defined names, … — opens protected (quietly — saving over it is what tells you why): you can edit any sheet and save the workbook as a copy with `:w copy.xlsx`, but the original file is never overwritten. See [what saves](/docs/grid-formulas#saving).
+
+From Scheme, `(grid-sheets)` lists the sheet names, `(grid-current-sheet)` names the one shown, and `(grid-open-sheet "Costs")` opens one. `(grid-add-sheet "Costs")`, `(grid-rename-sheet "Costs" "Q1 Sales")` (or `(grid-rename-sheet "Q1 Sales")` for the sheet shown), `(grid-delete-sheet "Costs")` (without asking) and `(grid-move-sheet -1)` change them; called without arguments, the first three prompt.
 
 ## Moving around
 

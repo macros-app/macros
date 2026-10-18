@@ -2462,3 +2462,358 @@ fn helix_grid_format_keys(cx: &mut TestAppContext) {
     keys(&ed, cx, "f ~");
     assert_eq!(shown(&ed, cx, 1, 1), None);
 }
+
+// --- Workbook sheets: saving all of them, adding, renaming, deleting --------
+
+/// `book.xlsx` beside `csv`: First (A1 "one", B1 =Second!A1*2, C1 ='Q1
+/// Sales'!A1+1), Second (A1 5, B1 =First!A1), Q1 Sales (A1 7).
+fn write_sheets_fixture(csv: &std::path::Path) -> PathBuf {
+    use crate::xlsx::{WriteCell, XValue};
+    let path = csv.with_file_name("book.xlsx");
+    type Cells<'a> = Vec<(usize, usize, XValue, Option<&'a str>)>;
+    let first: Cells = vec![
+        (0, 0, XValue::Text("one".into()), None),
+        (0, 1, XValue::Number(10.0), Some("Second!A1*2")),
+        (0, 2, XValue::Number(8.0), Some("'Q1 Sales'!A1+1")),
+    ];
+    let second: Cells = vec![
+        (0, 0, XValue::Number(5.0), None),
+        (0, 1, XValue::Text("one".into()), Some("First!A1")),
+    ];
+    let q1: Cells = vec![(0, 0, XValue::Number(7.0), None)];
+    let cells = |v: &Cells| -> Vec<(usize, usize, XValue, Option<String>)> {
+        v.iter()
+            .map(|(r, c, x, f)| (*r, *c, x.clone(), f.map(str::to_string)))
+            .collect()
+    };
+    let sheets = [
+        ("First", cells(&first)),
+        ("Second", cells(&second)),
+        ("Q1 Sales", cells(&q1)),
+    ];
+    let bytes = crate::xlsx::write_book(
+        sheets
+            .iter()
+            .map(|(name, cells)| {
+                let cells = cells.iter().map(|(r, c, v, f)| WriteCell {
+                    row: *r,
+                    col: *c,
+                    value: v,
+                    formula: f.as_deref(),
+                    style: None,
+                });
+                (*name, cells)
+            })
+            .collect(),
+        false,
+    );
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn open_sheets_fixture(cx: &mut TestAppContext) -> (Entity<Editor>, PathBuf) {
+    let (ed, csv) = setup(cx, NUMS, false);
+    let book = write_sheets_fixture(&csv);
+    let b = book.clone();
+    ed.update(cx, |e, cx| {
+        e.open_grid(
+            "book.xlsx".into(),
+            b.clone(),
+            std::fs::read(&b).unwrap(),
+            cx,
+        );
+    });
+    settle(&ed, cx);
+    (ed, book)
+}
+
+/// A buffer's cell: what it shows, and its formula text (or plain text).
+fn doc_cell(
+    ed: &Entity<Editor>,
+    cx: &mut TestAppContext,
+    buffer: &str,
+    r: usize,
+    c: usize,
+) -> (String, String) {
+    ed.read_with(cx, |e, _| {
+        let d = e
+            .docs()
+            .find(|d| d.name == buffer)
+            .unwrap_or_else(|| panic!("no buffer {buffer}"));
+        let g = d.grid.as_ref().unwrap();
+        let raw = g.wb.cell(SHEET, r, c);
+        (
+            g.cell(r, c).to_string(),
+            crate::formula::engine::display_text(raw).to_string(),
+        )
+    })
+}
+
+fn modified_buffers(ed: &Entity<Editor>, cx: &mut TestAppContext) -> Vec<String> {
+    ed.read_with(cx, |e, _| {
+        let mut v: Vec<String> = e
+            .docs()
+            .filter(|d| d.grid.is_some() && d.modified)
+            .map(|d| d.name.clone())
+            .collect();
+        v.sort();
+        v
+    })
+}
+
+fn active_name(ed: &Entity<Editor>, cx: &mut TestAppContext) -> String {
+    ed.read_with(cx, |e, _| e.active.name.clone())
+}
+
+#[gpui::test]
+fn a_workbook_with_several_sheets_saves_them_all(cx: &mut TestAppContext) {
+    use crate::xlsx::{XFormula, XValue};
+    let (ed, book) = open_sheets_fixture(cx);
+    let lossy = ed.read_with(cx, |e, _| {
+        e.active.grid.as_ref().unwrap().xlsx.lossy.clone()
+    });
+    assert!(
+        lossy.is_empty(),
+        "several sheets alone don't protect: {lossy:?}"
+    );
+    assert_eq!(cell(&ed, cx, 0, 1), "10");
+    // Edit sheet 2 in its buffer; sheet 1 follows, unsaved.
+    scheme(&ed, cx, "(grid-open-sheet \"Second\")");
+    scheme(&ed, cx, "(grid-set-cell 0 0 \"6\")");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Second>");
+    scheme(&ed, cx, "(grid-open-sheet \"First\")");
+    assert_eq!(cell(&ed, cx, 0, 1), "12");
+    assert_eq!(modified_buffers(&ed, cx), ["book.xlsx<Second>"]);
+    // Saving from sheet 1 writes sheet 2's edit too, and both are saved.
+    save(&ed, cx);
+    assert!(
+        modified_buffers(&ed, cx).is_empty(),
+        "{:?}",
+        modified_buffers(&ed, cx)
+    );
+    let read = crate::xlsx::read(&std::fs::read(&book).unwrap()).unwrap();
+    let names: Vec<&str> = read.sheets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["First", "Second", "Q1 Sales"]);
+    assert!(read.not_preserved.is_empty(), "{:?}", read.not_preserved);
+    assert_eq!(read.sheets[1].cells[0].value, XValue::Number(6.0));
+    let b1 = &read.sheets[0].cells[1];
+    assert_eq!(b1.formula, Some(XFormula::Normal("Second!A1*2".into())));
+    assert_eq!(b1.value, XValue::Number(12.0));
+    assert_eq!(read.sheets[2].cells[0].value, XValue::Number(7.0));
+    // Reopened, sheet 2 holds the edit.
+    let l = super::grid_xlsx::load(&std::fs::read(&book).unwrap(), 1, &Default::default()).unwrap();
+    assert_eq!(l.wb.cell(SHEET, 0, 0), "6");
+    // Saving from a sheet buffer (no file of its own) saves the workbook.
+    scheme(&ed, cx, "(grid-set-cell 1 0 \"two\")");
+    scheme(&ed, cx, "(grid-open-sheet \"Second\")");
+    save(&ed, cx);
+    assert!(modified_buffers(&ed, cx).is_empty());
+    let read = crate::xlsx::read(&std::fs::read(&book).unwrap()).unwrap();
+    assert_eq!(read.sheets[0].cells.len(), 4, "{:?}", read.sheets[0].cells);
+}
+
+#[gpui::test]
+fn unsupported_content_still_protects_a_workbook(cx: &mut TestAppContext) {
+    let (ed, path) = setup(cx, NUMS, false);
+    let book = path.with_file_name("multi.xlsx");
+    let orig = include_bytes!("../xlsx/testdata/pkg/multi.xlsx").to_vec();
+    std::fs::write(&book, &orig).unwrap();
+    let b = book.clone();
+    ed.update(cx, |e, cx| {
+        e.open_grid(
+            "multi.xlsx".into(),
+            b.clone(),
+            std::fs::read(&b).unwrap(),
+            cx,
+        );
+    });
+    settle(&ed, cx);
+    let lossy = ed.read_with(cx, |e, _| {
+        e.active.grid.as_ref().unwrap().xlsx.lossy.clone()
+    });
+    assert!(lossy.iter().any(|l| l == "hidden sheets"), "{lossy:?}");
+    assert!(
+        !lossy
+            .iter()
+            .any(|l| l.ends_with(" sheets") && l != "hidden sheets"),
+        "{lossy:?}"
+    );
+    scheme(&ed, cx, "(grid-open-sheet \"Second\")");
+    scheme(&ed, cx, "(grid-set-cell 0 0 \"changed\")");
+    save(&ed, cx);
+    assert!(ed.read_with(cx, |e, _| e.status.contains("Not saving over")));
+    assert_eq!(std::fs::read(&book).unwrap(), orig);
+    let ok = ed.update(cx, |e, cx| e.save_all_modified(cx));
+    assert!(!ok, "a quit-time save refuses it too");
+    assert_eq!(std::fs::read(&book).unwrap(), orig);
+}
+
+#[gpui::test]
+fn renaming_a_sheet_rewrites_references_everywhere(cx: &mut TestAppContext) {
+    let (ed, book) = open_sheets_fixture(cx);
+    scheme(&ed, cx, "(grid-open-sheet \"Q1 Sales\")");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Q1 Sales>");
+    scheme(&ed, cx, "(grid-rename-sheet \"Costs\")");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Costs>");
+    assert_eq!(
+        eval(&ed, cx, "(grid-sheets)"),
+        "(\"First\" \"Second\" \"Costs\")"
+    );
+    assert_eq!(eval(&ed, cx, "(grid-current-sheet)"), "\"Costs\"");
+    assert_eq!(
+        doc_cell(&ed, cx, "book.xlsx", 0, 2),
+        ("8".into(), "=Costs!A1+1".into())
+    );
+    // Quoted when the name needs it.
+    scheme(&ed, cx, "(grid-rename-sheet \"Costs\" \"My Costs\")");
+    assert_eq!(
+        doc_cell(&ed, cx, "book.xlsx", 0, 2),
+        ("8".into(), "='My Costs'!A1+1".into())
+    );
+    // Undo in the buffer it ran in takes the rename back, references too.
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Costs>");
+    assert_eq!(doc_cell(&ed, cx, "book.xlsx", 0, 2).1, "=Costs!A1+1");
+    // A sheet with no buffer open is rewritten too: rename First from its
+    // own buffer, then open Second.
+    scheme(&ed, cx, "(grid-open-sheet \"First\")");
+    scheme(&ed, cx, "(grid-rename-sheet \"Top\")");
+    assert_eq!(
+        active_name(&ed, cx),
+        "book.xlsx",
+        "the file's buffer keeps its name"
+    );
+    scheme(&ed, cx, "(grid-open-sheet \"Second\")");
+    assert_eq!(cell(&ed, cx, 0, 1), "one");
+    assert_eq!(doc_cell(&ed, cx, "book.xlsx<Second>", 0, 1).1, "=Top!A1");
+    // Duplicates and bad names are refused.
+    scheme(&ed, cx, "(grid-rename-sheet \"top\")");
+    assert!(ed.read_with(cx, |e, _| e.status.contains("Not renamed")));
+    save(&ed, cx);
+    let read = crate::xlsx::read(&std::fs::read(&book).unwrap()).unwrap();
+    let names: Vec<&str> = read.sheets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Top", "Second", "Costs"]);
+    assert!(modified_buffers(&ed, cx).is_empty());
+}
+
+#[gpui::test]
+fn deleting_a_sheet_breaks_references_and_undoes(cx: &mut TestAppContext) {
+    let (ed, book) = open_sheets_fixture(cx);
+    scheme(&ed, cx, "(grid-delete-sheet \"Second\")");
+    assert_eq!(eval(&ed, cx, "(grid-sheets)"), "(\"First\" \"Q1 Sales\")");
+    assert_eq!(cell(&ed, cx, 0, 1), "#REF!");
+    assert_eq!(doc_cell(&ed, cx, "book.xlsx", 0, 1).1, "=#REF!*2");
+    assert_eq!(modified_buffers(&ed, cx), ["book.xlsx"]);
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(
+        eval(&ed, cx, "(grid-sheets)"),
+        "(\"First\" \"Second\" \"Q1 Sales\")"
+    );
+    assert_eq!(
+        doc_cell(&ed, cx, "book.xlsx", 0, 1),
+        ("10".into(), "=Second!A1*2".into())
+    );
+    assert!(modified_buffers(&ed, cx).is_empty());
+    keys(&ed, cx, "ctrl-shift-/");
+    assert_eq!(eval(&ed, cx, "(grid-sheets)"), "(\"First\" \"Q1 Sales\")");
+    keys(&ed, cx, "ctrl-/");
+    // Deleting the sheet shown moves to the next; undo there brings it back.
+    scheme(&ed, cx, "(grid-open-sheet \"Second\")");
+    scheme(&ed, cx, "(grid-set-cell 2 0 \"kept\")");
+    scheme(&ed, cx, "(grid-delete-sheet-impl \"\")");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Q1 Sales>");
+    assert!(ed.read_with(cx, |e, _| e.docs().all(|d| d.name != "book.xlsx<Second>")));
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Second>");
+    assert_eq!(cell(&ed, cx, 2, 0), "kept");
+    // The last sheet stays.
+    scheme(&ed, cx, "(grid-delete-sheet \"Second\")");
+    scheme(&ed, cx, "(grid-delete-sheet \"Q1 Sales\")");
+    scheme(&ed, cx, "(grid-delete-sheet \"First\")");
+    assert!(ed.read_with(cx, |e, _| e.status.contains("at least one sheet")));
+    save(&ed, cx);
+    let read = crate::xlsx::read(&std::fs::read(&book).unwrap()).unwrap();
+    let names: Vec<&str> = read.sheets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["First"]);
+    assert_eq!(
+        read.sheets[0].cells[1].formula,
+        Some(crate::xlsx::XFormula::Normal("#REF!*2".into()))
+    );
+}
+
+#[gpui::test]
+fn moving_and_adding_sheets(cx: &mut TestAppContext) {
+    let (ed, book) = open_sheets_fixture(cx);
+    keys(&ed, cx, "ctrl-c shift-t f");
+    assert_eq!(
+        eval(&ed, cx, "(grid-sheets)"),
+        "(\"Second\" \"First\" \"Q1 Sales\")"
+    );
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(
+        eval(&ed, cx, "(grid-sheets)"),
+        "(\"First\" \"Second\" \"Q1 Sales\")"
+    );
+    scheme(&ed, cx, "(grid-add-sheet-impl \"\")");
+    assert_eq!(active_name(&ed, cx), "book.xlsx<Sheet4>");
+    scheme(&ed, cx, "(grid-set-cell 0 0 \"=First!A1\")");
+    assert_eq!(cell(&ed, cx, 0, 0), "one");
+    save(&ed, cx);
+    let read = crate::xlsx::read(&std::fs::read(&book).unwrap()).unwrap();
+    let names: Vec<&str> = read.sheets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["First", "Second", "Q1 Sales", "Sheet4"]);
+}
+
+#[gpui::test]
+fn a_csv_grows_a_sheet_and_saves_as_xlsx(cx: &mut TestAppContext) {
+    let (ed, path) = setup(cx, NUMS, false);
+    assert_eq!(eval(&ed, cx, "(grid-sheets)"), "()");
+    // Undoing the add (in the CSV, where it ran) leaves a plain CSV again.
+    scheme(&ed, cx, "(grid-add-sheet \"Extra\")");
+    assert_eq!(active_name(&ed, cx), "data.csv<Extra>");
+    scheme(&ed, cx, "(grid-open-sheet \"Sheet1\")");
+    assert_eq!(active_name(&ed, cx), "data.csv");
+    assert_eq!(modified_buffers(&ed, cx), ["data.csv", "data.csv<Extra>"]);
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(eval(&ed, cx, "(grid-sheets)"), "(\"Sheet1\")");
+    assert!(modified_buffers(&ed, cx).is_empty());
+    assert!(ed.read_with(cx, |e, _| e.docs().all(|d| d.name != "data.csv<Extra>")));
+    // Now for real: the new sheet reads the CSV's.
+    scheme(&ed, cx, "(grid-add-sheet \"Extra\")");
+    scheme(&ed, cx, "(grid-set-cell 0 0 \"=Sheet1!B3*2\")");
+    assert_eq!(cell(&ed, cx, 0, 0), "10");
+    // Saving asks for an .xlsx; the CSV stays as it was.
+    ed.update(cx, |e, cx| e.apply_command(EditorCommand::SaveBuffer, cx));
+    settle(&ed, cx);
+    ed.read_with(cx, |e, _| {
+        let mb = e.minibuffer.as_ref().expect("a save-as prompt");
+        assert!(matches!(mb.purpose, MinibufferPurpose::GridSaveAsXlsx));
+    });
+    ed.update(cx, |e, _| e.minibuffer = None);
+    let xlsx = path.with_extension("xlsx");
+    ed.update(cx, |e, cx| e.grid_save_as_xlsx(&xlsx.to_string_lossy(), cx));
+    settle(&ed, cx);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), NUMS);
+    let read = crate::xlsx::read(&std::fs::read(&xlsx).unwrap()).unwrap();
+    let names: Vec<&str> = read.sheets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Sheet1", "Extra"]);
+    assert_eq!(
+        read.sheets[1].cells[0].formula,
+        Some(crate::xlsx::XFormula::Normal("Sheet1!B3*2".into()))
+    );
+    assert_eq!(read.sheets[0].cells.len(), 15);
+    assert_eq!(active_name(&ed, cx), "data.xlsx<Extra>");
+    assert!(modified_buffers(&ed, cx).is_empty());
+    ed.read_with(cx, |e, _| {
+        let file = e
+            .docs()
+            .find(|d| d.name == "data.xlsx")
+            .expect("the CSV's buffer visits the .xlsx");
+        assert_eq!(file.path.as_deref(), Some(xlsx.as_path()));
+    });
+    // From then on a save writes the .xlsx.
+    scheme(&ed, cx, "(grid-set-cell 1 0 \"more\")");
+    save(&ed, cx);
+    let read = crate::xlsx::read(&std::fs::read(&xlsx).unwrap()).unwrap();
+    assert_eq!(read.sheets[1].cells.len(), 2);
+}

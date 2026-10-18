@@ -48,6 +48,7 @@ mod grid_formula;
 mod grid_ops;
 #[cfg(test)]
 mod grid_regression_tests;
+mod grid_sheets;
 mod grid_xlsx;
 mod helm;
 mod input;

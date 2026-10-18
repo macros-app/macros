@@ -480,6 +480,23 @@ impl Editor {
         self.grid_commit_pending(cx);
         let same = |p: &Path| file_identity(p) == file_identity(Path::new(&target));
         let own_file = self.active.path.as_deref().is_some_and(same);
+        // A sheet of a workbook with several sheets writes them all: over the
+        // workbook's own file that's a save of it, elsewhere a copy.
+        if let Some(book) = self.active_book()
+            && book.borrow().names.len() > 1
+        {
+            let lossy = self
+                .active
+                .grid
+                .as_deref()
+                .is_some_and(|g| !g.xlsx.lossy.is_empty());
+            let over_book = book.borrow().path.as_deref().is_some_and(same);
+            if over_book && !lossy {
+                self.grid_save_book(&book, cx);
+                return;
+            }
+            self.grid_flush_book(&book);
+        }
         // A grid written as `.tsv` (from a `.csv`, or the reverse) switches
         // delimiter to match the new extension.
         let bytes = match self.active.grid.as_deref() {
@@ -819,6 +836,8 @@ impl Editor {
         let mut failed: Vec<String> = Vec::new();
         let mut saved_uris = Vec::new();
         let mut written: Vec<PathBuf> = Vec::new();
+        // Workbooks with several sheets save whole, once each.
+        failed.extend(self.grid_save_modified_books());
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
@@ -1113,7 +1132,9 @@ impl Editor {
     /// and are reported in the echo area, so the quit path can abort rather than
     /// silently discard the changes.
     pub(super) fn save_all_modified(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut failed: Vec<String> = Vec::new();
+        self.grid_commit_pending(cx);
+        // Workbooks with several sheets save whole, once each.
+        let mut failed: Vec<String> = self.grid_save_modified_books();
         // A modified grid with no file of its own (a sheet of a workbook, an
         // imported table) can't be saved here: say so rather than quit and
         // lose it.
@@ -1176,6 +1197,16 @@ impl Editor {
     /// [`save_all_modified`](Self::save_all_modified), skips the async LSP
     /// format-on-save. Returns whether the buffer is now safely on disk.
     pub(super) fn save_active_sync(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(book) = self.active_book()
+            && book.borrow().saves_whole(self.active.path.is_some())
+        {
+            self.grid_commit_pending(cx);
+            let failed = self.grid_save_modified_books();
+            if !failed.is_empty() {
+                self.echo(format!("Save failed — {}", failed.join("; ")), cx);
+            }
+            return failed.is_empty() && !self.active.modified;
+        }
         let Some(path) = self.active.path.clone() else {
             self.echo("Buffer is not visiting a file", cx);
             return false;

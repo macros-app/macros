@@ -1,4 +1,4 @@
-//! Writing: one sheet of cells → a minimal `.xlsx` package.
+//! Writing: sheets of cells → a minimal `.xlsx` package.
 //!
 //! The package has exactly the parts Excel needs to open a file without a
 //! repair prompt — content types, package and workbook relationships, app
@@ -63,35 +63,92 @@ const NS_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/rela
 
 /// A complete `.xlsx` file holding one sheet named `sheet_name` (sanitized
 /// to what Excel accepts) with `cells`.
+#[allow(dead_code)] // the one-sheet shorthand, used by tests
 pub fn write<'a>(
     sheet_name: &str,
     cells: impl IntoIterator<Item = WriteCell<'a>>,
     date1904: bool,
 ) -> Vec<u8> {
+    write_book(vec![(sheet_name, cells)], date1904)
+}
+
+/// A complete `.xlsx` file holding `sheets` in tab order, each a name
+/// (sanitized to what Excel accepts; keeping them distinct is the caller's
+/// job) and its cells. The cell formats of every sheet share one stylesheet.
+pub fn write_book<'a, I>(sheets: Vec<(&str, I)>, date1904: bool) -> Vec<u8>
+where
+    I: IntoIterator<Item = WriteCell<'a>>,
+{
+    let n = sheets.len().max(1);
     let mut z = zip::Writer::new();
-    z.add("[Content_Types].xml", CONTENT_TYPES.as_bytes());
+    z.add("[Content_Types].xml", content_types(n).as_bytes());
     z.add("_rels/.rels", ROOT_RELS.as_bytes());
     z.add("docProps/app.xml", APP.as_bytes());
     z.add("docProps/core.xml", CORE.as_bytes());
-    z.add(
-        "xl/workbook.xml",
-        workbook_xml(sheet_name, date1904).as_bytes(),
-    );
-    z.add("xl/_rels/workbook.xml.rels", WORKBOOK_RELS.as_bytes());
+    let names: Vec<&str> = sheets.iter().map(|(name, _)| *name).collect();
+    z.add("xl/workbook.xml", workbook_xml(&names, date1904).as_bytes());
+    z.add("xl/_rels/workbook.xml.rels", workbook_rels(n).as_bytes());
     let mut styles = Styles::default();
-    let sheet = sheet_xml(cells, &mut styles);
+    let mut parts: Vec<String> = sheets
+        .into_iter()
+        .map(|(_, cells)| sheet_xml(cells, &mut styles))
+        .collect();
+    if parts.is_empty() {
+        parts.push(sheet_xml(std::iter::empty(), &mut styles));
+    }
     z.add("xl/styles.xml", styles.xml().as_bytes());
-    z.add("xl/worksheets/sheet1.xml", sheet.as_bytes());
+    for (i, sheet) in parts.iter().enumerate() {
+        z.add(
+            &format!("xl/worksheets/sheet{}.xml", i + 1),
+            sheet.as_bytes(),
+        );
+    }
     z.finish()
 }
 
-const CONTENT_TYPES: &str = concat!(
+/// `[Content_Types].xml` for a package of `n` sheets.
+fn content_types(n: usize) -> String {
+    let mut s = String::from(CONTENT_TYPES_HEAD);
+    for i in 1..=n {
+        let _ = write!(
+            s,
+            "<Override PartName=\"/xl/worksheets/sheet{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
+        );
+    }
+    s.push_str(CONTENT_TYPES_TAIL);
+    s
+}
+
+/// The workbook's relationships: sheets `rId1`…`rIdn`, then the styles.
+fn workbook_rels(n: usize) -> String {
+    let mut s = String::from(DECL);
+    s.push_str(
+        "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+    );
+    for i in 1..=n {
+        let _ = write!(
+            s,
+            "<Relationship Id=\"rId{i}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet{i}.xml\"/>"
+        );
+    }
+    let _ = write!(
+        s,
+        "<Relationship Id=\"rId{}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>",
+        n + 1
+    );
+    s.push_str("</Relationships>");
+    s
+}
+
+const CONTENT_TYPES_HEAD: &str = concat!(
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
     "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
     "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>",
     "<Default Extension=\"xml\" ContentType=\"application/xml\"/>",
     "<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>",
-    "<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+);
+
+const CONTENT_TYPES_TAIL: &str = concat!(
     "<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>",
     "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>",
     "<Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>",
@@ -119,14 +176,6 @@ const CORE: &str = concat!(
     "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" ",
     "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" ",
     "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"/>"
-);
-
-const WORKBOOK_RELS: &str = concat!(
-    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
-    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
-    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>",
-    "<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>",
-    "</Relationships>"
 );
 
 /// The stylesheet, built from the styles cells use. Index 0 of each list is
@@ -246,7 +295,7 @@ impl Styles {
     }
 }
 
-fn workbook_xml(sheet_name: &str, date1904: bool) -> String {
+fn workbook_xml(sheet_names: &[&str], date1904: bool) -> String {
     let mut s = String::from(DECL);
     let _ = write!(s, "<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
     s.push_str(if date1904 {
@@ -254,9 +303,19 @@ fn workbook_xml(sheet_name: &str, date1904: bool) -> String {
     } else {
         "<workbookPr/>"
     });
-    s.push_str("<bookViews><workbookView/></bookViews><sheets><sheet name=\"");
-    escape_attr(&mut s, &sanitize_sheet_name(sheet_name));
-    s.push_str("\" sheetId=\"1\" r:id=\"rId1\"/></sheets>");
+    s.push_str("<bookViews><workbookView/></bookViews><sheets>");
+    let fallback = ["Sheet1"];
+    let names = if sheet_names.is_empty() {
+        &fallback[..]
+    } else {
+        sheet_names
+    };
+    for (i, name) in names.iter().enumerate() {
+        s.push_str("<sheet name=\"");
+        escape_attr(&mut s, &sanitize_sheet_name(name));
+        let _ = write!(s, "\" sheetId=\"{0}\" r:id=\"rId{0}\"/>", i + 1);
+    }
+    s.push_str("</sheets>");
     // Cached values may be stand-ins (see the module docs), so have Excel
     // recalculate everything on open.
     s.push_str("<calcPr calcId=\"0\" fullCalcOnLoad=\"1\"/></workbook>");

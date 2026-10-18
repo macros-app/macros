@@ -41,9 +41,6 @@ pub fn read(bytes: &[u8]) -> Result<Book, XlsxError> {
         .get(&wb_part)?
         .ok_or_else(|| XlsxError::Corrupt(format!("workbook part {wb_part} is missing")))?;
     let wb = parse_workbook(&wb_xml, &mut notes).map_err(|e| bad(&wb_part, e))?;
-    if wb.sheets.len() > 1 {
-        notes.add_front(format!("{} sheets", wb.sheets.len()));
-    }
 
     let app_part = find_rel(&root_rels, "/extended-properties")
         .map_or_else(|| "docProps/app.xml".to_string(), |r| r.target.clone());
@@ -150,10 +147,6 @@ impl Notes {
         if !self.has(reason) {
             self.0.push(reason.to_string());
         }
-    }
-
-    fn add_front(&mut self, reason: String) {
-        self.0.insert(0, reason);
     }
 
     fn has(&self, reason: &str) -> bool {
@@ -1148,10 +1141,8 @@ mod tests {
         assert_eq!(book.sheets[1].cells[0].value, text("two"));
         assert_eq!(book.sheets[2].cells[0].value, text("three"));
         assert!(!book.date1904);
-        assert_eq!(
-            book.not_preserved,
-            ["3 sheets", "hidden sheets", "defined names"]
-        );
+        // Several sheets are written back; hiding one isn't.
+        assert_eq!(book.not_preserved, ["hidden sheets", "defined names"]);
     }
 
     #[test]

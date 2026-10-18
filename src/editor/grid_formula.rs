@@ -209,6 +209,14 @@ impl GridDoc {
     /// What this grid holds that CSV can't store — formulas, hand-set
     /// formatting (bold, colors, number formats) — or `None`.
     pub(super) fn csv_would_lose(&self) -> Option<&'static str> {
+        if self
+            .xlsx
+            .book
+            .as_ref()
+            .is_some_and(|b| b.borrow().names.len() > 1)
+        {
+            return Some("several sheets");
+        }
         match (self.formulas.formula_count() > 0, !self.formats.is_empty()) {
             (true, true) => Some("formulas and formatting"),
             (true, false) => Some("formulas"),
@@ -556,6 +564,10 @@ impl Editor {
             return;
         }
         self.grid_commit_pending(cx);
+        if let Some(book) = self.active_book() {
+            self.grid_save_book_as(&book, &target, cx);
+            return;
+        }
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
