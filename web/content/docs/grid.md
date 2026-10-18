@@ -107,6 +107,7 @@ Replacing works on the selection, or the whole sheet when nothing is selected (u
 | <kbd>C-c C-o</kbd> / <kbd>C-c M-o</kbd> | <kbd>o</kbd> / <kbd>O</kbd> | Insert a row below / above |
 | <kbd>C-c C-c</kbd> | <kbd>go</kbd> / <kbd>gO</kbd> | Insert a column right / left |
 | <kbd>C-c C-k</kbd> / <kbd>C-c M-k</kbd> | <kbd>dd</kbd> / <kbd>dc</kbd> | Delete row / column |
+| <kbd>C-c C-d</kbd> | <kbd>du</kbd> (helix: <kbd>gx</kbd>) | [Remove duplicate rows](#removing-duplicates) |
 | <kbd>M-↑</kbd> <kbd>M-↓</kbd> <kbd>M-←</kbd> <kbd>M-→</kbd> | <kbd>M-k</kbd> <kbd>M-j</kbd> <kbd>M-h</kbd> <kbd>M-l</kbd> | Move a row / column (org-table style) |
 | <kbd>C-c C-s</kbd> / <kbd>C-c C-r</kbd> | <kbd>S</kbd> / <kbd>gS</kbd> | Sort by the column, ascending / descending |
 | <kbd>C-c ^</kbd> | <kbd>gs</kbd> | Sort, choosing alpha, numeric, or time |
@@ -116,6 +117,25 @@ Replacing works on the selection, or the whole sheet when nothing is selected (u
 
 Copies go to the system clipboard as tab-separated values, so pasting into Excel, Numbers, or Google Sheets — or from them — just works. Copy a range out as a table with <kbd>C-c C-e o</kbd> (org), <kbd>C-c C-e m</kbd> (Markdown), or <kbd>C-c C-e j</kbd> (JSON).
 
+## Removing duplicates
+
+<kbd>C-c C-d</kbd> (evil: <kbd>d u</kbd>, helix: <kbd>g x</kbd>, or <kbd>M-x grid-remove-duplicates</kbd>, also in the <kbd>C-c ?</kbd> menu) is Excel's **Data › Remove Duplicates**: it deletes every row that repeats an earlier row, keeping the first, and reports `Removed 12 duplicate rows, 340 remain`.
+
+It asks which columns to compare, offering the header names (or the column letters when there's no header row). Type one, or several separated by commas — `email` or `name, city` — or press <kbd>RET</kbd> on an empty prompt to compare every column. Two rows are duplicates when they match in all the columns you name; the other columns don't matter, and the whole row goes.
+
+- **Which rows.** With several rows selected, only those rows are checked, and an empty prompt compares just the selected columns; otherwise the whole sheet is. The header row is never removed.
+- **Filtered rows.** Rows a filter hides take no part: they are never removed and don't count as the first occurrence, so nothing you can't see is deleted. Widen first (<kbd>C-x n w</kbd>) to check every row.
+- **How values compare** — as Excel does, on what each cell shows:
+  - text ignores case: `Ann` and `ANN` are duplicates;
+  - numbers compare by value: `1`, `1.0` and `1e0` are the same, `1` and `one` are not;
+  - spaces count: `Ann ` (with a trailing space) differs from `Ann` — run <kbd>M-x grid-trim-cells</kbd> on the column first to ignore them;
+  - a formula compares by its result, so `=1+1` duplicates a typed `2`;
+  - empty cells match each other; dates, booleans and errors compare as their text.
+
+The `duplicate` highlight rule (`(grid-highlight-rule "B" "duplicate" "" 'warning)`) compares the same way, so you can see what would go before removing it.
+
+Removing is one undo step. Formatting moves with the rows that stay, and formulas update as for a row delete: a reference to a removed row becomes `#REF!`, and a range shrinks. It is fast on large files — a million rows take a second or so. From Scheme, name the columns by header, letter, or index: `(grid-remove-duplicates '("email"))`, `(grid-remove-duplicates '("A" "C"))`, or `(grid-remove-duplicates '())` for the default columns.
+
 ## Viewing
 
 | Emacs | Evil | Action |
@@ -124,12 +144,16 @@ Copies go to the system clipboard as tab-separated values, so pasting into Excel
 | drag a header border, double-click it | | Resize, or auto-fit |
 | <kbd>C-=</kbd> <kbd>C--</kbd> <kbd>C-0</kbd> | | Zoom in / out / reset |
 | <kbd>C-c C-z</kbd> | <kbd>gf</kbd> | Freeze the rows above the cursor (or row 1) |
+| <kbd>C-c M-z</kbd> | <kbd>gF</kbd> | Freeze panes: the rows above and the columns left of the cursor |
+| <kbd>C-c z</kbd> | <kbd>zf</kbd> | Freeze the first column |
 | <kbd>C-c C-h</kbd> | <kbd>gh</kbd> | Treat row 1 as a header (or not) |
 | <kbd>C-x n f</kbd> / <kbd>C-x n v</kbd> / <kbd>C-x n w</kbd> | <kbd>g/</kbd> / <kbd>g*</kbd> / <kbd>zw</kbd> | Filter rows / by this value / show all |
 | <kbd>C-c C-x h</kbd> / <kbd>C-c C-x s</kbd> | <kbd>zc</kbd> / <kbd>zo</kbd> | Hide a column / show hidden ones |
 | <kbd>C-c ?</kbd> | <kbd>?</kbd> | A menu of everything |
 
-Column widths, zoom, frozen rows, and the header choice are remembered per file, outside the CSV.
+Frozen rows and columns stay put while the rest scrolls under them; each freeze key pressed again unfreezes. From Scheme, `(grid-freeze-rows n)` and `(grid-freeze-columns n)` freeze exactly `n` (0 unfreezes).
+
+Column widths, zoom, frozen rows and columns, and the header choice are remembered per file, outside the CSV.
 
 ## Formatting cells
 
@@ -197,6 +221,7 @@ Everything above is a Scheme command (`grid-left`, `grid-sort-ascending`, …) b
 (grid-read-range "A1:C500" 'my-callback)                         ; bulk data
 (grid-sort "units" #t)
 (grid-filter-rows "region" "=" "West")
+(grid-remove-duplicates '("email"))
 (grid-replace-all "N/A" "" 'literal 'sheet)                      ; => cells changed
 (grid-replace-all "(\\d+)kg" "\\1 kg" 'regexp 'auto)              ; 'auto: the selection, else the sheet
 ```

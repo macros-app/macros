@@ -15,6 +15,7 @@
 //! - [`cellfmt`]: bold, colors, number formats and wrap set by hand on cells.
 //! - [`wrap`]: Wrap Text line breaking and row heights.
 //! - [`series`]: continuing a series down a column (copy-down / fill).
+//! - [`dedup`]: Remove duplicates — which rows repeat an earlier one.
 //! - [`export`]: cells as org / Markdown / JSON / CSV, and org tables back.
 //! - [`replace`]: find & replace over cell text.
 //! - [`sidecar`]: per-file view settings saved beside the config.
@@ -26,6 +27,7 @@
 pub mod cell;
 pub mod cellfmt;
 pub mod cmd;
+pub mod dedup;
 pub mod dialect;
 pub mod export;
 pub mod infer;

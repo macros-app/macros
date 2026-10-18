@@ -152,6 +152,83 @@ impl GridDoc {
             None => col_name(c),
         }
     }
+
+    /// A column named the way a person or script names one: a header name
+    /// (ignoring case and surrounding space), a prompt label (`C (price)` or
+    /// `price (C)`), or a letter. A header name wins over a letter.
+    pub(super) fn find_column(&self, name: &str) -> Option<usize> {
+        let t = name.trim();
+        let cols = self.used().1;
+        let by_header = |t: &str| {
+            (0..cols).find(|&c| {
+                self.header_name(c)
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case(t))
+            })
+        };
+        let letter = |t: &str| view::parse_col_name(t).filter(|&c| c < cols);
+        // `price (C)` or `C (price)`: whichever side names a column.
+        let in_parens = || {
+            let (outer, rest) = t.rsplit_once('(')?;
+            let inner = rest.strip_suffix(')')?.trim();
+            let outer = outer.trim();
+            by_header(outer)
+                .or_else(|| by_header(inner))
+                .or_else(|| letter(inner))
+                .or_else(|| letter(outer))
+        };
+        by_header(t).or_else(in_parens).or_else(|| letter(t))
+    }
+
+    /// Remove duplicates (Excel's Data › Remove Duplicates): delete every
+    /// row that repeats an earlier one on the key columns `keys` — by
+    /// default the selection's columns, or every column — keeping the
+    /// first. The rows looked at are the selection's when it spans more
+    /// than one row, else the whole sheet's; the header row never takes
+    /// part, and neither do rows a filter hides (so nothing you can't see
+    /// is deleted). Values compare as [`crate::grid::dedup`] describes.
+    /// Whole rows go, as one undo step: formulas and formatting follow as
+    /// for a row delete. Returns the message for the echo area.
+    pub(super) fn remove_duplicates(&mut self, keys: Option<Vec<usize>>) -> Result<String, String> {
+        let (rows, cols) = self.used();
+        if rows == 0 || cols == 0 {
+            return Err("Remove duplicates: the sheet is empty".into());
+        }
+        if self.formulas.busy() {
+            return Err(
+                "Remove duplicates: formulas are still calculating; try again in a moment".into(),
+            );
+        }
+        let sel = self.selection();
+        let (r0, r1, c0, c1) = if self.view.anchor.is_some() && sel.r1 > sel.r0 {
+            (sel.r0, sel.r1.min(rows - 1), sel.c0, sel.c1.min(cols - 1))
+        } else {
+            (0, rows - 1, 0, cols - 1)
+        };
+        let mut keys: Vec<usize> = keys.unwrap_or_else(|| (c0..=c1).collect());
+        keys.retain(|&c| c < cols);
+        keys.sort_unstable();
+        keys.dedup();
+        if keys.is_empty() {
+            return Err("Remove duplicates: no columns to compare".into());
+        }
+        let first = r0.max(usize::from(self.wb.header(SHEET)));
+        let checked: Vec<usize> = (first..=r1).filter(|&r| self.row_shown(r)).collect();
+        let dups = crate::grid::dedup::duplicate_rows(checked.iter().copied(), &keys, |r, c| {
+            self.cell(r, c)
+        });
+        if !dups.is_empty() {
+            self.model_op(|wb| wb.delete_row_set(SHEET, &dups));
+        }
+        let (r, c) = self.view.cursor;
+        self.deselect();
+        self.move_to(r.min(self.used().0.saturating_sub(1)), c, false);
+        let (n, left) = (dups.len(), checked.len() - dups.len());
+        Ok(format!(
+            "Removed {n} duplicate row{}, {left} remain{}",
+            if n == 1 { "" } else { "s" },
+            if left == 1 { "s" } else { "" },
+        ))
+    }
 }
 
 impl Editor {

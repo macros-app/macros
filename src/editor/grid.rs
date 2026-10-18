@@ -1284,6 +1284,7 @@ impl GridDoc {
                 .map(|c| self.wb.col_type(SHEET, c).name().to_string())
                 .collect(),
             frozen_rows: self.view.frozen_rows,
+            frozen_cols: self.view.frozen_cols,
             zoom: f64::from(self.view.zoom) * 100.0,
             editing: self.view.edit.is_some(),
             cells: self.published_cells(),
@@ -1547,6 +1548,8 @@ impl GridDoc {
                 return Ok(Outcome::msg(msg).and_persist());
             }
             ToggleFreeze => return Ok(self.toggle_freeze().and_persist()),
+            FreezePanes => return Ok(self.freeze_panes().and_persist()),
+            FreezeFirstColumn => return Ok(self.freeze_first_column().and_persist()),
             FormulaBar => self.view.bar_visible = !self.view.bar_visible,
             NextProblem => return Ok(self.next_problem()),
             ShowFormulas => {
@@ -1754,6 +1757,54 @@ impl GridDoc {
         })
     }
 
+    /// Freeze panes, Excel's way: the rows above the cursor and the columns
+    /// left of it, at once. Again (or with anything frozen) unfreezes both.
+    fn freeze_panes(&mut self) -> Outcome {
+        let v = &mut self.view;
+        if v.frozen_rows > 0 || v.frozen_cols > 0 {
+            v.frozen_rows = 0;
+            v.frozen_cols = 0;
+            return Outcome::msg("Unfrozen");
+        }
+        let (rows, cols) = self.used();
+        let (r, c) = self.view.cursor;
+        let (r, c) = (r.min(rows), c.min(cols));
+        if r == 0 && c == 0 {
+            return Outcome::msg("Move below or right of the cells to freeze");
+        }
+        let v = &mut self.view;
+        v.frozen_rows = r;
+        v.frozen_cols = c;
+        v.scroll_x = 0.0;
+        v.scroll_y = 0.0;
+        v.reveal_cursor();
+        let rows = match r {
+            0 => None,
+            1 => Some("row 1".to_string()),
+            n => Some(format!("rows 1–{n}")),
+        };
+        let cols = match c {
+            0 => None,
+            1 => Some("column A".to_string()),
+            n => Some(format!("columns A–{}", view::col_name(n - 1))),
+        };
+        let what: Vec<String> = rows.into_iter().chain(cols).collect();
+        Outcome::msg(format!("Froze {}", what.join(" and ")))
+    }
+
+    /// Freeze column A, or unfreeze the frozen columns.
+    fn freeze_first_column(&mut self) -> Outcome {
+        let v = &mut self.view;
+        if v.frozen_cols > 0 {
+            v.frozen_cols = 0;
+            return Outcome::msg("Unfroze columns");
+        }
+        v.frozen_cols = 1;
+        v.scroll_x = 0.0;
+        v.reveal_cursor();
+        Outcome::msg("Froze column A")
+    }
+
     /// Go to the next malformed row (wrapping).
     fn next_problem(&mut self) -> Outcome {
         let r = self.view.cursor.0;
@@ -1883,6 +1934,7 @@ impl GridDoc {
             self.wb.set_header(SHEET, h);
         }
         self.view.frozen_rows = sc.freeze.unwrap_or(0);
+        self.view.frozen_cols = sc.freeze_cols.unwrap_or(0);
         for c in sc.hidden_cols {
             self.view.cols.set_hidden(c, true);
         }
@@ -1896,6 +1948,7 @@ impl GridDoc {
             zoom: ((self.view.zoom - 1.0).abs() > 1e-3).then_some(self.view.zoom),
             header: Some(self.wb.header(SHEET)),
             freeze: (self.view.frozen_rows > 0).then_some(self.view.frozen_rows),
+            freeze_cols: (self.view.frozen_cols > 0).then_some(self.view.frozen_cols),
             hidden_cols: self.view.cols.hidden().collect(),
         }
     }
@@ -2449,6 +2502,7 @@ impl Editor {
                 | InsertCols { .. }
                 | DeleteCols { .. }
                 | Sort { .. }
+                | RemoveDuplicates(_)
         );
         if data && g.loading.is_some() {
             self.echo(
@@ -2550,6 +2604,13 @@ impl Editor {
                 // No more rows than the data has.
                 g.view.frozen_rows = n.min(g.used().0);
                 g.view.scroll_y = 0.0;
+                g.view.reveal_cursor();
+                persist = true;
+            }
+            FreezeCols(n) => {
+                // No more columns than the data has.
+                g.view.frozen_cols = n.min(g.used().1);
+                g.view.scroll_x = 0.0;
                 g.view.reveal_cursor();
                 persist = true;
             }
@@ -2732,6 +2793,27 @@ impl Editor {
                 }
             }
             Choices { col: None, .. } => error = Some("grid-column-choices: invalid column".into()),
+            RemoveDuplicates(names) => {
+                use crate::grid::cmd::ColName;
+                let mut keys = Vec::new();
+                for name in names.iter().flatten() {
+                    match name {
+                        ColName::Index(c) if *c < g.used().1 => keys.push(*c),
+                        ColName::Name(n) if g.find_column(n).is_some() => {
+                            keys.extend(g.find_column(n));
+                        }
+                        ColName::Index(c) => error = Some(format!("no column {c}")),
+                        ColName::Name(n) => error = Some(format!("no column {n:?}")),
+                    }
+                }
+                // Echoed below, like an error.
+                error = match error {
+                    Some(e) => Some(format!("grid-remove-duplicates: {e}")),
+                    None => Some(match g.remove_duplicates(names.map(|_| keys)) {
+                        Ok(msg) | Err(msg) => msg,
+                    }),
+                };
+            }
         }
         if persist {
             self.grid_persist_view();
@@ -4643,6 +4725,45 @@ mod tests {
         assert_eq!(g.view.cols.base(1), 100.0);
         g.apply(GridCmd::Undo, &CmdEnv::default()).unwrap();
         assert_eq!(g.view.cols.base(1), default);
+    }
+
+    #[test]
+    fn apply_freeze_panes_and_first_column() {
+        use super::{CmdEnv, GridCmd};
+        let mut g = doc("a,b,c\n1,2,3\n4,5,6\n");
+        let env = CmdEnv::default();
+        let out = g.apply(GridCmd::FreezePanes, &env).unwrap();
+        assert_eq!(
+            out.msg.as_deref(),
+            Some("Move below or right of the cells to freeze")
+        );
+        assert_eq!((g.view.frozen_rows, g.view.frozen_cols), (0, 0));
+        g.view.cursor = (1, 2);
+        let out = g.apply(GridCmd::FreezePanes, &env).unwrap();
+        assert!(out.persist_view);
+        assert_eq!(out.msg.as_deref(), Some("Froze row 1 and columns A–B"));
+        assert_eq!((g.view.frozen_rows, g.view.frozen_cols), (1, 2));
+        assert_eq!(g.sidecar().freeze_cols, Some(2));
+        let out = g.apply(GridCmd::FreezePanes, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Unfrozen"));
+        assert_eq!((g.view.frozen_rows, g.view.frozen_cols), (0, 0));
+        assert_eq!(g.sidecar().freeze_cols, None);
+        // Column only: the rows stay as they are.
+        g.view.cursor = (0, 1);
+        let out = g.apply(GridCmd::FreezePanes, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Froze column A"));
+        assert_eq!((g.view.frozen_rows, g.view.frozen_cols), (0, 1));
+        let out = g.apply(GridCmd::FreezeFirstColumn, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Unfroze columns"));
+        assert_eq!(g.view.frozen_cols, 0);
+        let out = g.apply(GridCmd::FreezeFirstColumn, &env).unwrap();
+        assert_eq!(out.msg.as_deref(), Some("Froze column A"));
+        assert_eq!(g.view.frozen_cols, 1);
+        // A sidecar brings the columns back.
+        let sc = g.sidecar();
+        let mut h = doc("a,b,c\n1,2,3\n4,5,6\n");
+        h.apply_sidecar(sc);
+        assert_eq!(h.view.frozen_cols, 1);
     }
 
     #[test]
