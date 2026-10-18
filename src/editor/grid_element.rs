@@ -21,6 +21,7 @@ use super::Editor;
 use super::grid::{BAR_HEIGHT, GridDoc, GridDrag, GridGeom, NAME_BOX_WIDTH, SHEET};
 use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt};
+use crate::grid::scrollbar::{self, ScrollBar};
 use crate::grid::view::{self, CellEdit, CellRange, VisibleLine, col_name};
 use crate::theme::Theme;
 
@@ -98,6 +99,11 @@ struct Palette {
     cursor: Hsla,
     block: Hsla,
     warn: Hsla,
+    /// Scrollbar faces, shared with the text editor's scroll bar.
+    bar_track: Hsla,
+    bar_thumb: Hsla,
+    bar_hover: Hsla,
+    bar_active: Hsla,
 }
 
 impl Palette {
@@ -124,6 +130,11 @@ impl Palette {
             .map(|(i, &fallback)| theme.color(&format!("plot-series-{i}"), rgb(fallback).into()))
             .collect();
         let trace = theme.color("warning", rgb(0xe5c07b).into());
+        let bar_thumb = theme.color("scroll-bar", rgba(0x888888aa).into());
+        let brighter = |by: f32| Hsla {
+            a: (bar_thumb.a + by).min(1.0),
+            ..bar_thumb
+        };
         Self {
             refs,
             trace,
@@ -139,6 +150,10 @@ impl Palette {
             cursor,
             block: Hsla { a: 0.45, ..fg },
             warn: theme.color("warning", rgb(0xe5c07b).into()),
+            bar_track: theme.color("scroll-bar-track", rgba(0x88888822).into()),
+            bar_thumb,
+            bar_hover: theme.color("scroll-bar-hover", brighter(0.15)),
+            bar_active: theme.color("scroll-bar-active", brighter(0.3)),
         }
     }
 }
@@ -263,7 +278,15 @@ impl Element for GridElement {
         }
         f.range_outline(&mut p);
         f.headers(&mut p, window);
-        f.scroll_indicators(&mut p);
+        let drag = editor.grid_ui.drag;
+        let bars = f.scroll_bars(drag, self.pane);
+        let hot = |axis| match drag {
+            Some(GridDrag::Scroll { pane, axis: a, .. }) if pane == self.pane => {
+                (a == axis).then_some(true)
+            }
+            _ => (editor.grid_ui.bar_hover == Some((self.pane, axis))).then_some(false),
+        };
+        f.scrollbars(bars, (hot(Axis::Rows), hot(Axis::Cols)), &mut p);
         if let Some(GridDrag::Resize {
             pane,
             axis,
@@ -286,7 +309,7 @@ impl Element for GridElement {
             (0.0, 0.0)
         };
 
-        let geom = f.geom(bar_text);
+        let geom = f.geom(bar_text, bars);
         let pane = self.pane;
         let hit = p.popup.as_ref().map(|pp| pp.hit);
         self.editor.update(cx, |editor, _| {
@@ -622,7 +645,11 @@ impl<'a> Frame<'a> {
     }
 
     /// What the element reports for hit-testing.
-    fn geom(&self, (bar_text_x, bar_shift): (f32, f32)) -> GridGeom {
+    fn geom(
+        &self,
+        (bar_text_x, bar_shift): (f32, f32),
+        (vbar, hbar): (Option<ScrollBar>, Option<ScrollBar>),
+    ) -> GridGeom {
         GridGeom {
             origin: self.bounds.origin,
             width: self.width,
@@ -634,6 +661,8 @@ impl<'a> Frame<'a> {
             bar_text_x,
             bar_shift,
             bar_char_w: self.chrome_char_w,
+            vbar,
+            hbar,
         }
     }
 
@@ -1263,48 +1292,96 @@ impl<'a> Frame<'a> {
         ));
     }
 
-    /// Scroll position indicators along the right and bottom edges.
-    fn scroll_indicators(&self, p: &mut GridPrepaint) {
-        let (ox, oy, cw, ch, v) = (self.ox, self.oy, self.cw, self.ch, self.v);
-        let (zoom, frozen_h) = (self.zoom as f64, self.frozen_h);
-        let thumb_color = Hsla {
-            a: 0.25,
-            ..self.pal.fg
+    /// The scrollbars along the cells area's right and bottom edges
+    /// (vertical, horizontal), when there's anything to scroll to. The
+    /// tracks run below the frozen rows and right of the frozen columns. A
+    /// thumb being dragged keeps the bar from the press, at the current
+    /// offset.
+    fn scroll_bars(
+        &self,
+        drag: Option<GridDrag>,
+        pane: usize,
+    ) -> (Option<ScrollBar>, Option<ScrollBar>) {
+        let (v, zoom) = (self.v, self.zoom as f64);
+        let view_h = (self.ch - self.frozen_h).max(0.0);
+        let used_h =
+            (v.rows.start(self.used_rows.max(v.cursor.0 + 1)) - v.frozen_height()).max(0.0);
+        let view_w = (self.cw - self.frozen_w).max(0.0);
+        let used_w = (v.cols.start(self.used_cols.max(v.cursor.1 + 1)) - v.frozen_width()).max(0.0);
+        let vbar = |len: f32| {
+            ScrollBar::new(
+                self.oy + self.frozen_h,
+                len,
+                used_h,
+                view_h as f64 / zoom,
+                v.scroll_y,
+            )
         };
-        let content_h = (v.rows.start(self.used_rows.max(v.cursor.0 + 1)) - v.frozen_height())
-            .max(v.scroll_y + (ch - frozen_h) as f64 / zoom)
-            * zoom;
-        if content_h > (ch - frozen_h) as f64 + 1.0 {
-            let view_h = (ch - frozen_h) as f64;
-            let thumb = (view_h / content_h * view_h).max(18.0) as f32;
-            let pos = (v.scroll_y * zoom / content_h * view_h) as f32;
-            p.over.push(fill(
-                rect(
-                    ox + cw - 6.0,
-                    oy + frozen_h + pos.min((view_h as f32 - thumb).max(0.0)),
-                    4.0,
-                    thumb,
-                ),
-                thumb_color,
-            ));
+        let hbar = |len: f32| {
+            ScrollBar::new(
+                self.ox + self.frozen_w,
+                len,
+                used_w,
+                view_w as f64 / zoom,
+                v.scroll_x,
+            )
+        };
+        let (mut vb, mut hb) = (vbar(view_h), hbar(view_w));
+        // Both shown: neither runs into the corner they share.
+        if vb.scrollable() && hb.scrollable() {
+            vb = vbar(view_h - scrollbar::HOT_WIDTH);
+            hb = hbar(view_w - scrollbar::HOT_WIDTH);
         }
-        let frozen_w = self.frozen_w;
-        let content_w = (v.cols.start(self.used_cols.max(v.cursor.1 + 1)) - v.frozen_width())
-            .max(v.scroll_x + (cw - frozen_w) as f64 / zoom)
-            * zoom;
-        if content_w > (cw - frozen_w) as f64 + 1.0 {
-            let view_w = (cw - frozen_w) as f64;
-            let thumb = (view_w / content_w * view_w).max(18.0) as f32;
-            let pos = (v.scroll_x * zoom / content_w * view_w) as f32;
-            p.over.push(fill(
-                rect(
-                    ox + frozen_w + pos.min((view_w as f32 - thumb).max(0.0)),
-                    oy + ch - 6.0,
-                    thumb,
-                    4.0,
-                ),
-                thumb_color,
-            ));
+        let pick = |axis: Axis, b: ScrollBar| match drag {
+            Some(GridDrag::Scroll {
+                pane: p,
+                axis: a,
+                bar,
+                ..
+            }) if p == pane && a == axis => Some(bar.with_offset(b.offset)),
+            _ => b.scrollable().then_some(b),
+        };
+        (pick(Axis::Rows, vb), pick(Axis::Cols, hb))
+    }
+
+    /// Paint the scrollbars. `hot` is, per bar, `Some(true)` while its
+    /// thumb is dragged and `Some(false)` while hovered: the bar widens and
+    /// shows its track, and the thumb takes the hover/active face.
+    fn scrollbars(
+        &self,
+        (vbar, hbar): (Option<ScrollBar>, Option<ScrollBar>),
+        (vhot, hhot): (Option<bool>, Option<bool>),
+        p: &mut GridPrepaint,
+    ) {
+        let right = self.ox + self.cw;
+        let bottom = self.oy + self.ch;
+        for (bar, hot, vertical) in [(vbar, vhot, true), (hbar, hhot, false)] {
+            let Some(b) = bar else {
+                continue;
+            };
+            let w = if hot.is_some() {
+                scrollbar::HOT_WIDTH
+            } else {
+                scrollbar::WIDTH
+            };
+            let thumb = match hot {
+                Some(true) => self.pal.bar_active,
+                Some(false) => self.pal.bar_hover,
+                None => self.pal.bar_thumb,
+            };
+            let along = |start: f32, len: f32| {
+                if vertical {
+                    rect(right - w, start, w, len)
+                } else {
+                    rect(start, bottom - w, len, w)
+                }
+            };
+            if hot.is_some() {
+                p.over
+                    .push(fill(along(b.track_start, b.track_len), self.pal.bar_track));
+            }
+            p.over
+                .push(fill(along(b.thumb_start(), b.thumb_len()), thumb));
         }
     }
 
