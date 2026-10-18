@@ -6,7 +6,7 @@
 
 use gpui::Context;
 
-use super::grid::{GridDoc, RowFilter, SHEET, YankState};
+use super::grid::{GridDoc, PasteMode, RowFilter, SHEET, YankState};
 use super::*;
 use crate::formula::refs::Axis;
 use crate::grid::cellfmt::{self, CellFmt, NumCode};
@@ -234,10 +234,11 @@ impl GridDoc {
 impl Editor {
     // --- Kill ring -----------------------------------------------------------
 
-    /// `C-y` / `p`: paste the newest kill. Text another app put on the
-    /// clipboard since our last kill joins the kill ring first (Emacs's
-    /// interprogram paste), so `M-y` can cycle back past it.
-    pub(super) fn grid_paste(&mut self, cx: &mut Context<Self>) {
+    /// `C-y` / `p`: paste the newest kill (`mode` picks what a grid copy
+    /// pastes: Paste Special). Text another app put on the clipboard since
+    /// our last kill joins the kill ring first (Emacs's interprogram paste),
+    /// so `M-y` can cycle back past it.
+    pub(super) fn grid_paste(&mut self, mode: PasteMode, cx: &mut Context<Self>) {
         if let Some(clip) = cx.read_from_clipboard().and_then(|i| i.text())
             && !clip.is_empty()
             && self.kill_ring.last() != Some(&clip)
@@ -250,28 +251,36 @@ impl Editor {
             return;
         };
         let index = self.kill_ring.len() - 1;
-        self.grid_paste_recorded(&text, index, cx);
+        self.grid_paste_recorded(&text, index, mode, cx);
     }
 
     /// Paste `text` (kill-ring entry `index`) and remember it for `M-y`.
-    fn grid_paste_recorded(&mut self, text: &str, index: usize, cx: &mut Context<Self>) {
+    fn grid_paste_recorded(
+        &mut self,
+        text: &str,
+        index: usize,
+        mode: PasteMode,
+        cx: &mut Context<Self>,
+    ) {
         let Some(g) = self.active.grid.as_deref() else {
             return;
         };
         let (cursor, anchor, depth) = (g.view.cursor, g.view.anchor, g.hist_len());
         self.kill_index = index;
-        self.grid_paste_text(text, cx);
+        self.grid_paste_text(text, mode, cx);
         if let Some(g) = self.active.grid.as_deref_mut() {
             g.yank = (g.hist_len() > depth).then(|| YankState {
                 index,
                 depth: g.hist_len(),
                 cursor,
                 anchor,
+                mode,
             });
         }
     }
 
-    /// `M-y` right after a paste: replace it with the next older kill.
+    /// `M-y` right after a paste: replace it with the next older kill,
+    /// pasted the same way.
     pub(super) fn grid_yank_pop(&mut self, cx: &mut Context<Self>) {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
@@ -285,6 +294,11 @@ impl Editor {
             self.echo("No older kill to yank", cx);
             return;
         }
+        if y.mode == PasteMode::Formats {
+            // Only the newest grid copy remembers formatting.
+            self.echo("Only the newest grid copy has formats to paste", cx);
+            return;
+        }
         self.grid_command(GridCmd::Undo, cx);
         if let Some(g) = self.active.grid.as_deref_mut() {
             g.view.cursor = y.cursor;
@@ -293,7 +307,47 @@ impl Editor {
         }
         let index = (y.index + len - 1) % len;
         let text = self.kill_ring[index].clone();
-        self.grid_paste_recorded(&text, index, cx);
+        self.grid_paste_recorded(&text, index, y.mode, cx);
+    }
+
+    /// Replace the selected formulas (the cursor's, with no selection) with
+    /// their current results, as one undo step — Excel's copy and paste
+    /// values over the same cells.
+    pub(super) fn grid_formulas_to_values(&mut self, cx: &mut Context<Self>) {
+        let Some(g) = self.active.grid.as_deref_mut() else {
+            return;
+        };
+        let sel = g.selection();
+        let edits: Vec<(usize, usize, String)> = g
+            .visible_cells(&sel)
+            .into_iter()
+            // A spill's values go with its formula (Excel converts the
+            // whole array); without it they'd only block the spill.
+            .filter(|&(r, c)| {
+                g.is_formula_at(r, c)
+                    || g.formulas.spilled_from(r, c).is_some_and(|(ar, ac)| {
+                        (sel.r0..=sel.r1).contains(&ar)
+                            && (sel.c0..=sel.c1).contains(&ac)
+                            && g.row_shown(ar)
+                    }) && g.is_spilled(r, c)
+            })
+            .map(|(r, c)| (r, c, g.value_input(r, c)))
+            .collect();
+        let n = edits.iter().filter(|e| g.is_formula_at(e.0, e.1)).count();
+        if n == 0 {
+            self.echo("No formulas to convert here", cx);
+            return;
+        }
+        g.set_cells_tracked(&edits);
+        self.echo(
+            if n == 1 {
+                "Converted 1 formula to its value".to_string()
+            } else {
+                format!("Converted {n} formulas to values")
+            },
+            cx,
+        );
+        self.grid_after(cx);
     }
 
     /// `C-k`: kill the cells from the cursor to the row's last filled cell.
