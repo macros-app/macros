@@ -256,7 +256,10 @@ impl Element for GridElement {
         f.ref_outlines(&ref_spans, &mut p);
         match f.editing() {
             Some(e) => f.cell_editor(e, &ref_spans, &popup, &mut p, window),
-            None => f.cursor_outline(&mut p),
+            None => {
+                f.cursor_outline(&mut p);
+                f.spill_outline(&mut p);
+            }
         }
         f.range_outline(&mut p);
         f.headers(&mut p, window);
@@ -495,7 +498,7 @@ impl<'a> Frame<'a> {
         let char_w = advance(window, font_size);
         let chrome_char_w = advance(window, chrome_size);
 
-        let (used_rows, used_cols) = g.used();
+        let (used_rows, used_cols) = g.shown_extent();
         let bar_h = if v.bar_visible { BAR_HEIGHT } else { 0.0 };
         let header_h = (view::DEFAULT_ROW_HEIGHT as f32 * zoom).max(12.0);
         // Row header: wide enough for the largest row number on screen.
@@ -1015,6 +1018,33 @@ impl<'a> Frame<'a> {
         }
     }
 
+    /// A thin frame around the range the cursor cell's formula spills
+    /// into (or that spills over the cursor cell), as Excel draws one.
+    fn spill_outline(&self, p: &mut GridPrepaint) {
+        if self.has_range {
+            return;
+        }
+        let Some(a) = self.g.cursor_spill() else {
+            return;
+        };
+        let (ox, oy, cw, ch, v) = (self.ox, self.oy, self.cw, self.ch, self.v);
+        let x0 = (ox + v.col_x(a.c0) as f32).max(ox - 2.0);
+        let y0 = (oy + v.row_y(a.r0) as f32).max(oy - 2.0);
+        let x1 = (ox + (v.col_x(a.c1) + v.col_px(a.c1)) as f32).min(ox + cw + 2.0);
+        let y1 = (oy + (v.row_y(a.r1) + v.row_px(a.r1)) as f32).min(oy + ch + 2.0);
+        if x1 > x0 && y1 > y0 {
+            push_border(
+                &mut p.outlines,
+                x0 - 1.0,
+                y0 - 1.0,
+                x1 - x0 + 1.0,
+                y1 - y0 + 1.0,
+                1.0,
+                self.pal.cursor,
+            );
+        }
+    }
+
     /// Outline the whole selected range (clamped to the view).
     fn range_outline(&self, p: &mut GridPrepaint) {
         if !self.has_range {
@@ -1244,6 +1274,8 @@ impl<'a> Frame<'a> {
             pal.line,
         ));
         let (name, content) = g.bar_text();
+        // Another cell's formula (the cursor is on a spilled value) greyed.
+        let content_color = if g.bar_ghost() { pal.dim } else { pal.fg };
         let lh = px(h);
         let shape = |window: &mut Window, s: &str, color: Hsla| {
             window.text_system().shape_line(
@@ -1316,7 +1348,7 @@ impl<'a> Frame<'a> {
                     None,
                 )
             }
-            None => shape(window, &shown, pal.fg),
+            None => shape(window, &shown, content_color),
         };
         // Keep the caret in view when the edited text is wider than the bar.
         let caret_x = caret.map(|c| f32::from(line.x_for_index(c)));

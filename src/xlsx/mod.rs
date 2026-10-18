@@ -68,6 +68,14 @@ pub enum XFormula {
         text: String,
         range: String,
     },
+    /// A dynamic-array formula (an array formula with Excel's
+    /// dynamic-array cell metadata, `cm`): text and the range its result
+    /// spilled into when saved. The other cells of the range hold the
+    /// spilled values, cached.
+    Dynamic {
+        text: String,
+        range: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -41,9 +41,11 @@ engine bridge).
 
 ## Non-goals (v1)
 
-- **Dynamic arrays and spilling** (`FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`).
-  Array literals and array-taking functions like `SUMPRODUCT` are in scope;
-  spilling into neighbouring cells is not.
+- ~~**Dynamic arrays and spilling**~~ — added since v1: `FILTER`, `SORT`,
+  `SORTBY`, `UNIQUE`, `SEQUENCE`, spilling, `#SPILL!`, `A1#` and `@` (see
+  the *Spilling* notes in `src/formula/engine.rs` and
+  `src/formula/implicit.rs` for old files). Functions of one value still
+  don't spill element-wise (`ABS(A1:A3)` is one value).
 - **Dynamic references:** `INDIRECT` and `OFFSET`. Volatile functions with
   fixed references (`NOW`, `TODAY`, `RAND`) are in scope.
 - **Other gaps:** iterative calculation, localized function names and
@@ -358,8 +360,8 @@ Excel's documentation examples.
   | error | the symbol `'#N/A` (and so on) |
   | range | a list of rows, each a list of values |
 
-  Returned values map back the same way. Lists become `#VALUE!`, since
-  spilling isn't supported.
+  Returned values map back the same way. Lists become `#VALUE!` (a Scheme
+  function doesn't spill).
 - **Dependencies:** a Scheme function's arguments are precedents in the
   dependency graph (§3), like any built-in function's. Editing an argument
   cell re-runs the call. When a result arrives, the cell's dependents

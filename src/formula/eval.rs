@@ -3,10 +3,13 @@
 //! Intermediate results can be a single value, a reference (kept lazy, so a
 //! function like `SUM` scans the grid's storage directly), or an array (array
 //! constants and element-wise arithmetic such as `(A1:A3>1)*B1:B3`, which
-//! `SUMPRODUCT` consumes). A cell finally shows one value: an array shows its
-//! top-left element, and a multi-cell reference uses Excel's *implicit
-//! intersection* — the cell of the range in the formula's own row or column
-//! — or `#VALUE!` when there's none (dynamic-array spilling isn't supported).
+//! `SUMPRODUCT` consumes, and the dynamic-array functions return). A
+//! formula whose result is an array or a multi-cell reference *spills* it
+//! ([`eval_formula`]): the engine fills the cells below and to the right.
+//! The `@` operator, and [`eval_cell`] for a whole formula, take one value
+//! instead: an array's top-left element, or for a multi-cell reference
+//! Excel's *implicit intersection* — the cell of the range in the formula's
+//! own row or column — or `#VALUE!` when there's none.
 
 use std::sync::Arc;
 
@@ -25,15 +28,49 @@ pub enum Ev {
     A(Array, Option<(usize, usize)>),
 }
 
-/// Evaluate a formula to the value its cell shows.
+/// Evaluate a formula to one value (implicit intersection at the top, as
+/// pre-dynamic-array Excel shows every formula).
+#[cfg(test)]
 pub fn eval_cell(expr: &Expr, ctx: &mut dyn Ctx) -> Value {
     let ev = eval(expr, ctx);
-    match to_scalar(ev, ctx) {
-        // A reference to an empty cell shows 0 (`=A1` on an empty A1).
+    shown(to_scalar(ev, ctx))
+}
+
+/// A value as a cell shows it: a reference to an empty cell shows 0 (`=A1`
+/// on an empty A1), and a number that isn't finite is `#NUM!`.
+fn shown(v: Value) -> Value {
+    match v {
         Value::Empty => Value::Number(0.0),
         Value::Number(n) if !n.is_finite() => Value::Error(ErrorKind::Num),
         v => v,
     }
+}
+
+/// What a formula's cell shows: one value, or an array that spills.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Outcome {
+    Value(Value),
+    /// More than one value (each as [`eval_cell`] would show it).
+    Array(Array),
+}
+
+/// Evaluate a formula as dynamic-array Excel does: an array or multi-cell
+/// reference result is the whole array, to spill.
+pub fn eval_formula(expr: &Expr, ctx: &mut dyn Ctx) -> Outcome {
+    let ev = eval(expr, ctx);
+    if !is_multi(&ev) {
+        return Outcome::Value(shown(to_scalar(ev, ctx)));
+    }
+    let (rows, cols, data) = materialize(ev, ctx);
+    if rows * cols == 1 {
+        let v = data.into_iter().next().unwrap_or(Value::Empty);
+        return Outcome::Value(shown(v));
+    }
+    Outcome::Array(Array {
+        rows,
+        cols,
+        data: data.into_iter().map(shown).collect(),
+    })
 }
 
 pub fn eval(expr: &Expr, ctx: &mut dyn Ctx) -> Ev {
@@ -74,6 +111,18 @@ pub fn eval(expr: &Expr, ctx: &mut dyn Ctx) -> Ev {
                 c1,
             })
         }
+        Expr::Unary(UnOp::At, e) => {
+            let ev = eval(e, ctx);
+            Ev::V(to_scalar(ev, ctx))
+        }
+        Expr::Spill(e) => match eval(e, ctx) {
+            Ev::R(r) if r.is_cell() => match ctx.spill_range(r.sheet.as_deref(), r.r0, r.c0) {
+                Ok(range) => Ev::R(range),
+                Err(e) => Ev::V(Value::Error(e)),
+            },
+            Ev::V(Value::Error(e)) => Ev::V(Value::Error(e)),
+            _ => Ev::V(Value::Error(ErrorKind::Ref)),
+        },
         Expr::Unary(op, e) => {
             let ev = eval(e, ctx);
             let d1904 = ctx.date1904();
@@ -83,7 +132,7 @@ pub fn eval(expr: &Expr, ctx: &mut dyn Ctx) -> Ev {
                     Err(e) => Value::Error(e),
                 },
                 // Unary plus changes nothing, not even text into a number.
-                UnOp::Plus => v,
+                UnOp::Plus | UnOp::At => v,
             })
         }
         Expr::Percent(e) => {
@@ -465,7 +514,13 @@ fn call(name: &str, args: &[Expr], ctx: &mut dyn Ctx) -> Ev {
         _ => {
             let args: Vec<Arg> = args.iter().map(|a| to_arg(a, ctx)).collect();
             if let Some(f) = func::lookup(name) {
-                return Ev::V((f.f)(&args, ctx));
+                return match f.array {
+                    Some(array) => match array(&args, ctx) {
+                        Ok(a) => Ev::A(a, None),
+                        Err(e) => err(e),
+                    },
+                    None => Ev::V((f.f)(&args, ctx)),
+                };
             }
             match ctx.call_external(name, &args) {
                 Some(v) => Ev::V(v),

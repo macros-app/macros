@@ -700,12 +700,15 @@ impl GridDoc {
         (self.wb.used_rows(SHEET), self.wb.used_cols(SHEET))
     }
 
-    /// What a cell shows: a formula's result, anything else as stored. (For
-    /// the text to *edit*, see [`GridDoc::source`].)
+    /// What a cell shows: a formula's result, a value spilled into it,
+    /// anything else as stored. (For the text to *edit*, see
+    /// [`GridDoc::source`].)
     pub fn cell(&self, r: usize, c: usize) -> &str {
         let raw = self.wb.cell(SHEET, r, c);
         if crate::formula::engine::is_formula(raw) {
             self.formulas.shown(r, c).unwrap_or("#CALC!")
+        } else if raw.is_empty() && self.formulas.has_spills() {
+            self.formulas.spilled_shown(r, c).unwrap_or(raw)
         } else {
             raw
         }
@@ -1139,7 +1142,10 @@ impl GridDoc {
             return (range_name(&sel), String::new());
         }
         let (r, c) = self.view.cursor;
-        (self.name_box_for(r, c), self.source(r, c).to_string())
+        let content = self
+            .spill_source(r, c)
+            .unwrap_or_else(|| self.source(r, c).into_owned());
+        (self.name_box_for(r, c), content)
     }
 
     fn name_box_for(&self, r: usize, c: usize) -> String {

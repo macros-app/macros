@@ -11,6 +11,7 @@ pub mod decimal;
 pub mod engine;
 pub mod eval;
 pub mod func;
+pub mod implicit;
 pub mod parse;
 pub mod print;
 pub mod refs;

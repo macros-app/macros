@@ -93,7 +93,13 @@ impl<'a> Lexer<'a> {
                     let name = self.quoted_sheet()?;
                     Tok::Sheet(name)
                 }
+                // Straight after a cell reference, `#` is the spill-range
+                // operator (`A1#`); anywhere else it starts an error value.
+                '#' if matches!(out.last(), Some((at, Tok::Word(w))) if at + w.len() == start) => {
+                    self.one(Tok::Op("#"))
+                }
                 '#' => Tok::Err(self.error_literal()?),
+                '@' => self.one(Tok::Op("@")),
                 '0'..='9' | '.' => {
                     // A number, unless it's a row reference (`3:5`, `3!`
                     // can't happen) — rows are lexed as words when followed
@@ -411,17 +417,32 @@ impl Parser {
                 self.next();
                 Ok(Expr::Unary(UnOp::Plus, Box::new(self.unary()?)))
             }
+            Tok::Op("@") => {
+                self.next();
+                Ok(Expr::Unary(UnOp::At, Box::new(self.unary()?)))
+            }
             _ => self.postfix(),
         }
     }
 
     fn postfix(&mut self) -> Result<Expr, ParseError> {
         let mut e = self.primary()?;
-        while *self.peek() == Tok::Op("%") {
-            self.next();
-            e = Expr::Percent(Box::new(e));
+        loop {
+            match self.peek() {
+                Tok::Op("%") => {
+                    self.next();
+                    e = Expr::Percent(Box::new(e));
+                }
+                Tok::Op("#") => {
+                    if !is_cell(&e) {
+                        return Err(self.err("'#' follows a single cell (A1#)"));
+                    }
+                    self.next();
+                    e = Expr::Spill(Box::new(e));
+                }
+                _ => return Ok(e),
+            }
         }
-        Ok(e)
     }
 
     fn primary(&mut self) -> Result<Expr, ParseError> {
@@ -523,8 +544,11 @@ impl Parser {
 
     fn call(&mut self, name: &str) -> Result<Expr, ParseError> {
         let name = name.to_ascii_uppercase();
-        // Excel writes newer functions with an `_xlfn.` prefix in files.
-        let name = name.strip_prefix("_XLFN.").unwrap_or(&name).to_string();
+        // Excel writes newer functions with an `_xlfn.` prefix in files
+        // (`_xlfn._xlws.` for a few: `FILTER`, `SORT`).
+        let future = name.starts_with("_XLFN.");
+        let name = name.strip_prefix("_XLFN.").unwrap_or(&name);
+        let name = name.strip_prefix("_XLWS.").unwrap_or(name).to_string();
         let mut args = Vec::new();
         if *self.peek() == Tok::RParen {
             self.next();
@@ -540,6 +564,22 @@ impl Parser {
                     Tok::RParen => break,
                     _ => return Err(self.err("expected ',' or ')' in the argument list")),
                 }
+            }
+        }
+        // The file forms of the `@` and `#` operators.
+        if future && args.len() == 1 {
+            match name.as_str() {
+                "SINGLE" => {
+                    let arg = match args.remove(0) {
+                        e @ (Expr::Ref(_) | Expr::Call(..) | Expr::Paren(_) | Expr::Name(_)) => e,
+                        e => Expr::Paren(Box::new(e)),
+                    };
+                    return Ok(Expr::Unary(UnOp::At, Box::new(arg)));
+                }
+                "ANCHORARRAY" if is_cell(&args[0]) => {
+                    return Ok(Expr::Spill(Box::new(args.remove(0))));
+                }
+                _ => {}
             }
         }
         if let Some((min, max)) = arity(&name)
@@ -597,6 +637,17 @@ impl Parser {
         }
         Ok(Expr::Array(rows))
     }
+}
+
+/// A single-cell reference (what `#` may follow).
+fn is_cell(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Ref(Ref {
+            area: Area::Cell { .. },
+            ..
+        })
+    )
 }
 
 fn describe(t: &Tok) -> &'static str {
@@ -819,6 +870,37 @@ mod tests {
         // Lower case and spacing normalise to Excel's stored form.
         assert_eq!(round("= sum( a1 , b$2 )"), "=SUM(A1,B$2)");
         assert_eq!(round("=_xlfn.xlookup(A1,B:B,C:C)"), "=XLOOKUP(A1,B:B,C:C)");
+    }
+
+    #[test]
+    fn dynamic_array_operators() {
+        for src in [
+            "=A1#",
+            "=SUM(Sheet2!$B$3#)",
+            "=@A1:A3*10",
+            "=-@B:B",
+            "=A1#*2",
+        ] {
+            assert_eq!(round(src), src, "round trip of {src}");
+        }
+        assert!(matches!(parse("=A1#").unwrap(), Expr::Spill(_)));
+        assert!(matches!(
+            parse("=@A1:A3").unwrap(),
+            Expr::Unary(UnOp::At, _)
+        ));
+        // `#` after anything but a cell is an error; spaced, it's an error value.
+        assert!(parse("=A1:B2#").is_err());
+        assert!(parse("=(A1)#").is_err());
+        assert!(matches!(parse("=IF(A1,#N/A)").unwrap(), Expr::Call(..)));
+        // The file forms Excel writes.
+        assert_eq!(round("=_xlfn.ANCHORARRAY(A1)"), "=A1#");
+        assert_eq!(round("=_xlfn.SINGLE(A1:A3)+1"), "=@A1:A3+1");
+        assert_eq!(round("=_xlfn.SINGLE(A1:A3*2)"), "=@(A1:A3*2)");
+        assert_eq!(round("=_xlfn._xlws.SORT(A1:A3)"), "=SORT(A1:A3)");
+        assert_eq!(
+            round("=_xlfn._xlws.FILTER(A1:A3,B1:B3>1)"),
+            "=FILTER(A1:A3,B1:B3>1)"
+        );
     }
 
     #[test]

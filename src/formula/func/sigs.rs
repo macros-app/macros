@@ -60,5 +60,13 @@ mod tests {
             Some("SUM(number1, «[number2]», …)")
         );
         assert_eq!(hint("PI", 0).as_deref(), Some("PI()"));
+        assert_eq!(
+            hint("FILTER", 1).as_deref(),
+            Some("FILTER(array, «include», [if_empty])")
+        );
+        assert_eq!(
+            hint("SORTBY", 1).as_deref(),
+            Some("SORTBY(array, «by_array1», [sort_order1], [by_array2, sort_order2], …)")
+        );
     }
 }
