@@ -1122,41 +1122,108 @@ pub(super) fn translated(source: &str, dr: isize, dc: isize) -> String {
     }
 }
 
-/// Formula cells of a grid copy, so pasting the same clipboard text back
-/// into a grid pastes formulas (translated), not their copied results.
+/// What a grid copy remembers beyond its clipboard text, so pasting the
+/// same text back into a grid can paste formulas (translated) rather than
+/// their copied results, and Paste Special can take values or formats.
 #[derive(Clone, Debug)]
 pub(super) struct FormulaClip {
     /// The clipboard text the copy produced (a paste matches on it).
     pub text: String,
     /// `(block row, block col, source row, source col, formula text)`.
     pub cells: Vec<(usize, usize, usize, usize, String)>,
+    /// The exact value of each of `cells`, as the text that types it
+    /// (see [`GridDoc::value_input`]); the clipboard has what they show.
+    pub values: Vec<String>,
+    /// Hand-set formatting of the copied cells: `(block row, block col, fmt)`.
+    pub formats: Vec<(usize, usize, crate::grid::cellfmt::CellFmt)>,
 }
 
 impl GridDoc {
-    /// The formula cells of the copied block (rows as `visible_block` takes
-    /// them: shown rows only).
-    pub(super) fn copied_formulas(
-        &self,
-        sel: &CellRange,
-    ) -> Vec<(usize, usize, usize, usize, String)> {
+    /// What a copy of `sel` (with clipboard `text`) remembers: its formula
+    /// cells and formatting, with rows as `visible_block` takes them (shown
+    /// rows only). `None` when there's nothing beyond the text.
+    pub(super) fn grid_clip(&self, sel: &CellRange, text: &str) -> Option<FormulaClip> {
         let (rows, cols) = self.used();
-        let mut out = Vec::new();
-        let shown = (sel.r0..=sel.r1).filter(|&r| r >= rows || self.row_shown(r));
+        let mut clip = FormulaClip {
+            text: text.to_string(),
+            cells: Vec::new(),
+            values: Vec::new(),
+            formats: Vec::new(),
+        };
+        let formatted = !self.formats.is_empty();
+        let shown = (sel.r0..=sel.r1.min(rows.saturating_sub(1))).filter(|&r| self.row_shown(r));
         for (bi, r) in shown.enumerate() {
             for c in sel.c0..=sel.c1.min(cols.saturating_sub(1)) {
                 // Formulas, and text starting with `=` (as `'=…`, so it
-                // pastes back as text, not a formula).
-                if r < rows
-                    && self
-                        .wb
-                        .cell(SHEET, r, c)
-                        .starts_with(['=', crate::formula::engine::MARK])
-                {
-                    out.push((bi, c - sel.c0, r, c, self.source(r, c).into_owned()));
+                // pastes back as text, not a formula); a spilled value
+                // pastes as itself, exactly, even with its formula.
+                let stored = self.wb.cell(SHEET, r, c);
+                if stored.starts_with(['=', crate::formula::engine::MARK]) {
+                    clip.cells
+                        .push((bi, c - sel.c0, r, c, self.source(r, c).into_owned()));
+                    clip.values.push(self.value_input(r, c));
+                } else if self.is_spilled(r, c) {
+                    let v = self.value_input(r, c);
+                    clip.cells.push((bi, c - sel.c0, r, c, v.clone()));
+                    clip.values.push(v);
+                }
+                if formatted && self.formats.touches_col(c) {
+                    let f = self.formats.get(r, c);
+                    if !f.is_plain() {
+                        clip.formats.push((bi, c - sel.c0, f));
+                    }
                 }
             }
         }
-        out
+        (!clip.cells.is_empty() || !clip.formats.is_empty()).then_some(clip)
+    }
+
+    /// The text that, typed into a cell, recreates `(r, c)`'s current value
+    /// rather than its formula (Excel's Paste Values): a number exactly as
+    /// computed, `TRUE`/`FALSE`, an error as its literal (`#DIV/0!`, which
+    /// reads back as that error), text starting with `=` behind `'`. A cell
+    /// that isn't a formula gives its own input text.
+    pub(super) fn value_input(&self, r: usize, c: usize) -> String {
+        let stored = self.wb.cell(SHEET, r, c);
+        let formula = is_formula(stored);
+        let value = if formula {
+            self.formula_value(r, c)
+        } else if stored.is_empty() {
+            self.formulas.spilled_value(r, c)
+        } else {
+            None
+        };
+        match value {
+            Some(Value::Number(n)) => exact_number(*n),
+            Some(Value::Text(s)) => crate::formula::engine::input_text(s).into_owned(),
+            Some(v) => v.to_string(),
+            None if formula => self.cell(r, c).to_string(),
+            None => crate::formula::engine::input_text(stored).into_owned(),
+        }
+    }
+
+    /// Whether `(r, c)` shows a value another formula spills into it.
+    pub(super) fn is_spilled(&self, r: usize, c: usize) -> bool {
+        self.formulas.has_spills()
+            && self.wb.cell(SHEET, r, c).is_empty()
+            && self.formulas.spilled_from(r, c).is_some()
+    }
+}
+
+/// `n` as text that reads back as exactly `n`: the 15-digit General form the
+/// cell showed when that is exact (`0.5`, `1E+20`), else every digit needed
+/// (`0.30000000000000004` for `=0.1+0.2`), as Excel keeps the full double.
+pub(super) fn exact_number(n: f64) -> String {
+    use crate::formula::value::{general_format, parse_number};
+    let shown = general_format(n);
+    if parse_number(&shown) == Some(n) {
+        return shown;
+    }
+    let plain = format!("{n}");
+    if plain.len() > 21 {
+        format!("{n:e}")
+    } else {
+        plain
     }
 }
 

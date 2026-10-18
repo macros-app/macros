@@ -178,6 +178,22 @@ pub(super) struct YankState {
     /// Cursor and anchor before the paste.
     pub cursor: Pos,
     pub anchor: Option<Pos>,
+    /// How it pasted (`M-y` pastes the older kill the same way).
+    pub mode: PasteMode,
+}
+
+/// What a paste takes from a grid copy (Excel's Paste Special).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum PasteMode {
+    /// Formulas (references moved by the paste offset) and values.
+    #[default]
+    All,
+    /// The copied cells' results as plain values; never a formula.
+    Values,
+    /// Only the copied cells' hand-set formatting.
+    Formats,
+    /// Rows become columns; formulas move with their cells.
+    Transpose,
 }
 
 /// One changed cell: `(row, col, old, new)`.
@@ -995,6 +1011,23 @@ impl GridDoc {
         n
     }
 
+    /// Give each of `cells` its own formatting, as one undo step. Returns
+    /// how many cells changed.
+    pub(super) fn set_formats(&mut self, cells: impl IntoIterator<Item = (Pos, CellFmt)>) -> usize {
+        let mut changed = Vec::new();
+        for ((r, c), after) in cells {
+            let before = self.formats.set(r, c, after);
+            if after != before {
+                changed.push(((r, c), before, after));
+            }
+        }
+        let n = changed.len();
+        if n > 0 {
+            self.record(Hist::Format(changed));
+        }
+        n
+    }
+
     /// Depth of the grid's undo history.
     pub(super) fn hist_len(&self) -> usize {
         self.history.len()
@@ -1606,16 +1639,16 @@ impl GridDoc {
                 }));
             }
             // The editor's (see `Editor::grid_command`).
-            EditPopup | Cut | Yank | Paste | YankPop | Goto | SearchForward | SearchBackward
-            | SearchNext | SearchPrevious | ViewAsText | ExchangeAnchor | Recenter
-            | JumpToColumn | KillToRowEnd | Upcase | Downcase | Capitalize | CopyDown
-            | CompleteCell | MoveLine(_) | HideColumn | ShowColumns | NarrowToSelection
-            | Filter | FilterByValue | Widen | CopyAsOrg | CopyAsMarkdown | CopyAsJson
-            | ToggleBold | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral
-            | FormatNumber | FormatCurrency | FormatPercent | FormatDate | FormatText
-            | IncreaseDecimals | DecreaseDecimals | TracePrecedents | TraceDependents
-            | GridMode | ToggleView | CellPopupCommit | CellPopupAbort | OrgTableToGrid
-            | Recalculate | SelectMatching => {}
+            EditPopup | Cut | Yank | Paste | PasteValues | PasteFormats | PasteTranspose
+            | FormulasToValues | YankPop | Goto | SearchForward | SearchBackward | SearchNext
+            | SearchPrevious | ViewAsText | ExchangeAnchor | Recenter | JumpToColumn
+            | KillToRowEnd | Upcase | Downcase | Capitalize | CopyDown | CompleteCell
+            | MoveLine(_) | HideColumn | ShowColumns | NarrowToSelection | Filter
+            | FilterByValue | Widen | CopyAsOrg | CopyAsMarkdown | CopyAsJson | ToggleBold
+            | CycleTextColor | CycleFillColor | ClearFormat | FormatGeneral | FormatNumber
+            | FormatCurrency | FormatPercent | FormatDate | FormatText | IncreaseDecimals
+            | DecreaseDecimals | TracePrecedents | TraceDependents | GridMode | ToggleView
+            | CellPopupCommit | CellPopupAbort | OrgTableToGrid | Recalculate | SelectMatching => {}
             // [`Self::apply_cursors`]'s.
             AddCursorBelow
             | AddCursorAbove
@@ -3066,7 +3099,10 @@ impl Editor {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
-        if !matches!(cmd, Paste | YankPop) {
+        if !matches!(
+            cmd,
+            Paste | PasteValues | PasteFormats | PasteTranspose | YankPop
+        ) {
             g.yank = None;
         }
         if !matches!(cmd, TracePrecedents | TraceDependents) {
@@ -3118,7 +3154,11 @@ impl Editor {
                 }
                 return self.grid_after(cx);
             }
-            Paste => return self.grid_paste(cx),
+            Paste => return self.grid_paste(PasteMode::All, cx),
+            PasteValues => return self.grid_paste(PasteMode::Values, cx),
+            PasteFormats => return self.grid_paste(PasteMode::Formats, cx),
+            PasteTranspose => return self.grid_paste(PasteMode::Transpose, cx),
+            FormulasToValues => return self.grid_formulas_to_values(cx),
             YankPop => return self.grid_yank_pop(cx),
             SortAscending | SortDescending if flag => {
                 // `C-u C-c C-s`: ask how to compare (org-table's `C-c ^`).
@@ -3486,11 +3526,7 @@ impl Editor {
         };
         // The clipboard gets values (what other apps expect); remember the
         // formulas so a paste back into a grid pastes those instead.
-        let cells = g.copied_formulas(&sel);
-        self.grid_ui.formula_clip = (!cells.is_empty()).then(|| super::grid_formula::FormulaClip {
-            text: text.clone(),
-            cells,
-        });
+        self.grid_ui.formula_clip = g.grid_clip(&sel, &text);
         self.set_clipboard(&text, cx);
         self.kill_append = false;
         self.push_kill(text);
@@ -3504,80 +3540,119 @@ impl Editor {
         );
     }
 
-    pub(super) fn grid_paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    /// Paste `text` (the newest kill, or one `M-y` reached) over the
+    /// selection. A grid copy's own text pastes what `mode` takes from it.
+    pub(super) fn grid_paste_text(&mut self, text: &str, mode: PasteMode, cx: &mut Context<Self>) {
         let Some(g) = self.active.grid.as_deref_mut() else {
             return;
         };
-        // (A copied formula whose result is "" copies as empty text.)
-        let ours = self
+        let clip = self
             .grid_ui
             .formula_clip
             .as_ref()
-            .is_some_and(|c| c.text == text);
-        if text.is_empty() && !ours {
+            .filter(|c| c.text == text);
+        // (A copied formula whose result is "" copies as empty text.)
+        if text.is_empty() && clip.is_none() {
             self.echo("Clipboard is empty", cx);
             return;
         }
+        if mode == PasteMode::Formats && clip.is_none() {
+            self.echo("No formats to paste: the kill isn't a grid copy", cx);
+            return;
+        }
         let block = view::parse_clipboard_block(text, g.wb.dialect().delimiter);
-        let block = if block.is_empty() {
+        let mut block = if block.is_empty() {
             vec![vec![String::new()]]
         } else {
             block
         };
+        let transpose = mode == PasteMode::Transpose;
+        if transpose {
+            let w = block.iter().map(Vec::len).max().unwrap_or(0);
+            block = (0..w)
+                .map(|c| {
+                    block
+                        .iter()
+                        .map(|row| row.get(c).cloned().unwrap_or_default())
+                        .collect()
+                })
+                .collect();
+        }
+        // A block position of the copy, where it lands in `block`.
+        let place = |bi: usize, bc: usize| if transpose { (bc, bi) } else { (bi, bc) };
         let sel = g.selection();
         let single = block.len() == 1 && block[0].len() == 1;
-        let mut edits = Vec::new();
+        // `(row, col, block row, block col)` of every cell the paste writes.
+        let mut targets = Vec::new();
         if single && !sel.is_single() {
             // One value pasted over a range fills the range (Excel) — the
             // cells shown, not the rows a filter hides.
-            let v = block[0][0].clone();
             let rows = g.used().0;
             for r in sel.r0..=sel.r1 {
                 if r < rows && !g.row_shown(r) {
                     continue;
                 }
                 for c in (sel.c0..=sel.c1).filter(|&c| g.view.cols.shown(c)) {
-                    edits.push((r, c, v.clone()));
+                    targets.push((r, c, 0, 0));
                 }
             }
         } else {
             for (dr, row) in block.iter().enumerate() {
-                for (dc, v) in row.iter().enumerate() {
-                    edits.push((sel.r0 + dr, sel.c0 + dc, v.clone()));
+                for dc in 0..row.len() {
+                    targets.push((sel.r0 + dr, sel.c0 + dc, dr, dc));
                 }
             }
         }
-        // A grid copy of formulas pastes the formulas, references moved by
-        // the paste offset (Excel's paste); other text pastes as typed.
-        if let Some(clip) = self
-            .grid_ui
-            .formula_clip
-            .as_ref()
-            .filter(|c| c.text == text)
-        {
-            if single && let Some((_, _, sr, sc, f)) = clip.cells.first() {
-                for e in &mut edits {
-                    e.2 = super::grid_formula::translated(
-                        f,
-                        e.0 as isize - *sr as isize,
-                        e.1 as isize - *sc as isize,
-                    );
-                }
-            } else {
-                for (bi, bc, sr, sc, f) in &clip.cells {
-                    let (dr, dc) = (sel.r0 + bi, sel.c0 + bc);
-                    if let Some(e) = edits.iter_mut().find(|e| e.0 == dr && e.1 == dc) {
-                        e.2 = super::grid_formula::translated(
+        let n = targets.len();
+        if mode == PasteMode::Formats {
+            let mut fmts = HashMap::new();
+            for (bi, bc, f) in clip.map(|c| c.formats.as_slice()).unwrap_or_default() {
+                fmts.insert(place(*bi, *bc), *f);
+            }
+            g.set_formats(
+                targets.iter().map(|&(r, c, bi, bc)| {
+                    ((r, c), fmts.get(&(bi, bc)).copied().unwrap_or_default())
+                }),
+            );
+        } else {
+            let mut edits: Vec<(usize, usize, String)> = targets
+                .iter()
+                .map(|&(r, c, bi, bc)| {
+                    let v = &block[bi][bc];
+                    // Values never become formulas: `=…` text stays text.
+                    let v = if mode == PasteMode::Values && v.len() > 1 && v.starts_with('=') {
+                        format!("'{v}")
+                    } else {
+                        v.clone()
+                    };
+                    (r, c, v)
+                })
+                .collect();
+            // A grid copy pastes its formulas, references moved by the paste
+            // offset (Excel's paste) — or, as values, the exact results; other
+            // text pastes as typed.
+            if let Some(clip) = clip {
+                let at: HashMap<Pos, usize> = (clip.cells.iter().enumerate())
+                    .map(|(i, (bi, bc, ..))| (place(*bi, *bc), i))
+                    .collect();
+                for (&(_, _, bi, bc), e) in targets.iter().zip(edits.iter_mut()) {
+                    let Some(&i) = at.get(&(bi, bc)) else {
+                        continue;
+                    };
+                    let (_, _, sr, sc, f) = &clip.cells[i];
+                    e.2 = if mode == PasteMode::Values {
+                        clip.values[i].clone()
+                    } else {
+                        super::grid_formula::translated(
                             f,
-                            dr as isize - *sr as isize,
-                            dc as isize - *sc as isize,
-                        );
-                    }
+                            e.0 as isize - *sr as isize,
+                            e.1 as isize - *sc as isize,
+                        )
+                    };
                 }
             }
+            g.set_cells_tracked(&edits);
         }
-        let n = edits.len();
-        g.set_cells_tracked(&edits);
         if !single {
             let h = block.len();
             let w = block.iter().map(Vec::len).max().unwrap_or(1);
@@ -3586,8 +3661,14 @@ impl Editor {
             g.view.sel_kind = SelKind::Cells;
             g.sticky_sel = false;
         }
-        g.last_repeat = Some(RepeatOp::Cmd(GridCmd::Paste));
-        self.echo(format!("Pasted {n} cells"), cx);
+        let (cmd, what) = match mode {
+            PasteMode::All => (GridCmd::Paste, "Pasted"),
+            PasteMode::Values => (GridCmd::PasteValues, "Pasted values of"),
+            PasteMode::Formats => (GridCmd::PasteFormats, "Pasted formats of"),
+            PasteMode::Transpose => (GridCmd::PasteTranspose, "Pasted transposed"),
+        };
+        g.last_repeat = Some(RepeatOp::Cmd(cmd));
+        self.echo(format!("{what} {n} cells"), cx);
         self.grid_after(cx);
     }
 

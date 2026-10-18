@@ -159,6 +159,13 @@ pub enum GridCmd {
     FillSelection,
     /// `M-y` after a paste: replace it with the previous kill.
     YankPop,
+    /// Paste Special: the newest kill's values only (a grid copy's formula
+    /// results, never formulas), its formatting only, or transposed.
+    PasteValues,
+    PasteFormats,
+    PasteTranspose,
+    /// Replace the selected formulas with their current results.
+    FormulasToValues,
     /// Complete the cell's value from the column's choices or its values.
     CompleteCell,
     /// `M-arrows`: move the cursor's row (up/down) or column (left/right),
@@ -335,6 +342,10 @@ pub const GRID_COMMANDS: &[(&str, GridCmd)] = {
         ("grid-fill-right", FillRight),
         ("grid-fill-selection", FillSelection),
         ("grid-yank-pop", YankPop),
+        ("grid-paste-values", PasteValues),
+        ("grid-paste-formats", PasteFormats),
+        ("grid-paste-transpose", PasteTranspose),
+        ("grid-formulas-to-values", FormulasToValues),
         ("grid-complete-cell", CompleteCell),
         ("grid-move-row-up", MoveLine(Up)),
         ("grid-move-row-down", MoveLine(Down)),
@@ -408,6 +419,10 @@ impl GridCmd {
                 | FillRight
                 | FillSelection
                 | YankPop
+                | PasteValues
+                | PasteFormats
+                | PasteTranspose
+                | FormulasToValues
                 | MoveLine(_)
                 | ToggleBold
                 | CycleTextColor

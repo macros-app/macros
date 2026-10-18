@@ -130,6 +130,9 @@ Replacing works on the selection, or the whole sheet when nothing is selected (u
 | <kbd>C-c d</kbd> / <kbd>C-c r</kbd> | <kbd>M-d</kbd> / <kbd>M-r</kbd> | Fill the selection down / right from its first row / column |
 | <kbd>C-RET</kbd> | <kbd>C-RET</kbd> | Fill the selection with the cursor cell |
 | <kbd>C-w</kbd> <kbd>M-w</kbd> <kbd>C-y</kbd> <kbd>M-y</kbd> | <kbd>y</kbd> <kbd>p</kbd> | Cut / copy / paste through the kill ring |
+| <kbd>C-c C-y</kbd> | <kbd>zp</kbd> | Paste values only: the copied formulas' results, not the formulas |
+| <kbd>C-c C-v</kbd> | <kbd>zP</kbd> | Paste special: values, formulas, formats, or transposed |
+| <kbd>C-c C-x v</kbd> | <kbd>zv</kbd> | Turn the selected formulas into their current values |
 | <kbd>C-/</kbd> / <kbd>C-?</kbd> | <kbd>u</kbd> / <kbd>C-r</kbd>, <kbd>.</kbd> | Undo / redo (every command is one step), repeat |
 
 ### Filling ranges
@@ -140,7 +143,7 @@ To put one entry in many cells, select them, type the value or formula, and pres
 
 All three skip rows hidden by a filter (and hidden columns), never write over the header row, and undo as one step.
 
-Copies go to the system clipboard as tab-separated values, so pasting into Excel, Numbers, or Google Sheets — or from them — just works. Copy a range out as a table with <kbd>C-c C-e o</kbd> (org), <kbd>C-c C-e m</kbd> (Markdown), or <kbd>C-c C-e j</kbd> (JSON).
+Copies go to the system clipboard as tab-separated values, so pasting into Excel, Numbers, or Google Sheets — or from them — just works. Pasted back into a grid, a copy brings its formulas; paste values (Excel's Paste Special › Values) brings their results instead, numbers exactly as computed and errors as their error value, and paste special can also take just the formatting or swap rows and columns. Every paste is one undo step, and <kbd>M-y</kbd> (<kbd>C-p</kbd> under evil) right after one swaps in an older kill, pasted the same way. Copy a range out as a table with <kbd>C-c C-e o</kbd> (org), <kbd>C-c C-e m</kbd> (Markdown), or <kbd>C-c C-e j</kbd> (JSON).
 
 ## Removing duplicates
 

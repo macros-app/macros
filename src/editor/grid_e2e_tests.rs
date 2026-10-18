@@ -3738,6 +3738,266 @@ fn replace_matches_a_formula_by_its_text(cx: &mut TestAppContext) {
     assert_eq!(source(&ed, cx, 1, 1), "=A3*2");
 }
 
+// ---- paste special ----------------------------------------------------------
+
+fn is_formula_cell(editor: &Entity<Editor>, cx: &mut TestAppContext, r: usize, c: usize) -> bool {
+    editor.read_with(cx, |e, _| {
+        e.active.grid.as_ref().unwrap().is_formula_at(r, c)
+    })
+}
+
+/// A sheet whose C2:C5 are formulas: a sum, an error, a sum that isn't
+/// exact in binary, and text that starts with `=`.
+fn formula_sheet(cx: &mut TestAppContext, evil: bool) -> (Entity<Editor>, PathBuf) {
+    let (ed, path) = setup(cx, "a,b,c\n1,2,\n3,0,\n0.1,0.2,\nx,y,\n", evil);
+    scheme(
+        &ed,
+        cx,
+        r#"(grid-set-cells (list (list 1 2 "=A2+B2") (list 2 2 "=A3/B3")
+                                 (list 3 2 "=A4+B4") (list 4 2 "=\"=\"&A5")))"#,
+    );
+    assert_eq!(
+        (
+            cell(&ed, cx, 1, 2),
+            cell(&ed, cx, 2, 2),
+            cell(&ed, cx, 3, 2)
+        ),
+        ("3".into(), "#DIV/0!".into(), "0.3".into())
+    );
+    (ed, path)
+}
+
+#[gpui::test]
+fn paste_values_pastes_results_exactly_as_one_undo_step(cx: &mut TestAppContext) {
+    let (ed, _) = formula_sheet(cx, false);
+    // Copy C2:C5, paste values at D2.
+    ed.update(cx, |e, cx| e.grid_goto_address("C2", cx));
+    keys(&ed, cx, "shift-down shift-down shift-down alt-w");
+    ed.update(cx, |e, cx| e.grid_goto_address("D2", cx));
+    keys(&ed, cx, "ctrl-c ctrl-y");
+    for r in 1..=4 {
+        assert!(!is_formula_cell(&ed, cx, r, 3), "D{} is a value", r + 1);
+    }
+    assert_eq!(source(&ed, cx, 1, 3), "3");
+    assert_eq!(
+        source(&ed, cx, 2, 3),
+        "#DIV/0!",
+        "an error pastes as itself"
+    );
+    assert_eq!(
+        source(&ed, cx, 3, 3),
+        "0.30000000000000004",
+        "the exact result, not the 15 digits shown"
+    );
+    assert_eq!(cell(&ed, cx, 4, 3), "=x", "`=` text stays text");
+    assert_eq!(source(&ed, cx, 4, 3), "'=x");
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("values"), "{}", e.status)
+    });
+    // The pasted values read back as what they were.
+    scheme(
+        &ed,
+        cx,
+        r#"(grid-set-cells (list (list 1 4 "=ISERROR(D3)") (list 2 4 "=D4=A4+B4")))"#,
+    );
+    assert_eq!(cell(&ed, cx, 1, 4), "TRUE", "the pasted error is an error");
+    assert_eq!(cell(&ed, cx, 2, 4), "TRUE", "the pasted number is exact");
+    // The source is untouched; one undo removes the E formulas, one more the
+    // whole paste.
+    assert!(is_formula_cell(&ed, cx, 1, 2));
+    keys(&ed, cx, "ctrl-/ ctrl-/");
+    for r in 1..=4 {
+        assert_eq!(cell(&ed, cx, r, 3), "", "D{} back to empty", r + 1);
+    }
+    // A plain paste of the same copy still pastes formulas.
+    ed.update(cx, |e, cx| e.grid_goto_address("D2", cx));
+    keys(&ed, cx, "ctrl-y");
+    assert_eq!(source(&ed, cx, 1, 3), "=B2+C2");
+}
+
+#[gpui::test]
+fn paste_values_with_the_kill_ring_and_outside_text(cx: &mut TestAppContext) {
+    let (ed, _) = formula_sheet(cx, false);
+    ed.update(cx, |e, cx| e.grid_goto_address("C2", cx));
+    keys(&ed, cx, "shift-down alt-w");
+    // Outside text joins the kill ring; as values, `=…` stays text.
+    clipboard(&ed, cx, "=1+1");
+    ed.update(cx, |e, cx| e.grid_goto_address("D2", cx));
+    keys(&ed, cx, "ctrl-c ctrl-y");
+    assert_eq!(cell(&ed, cx, 1, 3), "=1+1");
+    assert!(!is_formula_cell(&ed, cx, 1, 3));
+    // M-y swaps in the grid copy, still as values.
+    keys(&ed, cx, "alt-y");
+    assert_eq!(
+        (source(&ed, cx, 1, 3), source(&ed, cx, 2, 3)),
+        ("3".into(), "#DIV/0!".into())
+    );
+    assert!(!is_formula_cell(&ed, cx, 1, 3));
+    // One undo removes the yank-popped paste.
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(
+        (cell(&ed, cx, 1, 3), cell(&ed, cx, 2, 3)),
+        ("".into(), "".into())
+    );
+}
+
+#[gpui::test]
+fn paste_values_across_sheets(cx: &mut TestAppContext) {
+    let (ed, path) = setup(cx, NUMS, false);
+    let book = path.with_file_name("multi.xlsx");
+    std::fs::write(
+        &book,
+        include_bytes!("../xlsx/testdata/pkg/multi.xlsx").as_slice(),
+    )
+    .unwrap();
+    let b = book.clone();
+    ed.update(cx, |e, cx| {
+        e.open_grid(
+            "multi.xlsx".into(),
+            b.clone(),
+            std::fs::read(&b).unwrap(),
+            cx,
+        );
+    });
+    settle(&ed, cx);
+    // First!B1 reads Second; copy it and paste its value onto Third.
+    scheme(&ed, cx, r#"(grid-set-cell 0 1 "=Second!A1&\"!\"")"#);
+    assert_eq!(cell(&ed, cx, 0, 1), "two!");
+    ed.update(cx, |e, cx| e.grid_goto_address("B1", cx));
+    keys(&ed, cx, "alt-w");
+    scheme(&ed, cx, "(grid-open-sheet \"Third\")");
+    ed.update(cx, |e, cx| e.grid_goto_address("C3", cx));
+    keys(&ed, cx, "ctrl-c ctrl-y");
+    assert_eq!(source(&ed, cx, 2, 2), "two!");
+    assert!(!is_formula_cell(&ed, cx, 2, 2));
+    // Changing Second doesn't reach the pasted value.
+    scheme(&ed, cx, "(grid-open-sheet \"Second\")");
+    scheme(&ed, cx, "(grid-set-cell 0 0 \"deux\")");
+    scheme(&ed, cx, "(grid-open-sheet \"Third\")");
+    assert_eq!(cell(&ed, cx, 2, 2), "two!");
+}
+
+#[gpui::test]
+fn formulas_to_values_in_place(cx: &mut TestAppContext) {
+    let (ed, _) = formula_sheet(cx, true);
+    // Select A2:C4 (values and formulas): only the formulas change.
+    ed.update(cx, |e, cx| e.grid_goto_address("A2", cx));
+    keys(&ed, cx, "v j j l l z v");
+    assert_eq!(source(&ed, cx, 1, 2), "3");
+    assert_eq!(source(&ed, cx, 2, 2), "#DIV/0!");
+    assert_eq!(source(&ed, cx, 3, 2), "0.30000000000000004");
+    assert_eq!(source(&ed, cx, 1, 0), "1", "values untouched");
+    assert!(
+        is_formula_cell(&ed, cx, 4, 2),
+        "C5 was outside the selection"
+    );
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("Converted 3 formulas"), "{}", e.status)
+    });
+    // Frozen: the inputs no longer reach them.
+    scheme(&ed, cx, "(grid-set-cell 1 0 \"100\")");
+    assert_eq!(cell(&ed, cx, 1, 2), "3");
+    // One undo for the edit, one for the conversion.
+    keys(&ed, cx, "escape u u");
+    for r in 1..=3 {
+        assert!(is_formula_cell(&ed, cx, r, 2), "C{} a formula again", r + 1);
+    }
+    assert_eq!(cell(&ed, cx, 1, 2), "3");
+    // Nothing to convert.
+    ed.update(cx, |e, cx| e.grid_goto_address("A2", cx));
+    keys(&ed, cx, "z v");
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("No formulas"), "{}", e.status)
+    });
+}
+
+#[gpui::test]
+fn paste_special_picks_formats_and_transpose(cx: &mut TestAppContext) {
+    let (ed, _) = formula_sheet(cx, true);
+    // Bold A2, copy A2:B3, paste only its formats at D2 (picked by name).
+    scheme(&ed, cx, "(grid-set-cell-bold 1 0 #t)");
+    ed.update(cx, |e, cx| e.grid_goto_address("A2", cx));
+    keys(&ed, cx, "v j l y");
+    ed.update(cx, |e, cx| e.grid_goto_address("D2", cx));
+    keys(&ed, cx, "z shift-p");
+    submit(&ed, cx, "formats");
+    let bold = |ed: &Entity<Editor>, cx: &mut TestAppContext, r, c| {
+        ed.read_with(cx, |e, _| {
+            e.active.grid.as_ref().unwrap().formats.get(r, c).bold
+        })
+    };
+    assert!(bold(&ed, cx, 1, 3));
+    assert!(!bold(&ed, cx, 1, 4));
+    assert_eq!(cell(&ed, cx, 1, 3), "", "formats only");
+    keys(&ed, cx, "u");
+    assert!(!bold(&ed, cx, 1, 3), "one undo");
+    // Transposed: A2:B3 lands as D2:E3 with rows as columns.
+    ed.update(cx, |e, cx| e.grid_goto_address("D2", cx));
+    keys(&ed, cx, "z shift-p");
+    submit(&ed, cx, "transpose");
+    assert_eq!(
+        (
+            cell(&ed, cx, 1, 3),
+            cell(&ed, cx, 1, 4),
+            cell(&ed, cx, 2, 3),
+            cell(&ed, cx, 2, 4)
+        ),
+        ("1".into(), "3".into(), "2".into(), "0".into())
+    );
+    // And transposed formulas move with their cells: C2:C3 → D6:E6.
+    ed.update(cx, |e, cx| e.grid_goto_address("C2", cx));
+    keys(&ed, cx, "escape v j y");
+    ed.update(cx, |e, cx| e.grid_goto_address("D6", cx));
+    keys(&ed, cx, "z shift-p");
+    submit(&ed, cx, "transpose");
+    assert_eq!(source(&ed, cx, 5, 3), "=B6+C6");
+    assert_eq!(source(&ed, cx, 5, 4), "=C6/D6");
+}
+
+#[gpui::test]
+fn paste_values_and_formulas_to_values_keep_spills_whole(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, "a,b,c\n1,,\n2,,\n3,,\n", false);
+    scheme(&ed, cx, r#"(grid-set-cell 1 1 "=SEQUENCE(3,1,0.1,0.1)")"#);
+    assert_eq!(cell(&ed, cx, 3, 1), "0.3", "spilled, shown to 15 digits");
+    // Copy the spill range B2:B4, paste values at C2: every value, exact.
+    ed.update(cx, |e, cx| e.grid_goto_address("B2", cx));
+    keys(&ed, cx, "shift-down shift-down alt-w");
+    ed.update(cx, |e, cx| e.grid_goto_address("C2", cx));
+    keys(&ed, cx, "ctrl-c ctrl-y");
+    assert_eq!(
+        (
+            source(&ed, cx, 1, 2),
+            source(&ed, cx, 2, 2),
+            source(&ed, cx, 3, 2)
+        ),
+        ("0.1".into(), "0.2".into(), "0.30000000000000004".into())
+    );
+    // Spilled cells alone (no anchor) aren't converted: that would block it.
+    ed.update(cx, |e, cx| e.grid_goto_address("B3", cx));
+    keys(&ed, cx, "shift-down ctrl-c ctrl-x v");
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("No formulas"), "{}", e.status)
+    });
+    // With the anchor: the whole array becomes values, as one undo step.
+    ed.update(cx, |e, cx| e.grid_goto_address("B2", cx));
+    keys(&ed, cx, "shift-down shift-down ctrl-c ctrl-x v");
+    assert!(!is_formula_cell(&ed, cx, 1, 1));
+    assert_eq!(
+        (
+            source(&ed, cx, 1, 1),
+            source(&ed, cx, 2, 1),
+            source(&ed, cx, 3, 1)
+        ),
+        ("0.1".into(), "0.2".into(), "0.30000000000000004".into())
+    );
+    keys(&ed, cx, "ctrl-/");
+    assert!(is_formula_cell(&ed, cx, 1, 1));
+    assert_eq!(
+        (source(&ed, cx, 2, 1), cell(&ed, cx, 2, 1)),
+        ("".into(), "0.2".into())
+    );
+}
+
 #[gpui::test]
 fn frozen_columns_stay_pinned_while_the_thumb_drags(cx: &mut TestAppContext) {
     let (ed, vcx) = windowed(cx, &big_csv(300, 60));

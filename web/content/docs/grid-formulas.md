@@ -38,7 +38,7 @@ Type `=` in a grid cell and you're writing an Excel formula. The engine was writ
 | <kbd>C-c C-p</kbd> | <kbd>gp</kbd> | Jump to the next error |
 | <kbd>F9</kbd> | <kbd>F9</kbd> | Recalculate everything (for `NOW`, `RAND`, …) |
 
-The formula bar shows a cell's formula; the cell shows its result. Copying, pasting, filling down (<kbd>S-RET</kbd>, <kbd>C-c d</kbd>) or right (<kbd>C-c r</kbd>), filling a selection (<kbd>C-RET</kbd>), and sorting move formulas with their relative references adjusted, and inserting or deleting rows and columns updates every reference that crosses the edit — a reference to a deleted cell becomes `#REF!`. Copied ranges reach other apps as values, and paste back into a grid as formulas.
+The formula bar shows a cell's formula; the cell shows its result. Copying, pasting, filling down (<kbd>S-RET</kbd>, <kbd>C-c d</kbd>) or right (<kbd>C-c r</kbd>), filling a selection (<kbd>C-RET</kbd>), and sorting move formulas with their relative references adjusted, and inserting or deleting rows and columns updates every reference that crosses the edit — a reference to a deleted cell becomes `#REF!`. Copied ranges reach other apps as values, and paste back into a grid as formulas — or as their results with paste values (<kbd>C-c C-y</kbd>, <kbd>zp</kbd> under evil and helix). A pasted value is the exact number the formula computed (`=0.1+0.2` pastes `0.30000000000000004`, as Excel keeps it, though the formula showed `0.3`), `TRUE`/`FALSE`, or the error itself (`#DIV/0!`, which formulas reading it treat as that error). To freeze formulas where they are, select them and use <kbd>C-c C-x v</kbd> (<kbd>zv</kbd>): each becomes its current value, as one undo step.
 
 ## Dynamic arrays
 
