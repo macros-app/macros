@@ -205,6 +205,9 @@ enum Hist {
     },
     /// Columns hidden (`hidden`) or shown.
     Hide { cols: Vec<usize>, hidden: bool },
+    /// A sheet added, renamed, deleted or moved: replayed by the editor
+    /// across the workbook (see `grid_sheets.rs`).
+    Sheet(super::grid_sheets::SheetStep),
     /// Everything one Scheme command (or one native command made of
     /// several edits) did: undone last-first, as one step.
     Group(Vec<Hist>),
@@ -310,7 +313,7 @@ impl History {
 /// What an `.xlsx` grid carries besides its cells (all empty for CSV).
 #[derive(Debug, Default)]
 pub(super) struct XlsxState {
-    /// What the file holds that a rewrite would drop (charts, styles, more
+    /// What the file holds that a rewrite would drop (charts, styles, hidden
     /// sheets, …), and so saving over the file is refused.
     pub lossy: Vec<String>,
     /// The sheet names, in workbook order.
@@ -331,6 +334,12 @@ pub(super) struct XlsxState {
     /// `(data generation, formula evaluations)` when this sheet's values
     /// were last handed to the other open sheets.
     pub sheet_published: Option<(u64, u64)>,
+    /// The workbook this sheet belongs to, shared with its other sheets'
+    /// buffers, once it has several sheets (see `grid_sheets.rs`).
+    pub book: Option<super::grid_xlsx::Book>,
+    /// Sheet operations an undo or redo just replayed here, for the editor
+    /// to carry out across the workbook (`true`: undone).
+    pub sheet_replays: Vec<(super::grid_sheets::SheetStep, bool)>,
 }
 
 /// A grid's state against the file on disk.
@@ -703,7 +712,32 @@ impl GridDoc {
     }
 
     pub fn modified(&self) -> bool {
-        self.wb.is_modified() || self.save.failed || self.formats != self.save.formats
+        self.wb.is_modified()
+            || self.save.failed
+            || self.formats != self.save.formats
+            || self
+                .xlsx
+                .book
+                .as_ref()
+                .is_some_and(|b| b.borrow().structure_modified())
+    }
+
+    /// Record a sheet operation as an undo step (with the rest of a batch).
+    pub(super) fn record_sheet_step(&mut self, step: super::grid_sheets::SheetStep) {
+        self.record(Hist::Sheet(step));
+    }
+
+    /// Hash of the file as last read or written.
+    pub(super) fn disk_hash(&self) -> u64 {
+        self.save.disk_hash
+    }
+
+    /// The file was just written with bytes hashing to `hash` (a workbook
+    /// saved from another of its sheets' buffers): record the saved point.
+    pub(super) fn saved_as(&mut self, hash: u64) {
+        self.mark_saved();
+        self.save.failed = false;
+        self.save.disk_hash = hash;
     }
 
     /// Record the data and the formatting as saved.
@@ -891,6 +925,10 @@ impl GridDoc {
                     self.view.cols.set_hidden(c, *hidden != undo);
                 }
                 (None, true)
+            }
+            Hist::Sheet(step) => {
+                self.xlsx.sheet_replays.push((step.clone(), undo));
+                (None, false)
             }
             Hist::Group(entries) => {
                 let (mut pos, mut layout) = (None, false);
@@ -2043,8 +2081,12 @@ impl Editor {
         if self.switch_to_visiting(&super::buffers::file_identity(&path), cx) {
             return;
         }
-        let name = self.unique_buffer_name(&name, &path);
         let ext = ext_of(&path);
+        // Its sheets are open in buffers of their own: join that workbook.
+        if ext.as_deref() == Some("xlsx") && self.grid_open_live_book(&path, cx) {
+            return;
+        }
+        let name = self.unique_buffer_name(&name, &path);
         let hash = bytes_hash(&bytes);
         let total = bytes.len();
         let mut xlsx_lossy = Vec::new();
@@ -2052,9 +2094,17 @@ impl Editor {
         let mut other_sheets = HashMap::new();
         let mut xlsx_text = Default::default();
         let mut xlsx_formats = Vec::new();
+        let mut book = None;
         let (wb, background) = if ext.as_deref() == Some("xlsx") {
             match super::grid_xlsx::load(&bytes, 0, &self.grid_fn_names()) {
                 Ok(l) => {
+                    if l.sheets.len() > 1 {
+                        book = Some(super::grid_xlsx::BookStore::new(
+                            l.sheets.clone(),
+                            l.data,
+                            Some(path.clone()),
+                        ));
+                    }
                     xlsx_lossy = l.lossy;
                     xlsx_sheets = l.sheets;
                     other_sheets = l.others;
@@ -2084,6 +2134,7 @@ impl Editor {
         grid.xlsx.sheets = xlsx_sheets;
         grid.xlsx.other_sheets = other_sheets;
         grid.xlsx.text = xlsx_text;
+        grid.xlsx.book = book;
         for ((r, c), f) in xlsx_formats {
             grid.formats.set(r, c, f);
         }
@@ -2367,6 +2418,8 @@ impl Editor {
     /// `modified` flag (mode line `**`, kill/quit prompts), the mode line's
     /// range summary, and — when the formula bar is hidden — the echo area.
     pub(super) fn grid_after(&mut self, cx: &mut Context<Self>) {
+        // An undo or redo of a sheet operation: carry it out workbook-wide.
+        self.grid_sheet_replays(cx);
         if self
             .active
             .grid
@@ -2526,6 +2579,10 @@ impl Editor {
         use GridOp::*;
         let op = match op {
             OpenSheet(name) => return self.grid_open_sheet(&name, cx),
+            AddSheet(name) => return self.grid_add_sheet(&name, cx),
+            RenameSheet { from, to } => return self.grid_rename_sheet(&from, &to, cx),
+            DeleteSheet(name) => return self.grid_delete_sheet(&name, cx),
+            MoveSheet(by) => return self.grid_move_sheet(by, cx),
             NumberFormat(code) => return self.grid_format(GridCmd::FormatGeneral, Some(&code), cx),
             op => op,
         };
@@ -2770,7 +2827,12 @@ impl Editor {
                 ));
             }
             CellFormat { .. } => error = Some("grid: invalid row/column".into()),
-            OpenSheet(_) | NumberFormat(_) => unreachable!("handled above"),
+            OpenSheet(_)
+            | AddSheet(_)
+            | RenameSheet { .. }
+            | DeleteSheet(_)
+            | MoveSheet(_)
+            | NumberFormat(_) => unreachable!("handled above"),
             ClearCellFormats => {
                 let all: Vec<(usize, usize)> = g.formats.positions().collect();
                 g.format_cells(all, |_| CellFmt::default());
@@ -3534,6 +3596,13 @@ impl Editor {
     /// `C-x C-s` on a grid: commit any open edit, serialize, write atomically.
     pub(super) fn grid_save(&mut self, cx: &mut Context<Self>) {
         self.grid_commit_pending(cx);
+        // A sheet of a workbook with several sheets saves them all.
+        if let Some(book) = self.active_book()
+            && book.borrow().saves_whole(self.active.path.is_some())
+        {
+            self.grid_save_book(&book, cx);
+            return;
+        }
         let Some(path) = self.active.path.clone() else {
             self.echo("Buffer is not visiting a file", cx);
             return;
@@ -3708,6 +3777,7 @@ impl Editor {
             None => &mut self.active,
             Some(i) => &mut self.inactive[i],
         };
+        let workbook = doc.path.clone();
         let Some(g) = doc.grid.as_deref_mut() else {
             return Ok(());
         };
@@ -3719,6 +3789,25 @@ impl Editor {
         let mut formats = Vec::new();
         match parsed {
             Parsed::Xlsx(l) => {
+                // The workbook as the file has it now, for every sheet.
+                match &g.xlsx.book {
+                    Some(book) => {
+                        let fresh = super::grid_xlsx::BookStore::new(
+                            l.sheets.clone(),
+                            l.data,
+                            book.borrow().path.clone(),
+                        );
+                        book.swap(&fresh);
+                    }
+                    None if l.sheets.len() > 1 => {
+                        g.xlsx.book = Some(super::grid_xlsx::BookStore::new(
+                            l.sheets.clone(),
+                            l.data,
+                            workbook.or_else(|| g.xlsx.source.clone()),
+                        ));
+                    }
+                    None => {}
+                }
                 g.wb = l.wb;
                 g.xlsx.lossy = l.lossy;
                 g.xlsx.sheets = l.sheets;

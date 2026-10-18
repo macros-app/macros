@@ -281,6 +281,39 @@ pub fn remap(expr: &mut Expr, sheet: &str, axis: Axis, map: &dyn Fn(usize) -> us
     changed
 }
 
+/// Sheet `from` was renamed `to`: every reference naming it (in any case)
+/// names `to` instead. Unqualified references are left alone.
+pub fn rename_sheet(expr: &mut Expr, from: &str, to: &str) -> bool {
+    let mut changed = false;
+    expr.for_each_ref_mut(&mut |e| {
+        if let Expr::Ref(r) = e
+            && r.sheet
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(from))
+        {
+            r.sheet = Some(to.into());
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Sheet `name` was deleted: every reference naming it becomes `#REF!`.
+pub fn delete_sheet(expr: &mut Expr, name: &str) -> bool {
+    let mut changed = false;
+    expr.for_each_ref_mut(&mut |e| {
+        if let Expr::Ref(r) = e
+            && r.sheet
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(name))
+        {
+            *e = Expr::Error(ErrorKind::Ref);
+            changed = true;
+        }
+    });
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +430,30 @@ mod tests {
         assert_eq!(
             run("=SUM(A5:A6)", |e| delete(e, "Sheet1", Axis::Rows, 4, 2)),
             "=SUM(#REF!)"
+        );
+    }
+
+    #[test]
+    fn renaming_a_sheet_rewrites_its_references() {
+        assert_eq!(
+            run("=costs!A1+Costs!B2:C3+A1+Other!A1", |e| rename_sheet(
+                e, "Costs", "Q1 Sales"
+            )),
+            "='Q1 Sales'!A1+'Q1 Sales'!B2:C3+A1+Other!A1"
+        );
+        assert_eq!(
+            run("=SUM('Q1 Sales'!A:A)", |e| rename_sheet(
+                e, "q1 sales", "Costs"
+            )),
+            "=SUM(Costs!A:A)"
+        );
+    }
+
+    #[test]
+    fn deleting_a_sheet_makes_its_references_errors() {
+        assert_eq!(
+            run("=Costs!A1+SUM(costs!B:B)+A1", |e| delete_sheet(e, "Costs")),
+            "=#REF!+SUM(#REF!)+A1"
         );
     }
 }
