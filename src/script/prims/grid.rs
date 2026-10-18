@@ -535,6 +535,74 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
             },
         );
     }
+    {
+        // `(grid-replace-matches from to mode (r0 c0 r1 c1))` → the cells in
+        // the range (rows a filter hides skipped) that replacing would
+        // change, as `((row col old new) …)` in reading order — or an error
+        // message string (bad regexp, empty FROM). `mode`: 'literal 'regexp
+        // 'raw 'raw-first (see `crate::grid::replace::Mode`). A formula
+        // matches by its source text. Changes nothing: the replace commands
+        // in grid.scm write the result with grid-set-cells.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "grid-replace-matches",
+            move |from: String, to: String, mode: SteelVal, range: SteelVal| -> SteelVal {
+                use crate::grid::replace::{Mode, Replacer};
+                let err = |m: String| SteelVal::StringV(m.into());
+                let snap = shared.load();
+                let cells = match cells_of(&snap) {
+                    Ok(c) => c,
+                    Err(e) => return err(e),
+                };
+                let Some(mode) = Mode::parse(&steel_name(&mode)) else {
+                    return err(
+                        "grid-replace-matches: mode must be literal, regexp, raw or raw-first"
+                            .into(),
+                    );
+                };
+                let bounds: Vec<usize> = steel_list(&range)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(steel_index)
+                    .collect();
+                let [r0, c0, r1, c1] = bounds[..] else {
+                    return err("grid-replace-matches: range must be (r0 c0 r1 c1)".into());
+                };
+                let replacer = match Replacer::new(&from, &to, mode) {
+                    Ok(r) => r,
+                    Err(e) => return err(e),
+                };
+                let filter = snap.grid.as_ref().and_then(|g| g.filter.clone());
+                let shown = |r: usize| match &filter {
+                    Some(o) => r >= o.end || o.shown.binary_search(&r).is_ok(),
+                    None => true,
+                };
+                if cells.rows() == 0 || cells.cols() == 0 {
+                    return SteelVal::ListV(Vec::new().into());
+                }
+                let r1 = r1.min(cells.rows() - 1);
+                let c1 = c1.min(cells.cols() - 1);
+                let mut hits = Vec::new();
+                for r in (r0..=r1).filter(|&r| shown(r)) {
+                    for c in c0..=c1 {
+                        let old = cells.cell(r, c);
+                        if let Some(new) = replacer.apply(&old) {
+                            hits.push(SteelVal::ListV(
+                                vec![
+                                    SteelVal::IntV(r as isize),
+                                    SteelVal::IntV(c as isize),
+                                    SteelVal::StringV(old.as_ref().into()),
+                                    SteelVal::StringV(new.into()),
+                                ]
+                                .into(),
+                            ));
+                        }
+                    }
+                }
+                SteelVal::ListV(hits.into())
+            },
+        );
+    }
     // --- editor-wide options ----------------------------------------------
     let option = |queue: &Queue| {
         let q = queue.clone();

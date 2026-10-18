@@ -958,7 +958,7 @@ fn colon_opens_ex_and_ex_commands_understand_the_grid(cx: &mut TestAppContext) {
     ed.read_with(cx, |e, _| {
         assert_eq!(e.active.grid.as_ref().unwrap().bar_text().0, "A2:B3");
     });
-    ex(&ed, cx, "%s/apple/x/");
+    ex(&ed, cx, "g/apple/d");
     ed.read_with(cx, |e, _| {
         assert!(e.status.contains("not grid cells"), "{}", e.status)
     });
@@ -2461,4 +2461,182 @@ fn helix_grid_format_keys(cx: &mut TestAppContext) {
     assert_eq!(shown(&ed, cx, 1, 1), Some(("123450.0%".to_string(), true)));
     keys(&ed, cx, "f ~");
     assert_eq!(shown(&ed, cx, 1, 1), None);
+}
+
+// ---- find & replace ----------------------------------------------------------
+
+const CITIES: &str = "name,city,code\nann,Paris,a1\nbob,paris,b2\ncat,Rome,c3\ndan,PARIS,d4\n";
+
+/// Type `input` into the open minibuffer and submit it.
+fn minibuffer(editor: &Entity<Editor>, cx: &mut TestAppContext, input: &str) {
+    editor.update(cx, |e, cx| {
+        e.type_text(None, input, cx);
+        e.mb_submit(cx);
+    });
+    settle(editor, cx);
+}
+
+fn column(editor: &Entity<Editor>, cx: &mut TestAppContext, c: usize) -> Vec<String> {
+    (0..5).map(|r| cell(editor, cx, r, c)).collect()
+}
+
+#[gpui::test]
+fn replace_all_literal_copies_case_and_undoes_in_one_step(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, CITIES, false);
+    keys(&ed, cx, "alt-%");
+    assert!(
+        ed.read_with(cx, |e, _| e.minibuffer.is_some()),
+        "M-% prompts in a grid"
+    );
+    minibuffer(&ed, cx, "paris");
+    minibuffer(&ed, cx, "lyon");
+    // `!` at the first cell: every remaining one, the whole sheet (nothing
+    // is selected), case copied from each match.
+    keys(&ed, cx, "!");
+    assert_eq!(column(&ed, cx, 1), ["city", "Lyon", "lyon", "Rome", "LYON"]);
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("Replaced 3 cells"), "{}", e.status);
+        assert!(e.read_key_pending.is_none(), "the session ended");
+    });
+    keys(&ed, cx, "ctrl-/");
+    assert_eq!(
+        column(&ed, cx, 1),
+        ["city", "Paris", "paris", "Rome", "PARIS"]
+    );
+}
+
+#[gpui::test]
+fn query_replace_asks_per_cell_and_the_session_is_one_undo_step(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, CITIES, true);
+    // An earlier edit, its own undo step.
+    scheme(&ed, cx, "(grid-set-cell 3 0 \"CAT\")");
+    scheme(&ed, cx, "(grid-query-replace)");
+    minibuffer(&ed, cx, "paris");
+    minibuffer(&ed, cx, "lyon");
+    assert_eq!(cursor(&ed, cx), (1, 1), "the first matching cell");
+    keys(&ed, cx, "y");
+    assert_eq!(cell(&ed, cx, 1, 1), "Lyon", "replaced as you go");
+    assert_eq!(cursor(&ed, cx), (2, 1));
+    keys(&ed, cx, "n y");
+    assert_eq!(
+        column(&ed, cx, 1),
+        ["city", "Lyon", "paris", "Rome", "LYON"]
+    );
+    ed.read_with(cx, |e, _| {
+        assert!(e.read_key_pending.is_none(), "past the last cell: done");
+        assert!(e.status.contains("Replaced 2 cells"), "{}", e.status);
+    });
+    keys(&ed, cx, "u");
+    assert_eq!(
+        column(&ed, cx, 1),
+        ["city", "Paris", "paris", "Rome", "PARIS"]
+    );
+    assert_eq!(cell(&ed, cx, 3, 0), "CAT", "one u undid only the session");
+    keys(&ed, cx, "u");
+    assert_eq!(cell(&ed, cx, 3, 0), "cat");
+    // `q` stops early, keeping what was replaced; an empty FROM reuses the
+    // last pair.
+    scheme(&ed, cx, "(grid-query-replace)");
+    minibuffer(&ed, cx, "");
+    keys(&ed, cx, "y q");
+    assert_eq!(
+        column(&ed, cx, 1),
+        ["city", "Lyon", "paris", "Rome", "PARIS"]
+    );
+    ed.read_with(cx, |e, _| assert!(e.read_key_pending.is_none()));
+}
+
+#[gpui::test]
+fn replace_regexp_expands_capture_groups(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, CITIES, true);
+    scheme(&ed, cx, "(grid-replace-regexp)");
+    minibuffer(&ed, cx, r"^([a-z])(\d)$");
+    minibuffer(&ed, cx, r"\2-\1 (\&)");
+    assert_eq!(
+        column(&ed, cx, 2),
+        ["code", "1-a (a1)", "2-b (b2)", "3-c (c3)", "4-d (d4)"]
+    );
+    // A bad regexp changes nothing and says why.
+    scheme(&ed, cx, "(grid-replace-all \"(\" \"x\" 'regexp 'sheet)");
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("Invalid regexp"), "{}", e.status)
+    });
+    assert_eq!(cell(&ed, cx, 1, 2), "1-a (a1)");
+    keys(&ed, cx, "u");
+    assert_eq!(column(&ed, cx, 2), ["code", "a1", "b2", "c3", "d4"]);
+}
+
+#[gpui::test]
+fn replace_stays_inside_the_selection(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, CITIES, true);
+    // B2:C3 selected: the cities and codes of ann and bob only.
+    scheme(&ed, cx, "(grid-select-range 1 1 2 2)");
+    scheme(&ed, cx, "(grid-replace-all \"a\" \"_\" 'literal 'auto)");
+    assert_eq!(cell(&ed, cx, 1, 1), "P_ris");
+    assert_eq!(cell(&ed, cx, 1, 2), "_1");
+    assert_eq!(cell(&ed, cx, 2, 1), "p_ris");
+    assert_eq!(cell(&ed, cx, 1, 0), "ann", "column A is outside");
+    assert_eq!(cell(&ed, cx, 4, 1), "PARIS", "row 5 is outside");
+    // `:s` works on the selection too, `:%s` on the whole sheet.
+    let ex = |ed: &Entity<Editor>, cx: &mut TestAppContext, line: &str| {
+        ed.update(cx, |e, cx| e.run_ex_command(line, cx));
+        settle(ed, cx);
+    };
+    scheme(&ed, cx, "(grid-select-range 3 0 4 0)");
+    ex(&ed, cx, r"s/(\w)$/[\1]/");
+    assert_eq!(cell(&ed, cx, 3, 0), "ca[t]");
+    assert_eq!(cell(&ed, cx, 4, 0), "da[n]");
+    assert_eq!(cell(&ed, cx, 1, 0), "ann");
+    ex(&ed, cx, "%s/n/N/g");
+    assert_eq!(cell(&ed, cx, 0, 0), "Name");
+    assert_eq!(cell(&ed, cx, 1, 0), "aNN", "g: every match in the cell");
+    ex(&ed, cx, "%s/r/R/");
+    assert_eq!(
+        cell(&ed, cx, 2, 1),
+        "p_Ris",
+        "no g: the first match per cell"
+    );
+    assert_eq!(cell(&ed, cx, 3, 1), "Rome", "no i: case-sensitive");
+    // `c` asks, like M-%.
+    ex(&ed, cx, "%s/ome/OME/c");
+    ed.read_with(cx, |e, _| assert!(e.read_key_pending.is_some()));
+    keys(&ed, cx, "y");
+    assert_eq!(cell(&ed, cx, 3, 1), "ROME");
+    // A line range is refused.
+    ex(&ed, cx, "1,2s/a/b/");
+    ed.read_with(cx, |e, _| {
+        assert!(e.status.contains("no line range"), "{}", e.status)
+    });
+}
+
+#[gpui::test]
+fn replace_skips_rows_a_filter_hides(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, CITIES, true);
+    scheme(
+        &ed,
+        cx,
+        "(grid-filter-rows \"B\" \"matches\" \"(?i)paris\")",
+    );
+    assert_eq!(eval(&ed, cx, "(grid-row-visible? 3)"), "#false");
+    scheme(&ed, cx, "(grid-replace-all \"a\" \"4\" 'literal 'sheet)");
+    assert_eq!(cell(&ed, cx, 1, 0), "4nn");
+    assert_eq!(cell(&ed, cx, 4, 0), "d4n");
+    assert_eq!(cell(&ed, cx, 3, 0), "cat", "the hidden row is untouched");
+    assert_eq!(cell(&ed, cx, 3, 1), "Rome");
+    keys(&ed, cx, "u");
+    assert_eq!(cell(&ed, cx, 1, 0), "ann");
+    assert_eq!(cell(&ed, cx, 4, 0), "dan");
+}
+
+#[gpui::test]
+fn replace_matches_a_formula_by_its_text(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, "x,y\n3,\n4,\n", true);
+    scheme(&ed, cx, "(grid-set-cell 1 1 \"=A2*2\")");
+    assert_eq!(cell(&ed, cx, 1, 1), "6");
+    scheme(&ed, cx, "(grid-replace-all \"A2\" \"A3\" 'literal 'sheet)");
+    assert_eq!(source(&ed, cx, 1, 1), "=A3*2");
+    assert_eq!(cell(&ed, cx, 1, 1), "8", "the formula recalculated");
+    // The displayed value is not what's matched.
+    scheme(&ed, cx, "(grid-replace-all \"8\" \"9\" 'literal 'sheet)");
+    assert_eq!(source(&ed, cx, 1, 1), "=A3*2");
 }

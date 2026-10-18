@@ -257,6 +257,11 @@ impl Editor {
             UndoAmalgamateEnd => {
                 if let Some(base) = self.undo_amalgamate.take() {
                     self.squash_undo_since(&base);
+                    if let (Some(depth), Some(g)) = (base.grid, self.active.grid.as_deref_mut())
+                        && self.active.name == base.buffer
+                    {
+                        g.squash_undo_since(depth);
+                    }
                 }
             }
             other => return Err(other),

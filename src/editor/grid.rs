@@ -285,6 +285,18 @@ impl History {
         self.undo.len()
     }
 
+    /// Fold every entry pushed since the history was `depth` deep into one
+    /// step (`undo-amalgamate-end`: a query-replace session). Untouched when
+    /// it is shallower now (an undo mid-way).
+    fn squash_since(&mut self, depth: usize) {
+        if self.undo.len() > depth + 1 {
+            let tail = self.undo.split_off(depth);
+            self.undo.push(Hist::Group(tail));
+        }
+        // The next edit starts a step of its own.
+        self.last_batch = None;
+    }
+
     fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
@@ -941,6 +953,12 @@ impl GridDoc {
     /// Depth of the grid's undo history.
     pub(super) fn hist_len(&self) -> usize {
         self.history.len()
+    }
+
+    /// Merge the undo steps taken since the history was `depth` deep into
+    /// one.
+    pub(super) fn squash_undo_since(&mut self, depth: usize) {
+        self.history.squash_since(depth);
     }
 
     /// Set column (or row) `idx`'s size, as an undo step.
@@ -3047,6 +3065,10 @@ impl Editor {
             return true;
         }
         let parsed = super::ex::parse_ex_line(cmd);
+        if matches!(parsed.name.as_str(), "s" | "substitute") {
+            self.grid_ex_substitute(&parsed, cmd, cx);
+            return true;
+        }
         const LINE_COMMANDS: &[&str] = &[
             "s",
             "substitute",

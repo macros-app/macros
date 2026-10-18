@@ -959,6 +959,61 @@ fn general_code(value: &str) -> String {
     }
 }
 
+impl Editor {
+    /// The grid's `:s/pat/rep/[gciI]`: over the selection (the cursor cell
+    /// when nothing is selected; `:'<,'>s` too), or the whole sheet with
+    /// `:%s`. Vim's pattern and replacement dialects are translated here and
+    /// the replacing is `grid-substitute` (scheme/grid.scm), so `c` runs the
+    /// same y/n session as `M-%`. Without `g` only a cell's first match is
+    /// replaced, as on a line.
+    pub(super) fn grid_ex_substitute(
+        &mut self,
+        parsed: &super::ex::ExLine,
+        cmd: &str,
+        cx: &mut Context<Self>,
+    ) {
+        use super::ex::{AddrBase, ExRange, parse_sub, vim_pattern, vim_replacement};
+        let mark = |a: &super::ex::Addr, m: char| a.base == AddrBase::Mark(m) && a.offset == 0;
+        let scope = match &parsed.range {
+            None => "selection",
+            Some(ExRange::Whole) => "sheet",
+            Some(ExRange::Two(a, _, b)) if mark(a, '<') && mark(b, '>') => "selection",
+            Some(_) => {
+                return self.echo(
+                    format!(":{cmd}: a grid's :s takes no line range — :s for the selection, :%s for the sheet"),
+                    cx,
+                );
+            }
+        };
+        let spec = parse_sub(&parsed.arg);
+        if spec.bare || spec.pattern.is_empty() {
+            return self.echo(
+                "Usage: :s/pattern/replacement/[gci] (:%s for the whole sheet)",
+                cx,
+            );
+        }
+        if spec.flags.count_only {
+            return self.echo(
+                ":s with the n flag (count only) isn't supported in a grid",
+                cx,
+            );
+        }
+        let source = format!(
+            "(grid-substitute {} {} '{} '{scope} {})",
+            crate::script::steel_quote(&vim_pattern(&spec.pattern, spec.flags.ignore_case())),
+            crate::script::steel_quote(&vim_replacement(&spec.replacement)),
+            if spec.flags.global {
+                "raw"
+            } else {
+                "raw-first"
+            },
+            if spec.flags.confirm { "#t" } else { "#f" },
+        );
+        self.publish_point();
+        self.script.dispatch(&source, false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
