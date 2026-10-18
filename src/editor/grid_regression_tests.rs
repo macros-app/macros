@@ -444,6 +444,34 @@ fn regression_render_selection_outline_over_frozen_rows(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn render_frozen_columns_stay_left_and_clip_the_scrolled_ones(cx: &mut TestAppContext) {
+    let header: Vec<String> = (0..60).map(|c| format!("h{c}")).collect();
+    let csv = format!("{}\n", header.join(","));
+    let (ed, vcx) = setup_window(cx, &csv);
+    vscheme(&ed, vcx, "(grid-freeze-columns 1)");
+    vscheme(&ed, vcx, "(grid-move-to 0 40)");
+    let s = draw(&ed, vcx);
+    eprintln!("frozen right {}, cells: {:?}", s.frozen_right, s.cells);
+    let h0 = s.cells.iter().find(|c| c.0 == "h0").expect("A1 drawn");
+    assert!(
+        (h0.3 + h0.4 - s.frozen_right).abs() < 1.0,
+        "column A stays at the left edge: {h0:?}"
+    );
+    // Scrolled: B is under A now, and later columns follow it.
+    assert!(
+        !s.cells.iter().any(|c| c.0 == "h1"),
+        "column B scrolled away"
+    );
+    assert!(s.cells.iter().any(|c| c.0 == "h20"));
+    // Only columns at least partly right of the frozen one are drawn.
+    for c in s.cells.iter().filter(|c| c.0 != "h0") {
+        assert!(c.3 + c.4 > s.frozen_right, "{c:?} under the frozen column");
+    }
+    // A1 isn't rendered twice (once frozen, once scrolled).
+    assert_eq!(s.cells.iter().filter(|c| c.0 == "h0").count(), 1);
+}
+
+#[gpui::test]
 fn regression_render_enormous_column_width_overflows(cx: &mut TestAppContext) {
     let (ed, vcx) = setup_window(cx, "a,b\nhello,x\n");
     vscheme(&ed, vcx, "(grid-set-column-width 0 1e30)");

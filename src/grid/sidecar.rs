@@ -1,5 +1,5 @@
 //! Persisted per-file view settings (column widths, row heights, zoom,
-//! header choice, frozen rows, hidden columns), kept beside the config so
+//! header choice, frozen rows and columns, hidden columns), kept beside the config so
 //! they never touch the CSV. One JSON file per grid file, named by a hash
 //! of its canonical path.
 
@@ -15,6 +15,9 @@ pub struct Sidecar {
     /// Frozen rows, when the user froze some (`grid-toggle-freeze`).
     #[serde(default)]
     pub freeze: Option<usize>,
+    /// Frozen columns, when the user froze some (`grid-freeze-panes`).
+    #[serde(default)]
+    pub freeze_cols: Option<usize>,
     /// Columns hidden with `grid-hide-column`.
     #[serde(default)]
     pub hidden_cols: Vec<usize>,
@@ -53,6 +56,17 @@ fn path_for(file: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_rows_and_columns_round_trip() {
+        let sc = Sidecar {
+            freeze: Some(1),
+            freeze_cols: Some(2),
+            ..Sidecar::default()
+        };
+        let text = serde_json::to_string(&sc).unwrap();
+        assert_eq!(serde_json::from_str::<Sidecar>(&text).unwrap(), sc);
+    }
 
     #[test]
     fn old_sidecars_without_newer_fields_still_load() {

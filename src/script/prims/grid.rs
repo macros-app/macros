@@ -90,6 +90,9 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     register_snapshot_read(reg, snapshot, "grid-frozen-rows", |s| {
         s.grid.as_ref().map_or(0, |g| g.frozen_rows)
     });
+    register_snapshot_read(reg, snapshot, "grid-frozen-columns", |s| {
+        s.grid.as_ref().map_or(0, |g| g.frozen_cols)
+    });
     register_snapshot_read(reg, snapshot, "grid-zoom", |s| {
         s.grid.as_ref().map_or(100.0, |g| g.zoom)
     });
@@ -222,6 +225,44 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
             })
         },
     );
+    // `(grid-remove-duplicates-impl cols)` — what `grid-remove-duplicates`
+    // (grid.scm) runs: cols is a list of header names, letters or indices,
+    // one string ("email, name"), or '() / #f for the default columns.
+    let p = push(queue);
+    reg.register_fn(
+        "grid-remove-duplicates-impl",
+        move |cols: SteelVal| -> Result<(), String> {
+            use crate::grid::cmd::ColName;
+            let one = |v: &SteelVal| -> Result<Vec<ColName>, String> {
+                match v {
+                    SteelVal::StringV(s) | SteelVal::SymbolV(s) => Ok(s
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(|t| ColName::Name(t.to_string()))
+                        .collect()),
+                    other => steel_index(other)
+                        .map(|i| vec![ColName::Index(i)])
+                        .ok_or_else(|| format!("grid-remove-duplicates: not a column: {other}")),
+                }
+            };
+            let names = match &cols {
+                SteelVal::BoolV(false) => Vec::new(),
+                SteelVal::ListV(items) => {
+                    let mut names = Vec::new();
+                    for item in items.iter() {
+                        names.extend(one(item)?);
+                    }
+                    names
+                }
+                other => one(other)?,
+            };
+            p(GridOp::RemoveDuplicates(
+                (!names.is_empty()).then_some(names),
+            ));
+            Ok(())
+        },
+    );
     // --- view -------------------------------------------------------------
     let p = push(queue);
     reg.register_fn("grid-move-to", move |row: SteelVal, col: SteelVal| {
@@ -262,6 +303,10 @@ fn register_grid_api(reg: &mut Registrar, queue: &Queue, snapshot: &SharedSnapsh
     let p = push(queue);
     reg.register_fn("grid-freeze-rows", move |NonNeg(n): NonNeg| {
         p(GridOp::Freeze(n))
+    });
+    let p = push(queue);
+    reg.register_fn("grid-freeze-columns", move |NonNeg(n): NonNeg| {
+        p(GridOp::FreezeCols(n))
     });
     let p = push(queue);
     reg.register_fn("grid-set-header", move |on: bool| p(GridOp::SetHeader(on)));

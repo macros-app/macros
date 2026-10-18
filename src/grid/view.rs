@@ -520,7 +520,8 @@ pub struct GridView {
     /// The other corner of a range selection, when one is active.
     pub anchor: Option<Pos>,
     pub sel_kind: SelKind,
-    /// Scroll offsets into the scrollable area (past frozen rows), unzoomed px.
+    /// Scroll offsets into the scrollable area (past frozen rows and
+    /// columns), unzoomed px.
     pub scroll_x: f64,
     pub scroll_y: f64,
     pub cols: Axis,
@@ -529,6 +530,8 @@ pub struct GridView {
     pub edit: Option<CellEdit>,
     /// Rows frozen at the top (1 when the sheet has a header row).
     pub frozen_rows: usize,
+    /// Columns frozen at the left.
+    pub frozen_cols: usize,
     pub bar_visible: bool,
     /// Cells show formulas instead of their results (`grid-show-formulas`).
     pub show_formulas: bool,
@@ -571,6 +574,7 @@ impl Default for GridView {
             zoom: 1.0,
             edit: None,
             frozen_rows: 0,
+            frozen_cols: 0,
             bar_visible: true,
             show_formulas: false,
             trace: Vec::new(),
@@ -588,7 +592,7 @@ pub struct VisibleLine {
     pub idx: usize,
     pub pos: f32,
     pub size: f32,
-    /// A frozen row (drawn over the scrolled ones).
+    /// A frozen row or column (drawn over the scrolled ones).
     pub frozen: bool,
 }
 
@@ -707,9 +711,20 @@ impl GridView {
         self.rows.start(self.frozen_rows)
     }
 
+    /// Width of the frozen columns band, unzoomed.
+    pub fn frozen_width(&self) -> f64 {
+        self.cols.start(self.frozen_cols)
+    }
+
     /// Screen x (relative to the cells area) of column `c`'s left edge.
+    /// Frozen columns sit at the left; the rest scroll underneath them.
     pub fn col_x(&self, c: usize) -> f64 {
-        (self.cols.start(c) - self.scroll_x) * self.zoom as f64
+        let z = self.zoom as f64;
+        if c < self.frozen_cols {
+            self.cols.start(c) * z
+        } else {
+            (self.cols.start(c) - self.scroll_x) * z
+        }
     }
 
     /// Screen y (relative to the cells area) of row `r`'s top edge. Frozen
@@ -725,7 +740,13 @@ impl GridView {
 
     /// The column under screen x (relative to the cells area).
     pub fn col_at(&self, x: f64) -> usize {
-        self.cols.index_at(x / self.zoom as f64 + self.scroll_x)
+        let unzoomed = x / self.zoom as f64;
+        if unzoomed < self.frozen_width() {
+            return self.cols.index_at(unzoomed);
+        }
+        self.cols
+            .index_at(unzoomed + self.scroll_x)
+            .max(self.frozen_cols)
     }
 
     /// The row under screen y (relative to the cells area).
@@ -745,6 +766,13 @@ impl GridView {
         self.rows
             .index_at(self.frozen_height() + self.scroll_y)
             .max(self.frozen_rows)
+    }
+
+    /// First scrollable column on screen.
+    pub fn left_col(&self) -> usize {
+        self.cols
+            .index_at(self.frozen_width() + self.scroll_x)
+            .max(self.frozen_cols)
     }
 
     /// Rows that fit in the viewport below the frozen band (at least 1).
@@ -768,13 +796,17 @@ impl GridView {
         let (r, c) = self.cursor;
         let z = self.zoom as f64;
         let (vw, vh) = (self.viewport.0 / z, self.viewport.1 / z);
-        // Horizontal.
-        let x0 = self.cols.start(c);
-        let x1 = x0 + self.cols.size(c);
-        if x0 < self.scroll_x {
-            self.scroll_x = x0;
-        } else if x1 > self.scroll_x + vw {
-            self.scroll_x = (x1 - vw).min(x0);
+        // Horizontal (frozen columns are always visible).
+        if c >= self.frozen_cols {
+            let frozen = self.frozen_width();
+            let avail = (vw - frozen).max(0.0);
+            let x0 = self.cols.start(c) - frozen;
+            let x1 = x0 + self.cols.size(c);
+            if x0 < self.scroll_x {
+                self.scroll_x = x0;
+            } else if x1 > self.scroll_x + avail {
+                self.scroll_x = (x1 - avail).min(x0);
+            }
         }
         // Vertical (frozen rows are always visible).
         if r >= self.frozen_rows {
@@ -791,25 +823,36 @@ impl GridView {
         self.clamp_scroll();
     }
 
-    /// The columns on screen across `width` screen px of cells area, left
-    /// to right (hidden ones skipped).
+    /// The columns on screen across `width` screen px of cells area: the
+    /// frozen ones first, then the scrolled ones, left to right (hidden ones
+    /// skipped).
     pub fn visible_cols(&self, width: f32) -> Vec<VisibleLine> {
         let mut out = Vec::new();
-        let mut c = self.col_at(0.0);
-        loop {
-            let x = self.col_x(c) as f32;
-            if x >= width || c >= MAX_INDEX {
-                break;
-            }
+        let mut push = |c: usize, x: f32, frozen: bool| {
             let w = self.col_px(c) as f32;
             if w > 0.0 {
                 out.push(VisibleLine {
                     idx: c,
                     pos: x,
                     size: w,
-                    frozen: false,
+                    frozen,
                 });
             }
+        };
+        for c in 0..self.frozen_cols {
+            let x = self.col_x(c) as f32;
+            if x >= width {
+                break; // the rest of the frozen band is off screen
+            }
+            push(c, x, true);
+        }
+        let mut c = self.left_col();
+        loop {
+            let x = self.col_x(c) as f32;
+            if x >= width || c >= MAX_INDEX {
+                break;
+            }
+            push(c, x, false);
             c = self.cols.next_visible(c + 1);
         }
         out
@@ -1144,6 +1187,49 @@ mod tests {
         assert_eq!(v.scroll_y, 0.0);
         assert_eq!(v.row_at(5.0), 0, "frozen header row");
         assert_eq!(v.row_at(25.0), 1);
+    }
+
+    #[test]
+    fn frozen_columns_stay_put_while_the_rest_scrolls() {
+        let mut v = GridView {
+            viewport: (640.0, 200.0), // 10 cols × 10 rows
+            frozen_cols: 2,
+            ..GridView::default()
+        };
+        let w = DEFAULT_COL_WIDTH;
+        assert_eq!(v.frozen_width(), 2.0 * w);
+        v.cursor = (0, 30);
+        v.reveal_cursor();
+        // Column 30 is the last one visible right of the two frozen ones.
+        let right = v.col_x(30) + v.col_px(30);
+        assert!(right <= 640.0 + 1e-6 && right > 640.0 - w, "right {right}");
+        assert_eq!(v.col_x(0), 0.0, "frozen columns don't scroll");
+        assert_eq!(v.col_x(1), w);
+        assert_eq!(v.col_at(5.0), 0);
+        assert_eq!(v.col_at(w + 5.0), 1);
+        // Just right of the frozen band: the first scrolled column.
+        let left = v.left_col();
+        assert!(left > 2);
+        assert_eq!(v.col_at(2.0 * w + 1.0), left);
+        let cols = v.visible_cols(640.0);
+        assert_eq!(
+            cols.iter()
+                .map(|l| (l.idx, l.frozen))
+                .take(3)
+                .collect::<Vec<_>>(),
+            [(0, true), (1, true), (left, false)]
+        );
+        assert_eq!(cols.last().unwrap().idx, 30);
+        // Moving back to a column scrolled under the frozen ones brings it out.
+        v.cursor = (0, 3);
+        v.reveal_cursor();
+        assert_eq!(v.scroll_x, w, "column D right after the frozen band");
+        assert_eq!(v.col_x(3), 2.0 * w);
+        // A frozen column never scrolls.
+        v.cursor = (0, 1);
+        v.scroll_x = 500.0;
+        v.reveal_cursor();
+        assert_eq!(v.scroll_x, 500.0);
     }
 
     #[test]

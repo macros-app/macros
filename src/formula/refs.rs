@@ -143,6 +143,56 @@ pub fn delete(expr: &mut Expr, sheet: &str, axis: Axis, at: usize, n: usize) -> 
     changed
 }
 
+/// Rows/columns `gone` (sorted, distinct) were deleted on `sheet`: what
+/// [`delete`] does for each of them, last first, in one pass.
+pub fn delete_set(expr: &mut Expr, sheet: &str, axis: Axis, gone: &[usize]) -> bool {
+    use super::parse::{MAX_COL, MAX_ROW};
+    let max = match axis {
+        Axis::Rows => MAX_ROW,
+        Axis::Cols => MAX_COL,
+    };
+    // How many deleted lines lie before `i`.
+    let before = |i: usize| gone.partition_point(|&g| g < i);
+    let mut changed = false;
+    let mut set = |c: &mut Coord, to: usize| {
+        changed |= to != c.index;
+        c.index = to;
+    };
+    let mut died = false;
+    for_each_span(expr, sheet, axis, |span| match span {
+        Span::Point(c) => {
+            if c.index > max {
+                false
+            } else if gone.binary_search(&c.index).is_ok() {
+                died = true;
+                true
+            } else {
+                let to = c.index - before(c.index);
+                set(c, to);
+                false
+            }
+        }
+        Span::Range(a, b) => {
+            let (lo, hi) = order(a, b);
+            let (l, h) = (lo.index, hi.index);
+            if h > max {
+                // An open end covers wherever the lines go.
+                set(lo, l - before(l));
+                return false;
+            }
+            if before(h + 1) - before(l) == h - l + 1 {
+                died = true;
+                return true; // wholly deleted
+            }
+            // The first and last survivors inside become the ends.
+            set(lo, l - before(l));
+            set(hi, h - before(h + 1));
+            false
+        }
+    });
+    changed || died
+}
+
 /// Move the formula by `(dr, dc)`: unanchored coordinates follow, `$` ones
 /// stay (copy, fill, paste, sort). A coordinate pushed off the grid's top or
 /// left edge makes that reference `#REF!`, as in Excel.
@@ -300,6 +350,34 @@ mod tests {
         assert_eq!(del("=SUM(A5:A6)"), "=SUM(#REF!)");
         assert_eq!(del("=SUM(A5:A10)"), "=SUM(A5:A8)");
         assert_eq!(del("=SUM(A1:A6)"), "=SUM(A1:A4)");
+    }
+
+    #[test]
+    fn deleting_a_row_set_matches_deleting_each_row() {
+        let gone = [2, 4, 5, 9]; // rows 3, 5, 6, 10
+        let at_once = |s: &str| run(s, |e| delete_set(e, "Sheet1", Axis::Rows, &gone));
+        let one_by_one = |s: &str| {
+            run(s, |e| {
+                let mut changed = false;
+                for &g in gone.iter().rev() {
+                    changed |= delete(e, "Sheet1", Axis::Rows, g, 1);
+                }
+                changed
+            })
+        };
+        assert_eq!(at_once("=A3+A4+A11"), "=#REF!+A3+A7");
+        assert_eq!(at_once("=SUM(A1:A12)"), "=SUM(A1:A8)");
+        assert_eq!(at_once("=SUM(A5:A6)"), "=SUM(#REF!)");
+        assert_eq!(at_once("=SUM(A3:A5)"), "=SUM(A3:A3)");
+        assert_eq!(at_once("=SUM($A$4:A10)"), "=SUM($A$3:A6)");
+        assert_eq!(at_once("=Costs!A11"), "=Costs!A11");
+        for r0 in 1..=12 {
+            for r1 in r0..=12 {
+                for src in [format!("=SUM(B{r0}:C{r1})"), format!("=A{r0}+A{r1}")] {
+                    assert_eq!(at_once(&src), one_by_one(&src), "{src}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -80,6 +80,15 @@ enum EditKind {
         cells: Vec<Vec<CellRef>>,
         metas: Vec<RowMeta>,
     },
+    /// Rows deleted wherever they are (Remove duplicates): the survivors
+    /// past `rows[0]` close up, as deleting each row would leave them.
+    DeleteRowSet {
+        /// Sorted, distinct, more than one, not one run.
+        rows: Vec<usize>,
+        /// The removed rows while the edit is applied, in order.
+        cells: Vec<Vec<CellRef>>,
+        metas: Vec<RowMeta>,
+    },
     InsertCols {
         at: usize,
         n: usize,
@@ -118,7 +127,9 @@ impl EditKind {
                     f(&mut ch.new);
                 }
             }
-            EditKind::DeleteRows { cells, .. } => cells.iter_mut().flatten().for_each(f),
+            EditKind::DeleteRows { cells, .. } | EditKind::DeleteRowSet { cells, .. } => {
+                cells.iter_mut().flatten().for_each(f)
+            }
             EditKind::DeleteCols { cols, .. } => cols.iter_mut().flatten().flatten().for_each(f),
             _ => {}
         }
@@ -282,6 +293,11 @@ pub enum Change {
     RowsDeleted {
         at: usize,
         n: usize,
+    },
+    /// These rows (sorted, distinct) were deleted: what deleting each one
+    /// (last first) does, in one change.
+    RowsRemoved {
+        rows: Vec<usize>,
     },
     ColsInserted {
         at: usize,
@@ -649,6 +665,31 @@ impl Workbook {
         )
     }
 
+    /// Delete the rows in `rows` (any order; repeats and rows past the data
+    /// are ignored) as one edit — what deleting them one at a time does, in
+    /// one pass, so Remove duplicates on a million rows stays linear.
+    pub fn delete_row_set(&mut self, sheet: usize, rows: &[usize]) -> bool {
+        let total = self.sheets[sheet].rows();
+        let mut rows: Vec<usize> = rows.iter().copied().filter(|&r| r < total).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        let (Some(&lo), Some(&hi)) = (rows.first(), rows.last()) else {
+            return false;
+        };
+        if hi - lo + 1 == rows.len() {
+            return self.delete_rows(sheet, lo, rows.len());
+        }
+        self.record(
+            sheet,
+            Change::RowsRemoved { rows: rows.clone() },
+            EditKind::DeleteRowSet {
+                rows,
+                cells: Vec::new(),
+                metas: Vec::new(),
+            },
+        )
+    }
+
     /// Insert `n` empty columns before `at` (a no-op past the used columns).
     /// Every row is re-serialized on save, since every record changes.
     pub fn insert_cols(&mut self, sheet: usize, at: usize, n: usize) -> bool {
@@ -877,6 +918,33 @@ impl Workbook {
                     s.insert_rows(*at, Some(std::mem::take(cells)), std::mem::take(metas));
                 }
                 pos(*at, 0)
+            }
+            EditKind::DeleteRowSet { rows, cells, metas } => {
+                // Gather the doomed rows at the bottom, keeping both groups'
+                // order, then drop them as one block.
+                let start = rows[0];
+                let total = if forward {
+                    s.rows()
+                } else {
+                    s.rows() + rows.len()
+                };
+                let mut perm: Vec<usize> = (start..total)
+                    .filter(|r| rows.binary_search(r).is_err())
+                    .collect();
+                perm.extend_from_slice(rows);
+                let tail = total - rows.len();
+                if forward {
+                    s.permute_rows(start, &perm);
+                    (*cells, *metas) = s.remove_rows(tail, rows.len());
+                } else {
+                    s.insert_rows(tail, Some(std::mem::take(cells)), std::mem::take(metas));
+                    let mut inverse = vec![0; perm.len()];
+                    for (i, &p) in perm.iter().enumerate() {
+                        inverse[p - start] = start + i;
+                    }
+                    s.permute_rows(start, &inverse);
+                }
+                pos(start, 0)
             }
             EditKind::InsertCols {
                 at,
@@ -1192,6 +1260,33 @@ mod tests {
         wb.redo();
         assert_eq!(column(&wb, 0), ["h", "", "", "1"]);
         check(&wb);
+    }
+
+    #[test]
+    fn grid_delete_row_set_and_undo_redo() {
+        let src = "h,x\n0,a\n1,\"q,q\"\n2,b\n3,c\n4,d\n5,e\n";
+        let mut wb = load(src);
+        assert!(!wb.delete_row_set(0, &[]));
+        assert!(!wb.delete_row_set(0, &[99]), "past the data");
+        assert!(wb.delete_row_set(0, &[6, 2, 4, 2, 99]));
+        check(&wb);
+        assert_eq!(column(&wb, 0), ["h", "0", "2", "4"]);
+        assert_eq!(column(&wb, 1), ["x", "a", "b", "d"]);
+        // Kept rows are still clean: saved byte for byte.
+        assert_eq!(to_bytes(&wb), b"h,x\n0,a\n2,b\n4,d\n");
+        assert_eq!(wb.undo(), Some((2, 0)));
+        check(&wb);
+        assert_eq!(to_bytes(&wb), src.as_bytes());
+        assert!(!wb.is_modified());
+        wb.redo();
+        assert_eq!(column(&wb, 0), ["h", "0", "2", "4"]);
+        // One run is a plain row delete.
+        assert!(wb.delete_row_set(0, &[2, 3]));
+        assert_eq!(column(&wb, 0), ["h", "0"]);
+        assert!(matches!(
+            wb.take_changes().last(),
+            Some(Change::RowsDeleted { at: 2, n: 2 })
+        ));
     }
 
     #[test]

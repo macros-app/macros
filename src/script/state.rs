@@ -150,6 +150,7 @@ pub struct GridSnapshot {
     /// Inferred type per used column: "int", "float", "bool", "date", "text".
     pub col_types: Vec<String>,
     pub frozen_rows: usize,
+    pub frozen_cols: usize,
     /// Zoom in percent.
     pub zoom: f64,
     pub editing: bool,
