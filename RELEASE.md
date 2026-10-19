@@ -41,7 +41,15 @@ The desktop app updates itself without a backend database (see `src/update.rs`):
    macOS also offers, at launch, to move a bundle running from a read-only volume
    (a mounted DMG or Gatekeeper App Translocation) into `/Applications` so future
    updates can install.
-4. **Windows/Linux** open the downloads page to re-run the signed installer.
+4. **Windows installs on restart:** download the `.msi`, verify the sidecar
+   and that its Authenticode signer matches the running exe's, then — once the
+   app quits — run `msiexec /passive` elevated (one UAC prompt) into the
+   current install dir and relaunch.
+5. **Linux installs in place:** if `/usr/bin/macros` is owned by our `macros`
+   package, download the matching `.deb`/`.rpm`, verify the sidecar, and
+   install it via `pkexec` (`apt-get install` / `dpkg -i` / `rpm -U`), then
+   relaunch on restart. Other installs open the downloads page. The Linux
+   packages are unsigned, so the SHA-256 sidecar is their only integrity check.
 
 So a release reaches users in **two** steps: cut the release (below) to publish
 the artifacts, then deploy the web app (`deploy-web.yml`, run on Forgejo) to

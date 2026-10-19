@@ -10,13 +10,22 @@
 //! Flow:
 //!   1. GET the manifest, parse `{ version, notes, downloads }`.
 //!   2. semver-compare `version` against this build's `CARGO_PKG_VERSION`.
-//!   3. If newer:
-//!      - macOS: download the platform `.zip`, verify its SHA-256 against the
-//!        `<url>.sha256` sidecar, then atomically swap the running `.app`
-//!        bundle in place ([`install`]). The caller relaunches + quits.
-//!      - Windows/Linux: open the downloads page in the browser — packaged
-//!        installers (`.msi`/`.deb`/`.rpm`) aren't swapped from under a running
-//!        process here.
+//!   3. If newer, download this platform's artifact and verify its SHA-256
+//!      against the `<url>.sha256` sidecar, then:
+//!      - macOS: verify the bundle's Team ID matches the running app's and
+//!        atomically swap the running `.app` bundle in place ([`install`]).
+//!        [`relaunch`] re-opens it once this process exits.
+//!      - Windows: verify the `.msi`'s Authenticode signer matches the running
+//!        exe's and stage it. [`relaunch`] waits for this process to exit (the
+//!        exe is locked while it runs), runs the installer silently — one UAC
+//!        prompt, since the MSI is per-machine — and re-opens the app.
+//!      - Linux: install the `.deb`/`.rpm` matching the package manager that
+//!        owns `/usr/bin/macros`, as root via `pkexec` (one polkit prompt).
+//!        dpkg/rpm replace the binary by rename, so the running process is
+//!        unaffected; [`relaunch`] re-opens it once this process exits.
+//!
+//! An install the updater can't verify or own — an unsigned dev build, a binary
+//! not installed from our package — opens the downloads page instead.
 //!
 //! macOS also gets a launch-time check ([`needs_relocation`]) for a bundle
 //! running off a read-only volume (a mounted DMG, or Gatekeeper's App
@@ -72,7 +81,8 @@ pub fn platform_key() -> &'static str {
 struct Manifest {
     /// Latest released semver, e.g. `"0.2.0"`.
     version: String,
-    /// Per-platform download URLs, keyed by [`platform_key`]-style strings.
+    /// Per-platform download URLs, keyed by [`platform_key`]-style strings
+    /// (Linux adds a package suffix: `linux-x86_64-deb`).
     #[serde(default)]
     downloads: std::collections::HashMap<String, String>,
 }
@@ -82,24 +92,32 @@ struct Manifest {
 pub struct UpdateAvailable {
     /// The latest version string from the manifest.
     pub version: String,
-    /// Download URL for *this* platform, or `None` if the manifest lists no
-    /// artifact for [`platform_key`]. Only read on macOS (in-place install);
-    /// elsewhere `install` opens the downloads page instead.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub url: Option<String>,
+    /// The manifest's download URLs; [`install`] picks this platform's.
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+        allow(dead_code)
+    )]
+    downloads: std::collections::HashMap<String, String>,
 }
 
 /// What [`install`] did, so the caller knows whether to relaunch.
 pub enum InstallOutcome {
-    /// macOS: the new bundle is swapped in place; the caller should
-    /// [`relaunch`] and quit. Only constructed on macOS.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// The update is installed (macOS, Linux) or staged to install on exit
+    /// (Windows); the caller should [`relaunch`] and quit.
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+        allow(dead_code)
+    )]
     Staged,
-    /// The downloads page was opened in the browser; nothing to relaunch.
-    /// Windows/Linux always; macOS when the running build is unsigned (no team
-    /// to verify the update's signature against).
+    /// The downloads page was opened in the browser; nothing to relaunch. Used
+    /// when the running build can't be updated in place: an unsigned dev build,
+    /// a Linux binary not installed from our package, or no artifact for this
+    /// platform in the manifest.
     OpenedDownloadPage,
 }
+
+/// Where a build that can't update itself sends the user instead.
+const DOWNLOAD_PAGE: &str = "https://macros.dev/download/";
 
 /// Fetch the manifest and return a newer release if one exists. `Ok(None)` when
 /// already current. Blocking — run off-thread.
@@ -118,8 +136,8 @@ pub fn check() -> Result<Option<UpdateAvailable>, String> {
     }
 
     Ok(Some(UpdateAvailable {
-        url: manifest.downloads.get(platform_key()).cloned(),
         version: manifest.version,
+        downloads: manifest.downloads,
     }))
 }
 
@@ -139,17 +157,22 @@ pub fn check_gated() -> Result<Option<UpdateAvailable>, String> {
 
 /// Download + install the update for this platform.
 ///
-/// macOS: download the artifact, verify its SHA-256 against the `<url>.sha256`
-/// sidecar, verify the extracted bundle's code signature and that its Team ID
-/// matches the running app's, swap the `.app` bundle in place, and return
-/// [`InstallOutcome::Staged`]. An unsigned running app (dev build) never
-/// auto-installs: it opens the downloads page instead.
-/// Windows/Linux: open the downloads page and return
+/// Every platform downloads the artifact and verifies its SHA-256 against the
+/// `<url>.sha256` sidecar first, then:
+/// - macOS: verifies the extracted bundle's code signature and that its Team ID
+///   matches the running app's, and swaps the `.app` bundle in place.
+/// - Windows: verifies the `.msi`'s Authenticode signature and that its signer
+///   matches the running exe's, and stages it for [`relaunch`] to run.
+/// - Linux: installs the `.deb`/`.rpm` for the package manager that owns the
+///   running binary, as root via `pkexec`.
+///
+/// and returns [`InstallOutcome::Staged`]. A build with nothing to verify the
+/// update against (unsigned dev build, a binary not installed from our
+/// package) never auto-installs: it opens the downloads page and returns
 /// [`InstallOutcome::OpenedDownloadPage`].
 ///
 /// `on_progress` is called with the download's percent complete (0–100) as bytes
-/// arrive, so the caller can drive a progress indicator. It only fires during the
-/// macOS download; other platforms open the browser and never call it.
+/// arrive, so the caller can drive a progress indicator.
 ///
 /// Blocking — run off-thread.
 #[cfg(target_os = "macos")]
@@ -158,8 +181,8 @@ pub fn install(
     on_progress: impl FnMut(u8),
 ) -> Result<InstallOutcome, String> {
     let url = update
-        .url
-        .as_deref()
+        .downloads
+        .get(platform_key())
         .ok_or("the update manifest lists no macOS download")?;
 
     // The new bundle must be signed by the same team as this one. With no
@@ -169,12 +192,11 @@ pub fn install(
         .ok()
         .and_then(|app| macos::team_id(&app))
     else {
-        open_url("https://macros.dev/download/")?;
+        open_url(DOWNLOAD_PAGE)?;
         return Ok(InstallOutcome::OpenedDownloadPage);
     };
 
-    let dir = macos::cache_dir()?;
-    let dest = dir.join(format!("Macros-{}-{}.zip", platform_key(), update.version));
+    let dest = cache_dir()?.join(format!("Macros-{}-{}.zip", platform_key(), update.version));
 
     let expected = fetch_sha256(url)?;
     download_verified(url, &expected, &dest, on_progress)?;
@@ -182,27 +204,131 @@ pub fn install(
     Ok(InstallOutcome::Staged)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn install(
+    update: &UpdateAvailable,
+    on_progress: impl FnMut(u8),
+) -> Result<InstallOutcome, String> {
+    // The installer must be signed by the same publisher as this exe. An
+    // unsigned exe (dev build) has nothing to pin to; no MSI for this arch
+    // (e.g. arm64) has nothing to install.
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let (Some(signer), Some(url)) = (
+        windows::authenticode_signer(&exe),
+        update.downloads.get(platform_key()),
+    ) else {
+        open_url(DOWNLOAD_PAGE)?;
+        return Ok(InstallOutcome::OpenedDownloadPage);
+    };
+
+    let fallback = format!("Macros-{}-{}.msi", platform_key(), update.version);
+    let dest = cache_dir()?.join(artifact_file_name(url, "msi").unwrap_or(fallback));
+
+    let expected = fetch_sha256(url)?;
+    download_verified(url, &expected, &dest, on_progress)?;
+    match windows::authenticode_signer(&dest) {
+        Some(s) if s == signer => {}
+        Some(s) => {
+            let _ = std::fs::remove_file(&dest);
+            return Err(format!("the update is signed by {s}, expected {signer}"));
+        }
+        None => {
+            let _ = std::fs::remove_file(&dest);
+            return Err("the update's signature is missing or invalid".to_string());
+        }
+    }
+    windows::stage(dest);
+    Ok(InstallOutcome::Staged)
+}
+
+#[cfg(target_os = "linux")]
+pub fn install(
+    update: &UpdateAvailable,
+    on_progress: impl FnMut(u8),
+) -> Result<InstallOutcome, String> {
+    // Only a binary our own .deb/.rpm installed is ours to replace; a cargo
+    // build, tarball or distro repackage gets the download page instead.
+    let kind = linux::installed_package();
+    let url = kind.and_then(|k| {
+        update
+            .downloads
+            .get(&format!("{}-{}", platform_key(), k.ext()))
+    });
+    let (Some(kind), Some(url)) = (kind, url) else {
+        open_url(DOWNLOAD_PAGE)?;
+        return Ok(InstallOutcome::OpenedDownloadPage);
+    };
+
+    let fallback = format!(
+        "macros-{}-{}.{}",
+        update.version,
+        platform_key(),
+        kind.ext()
+    );
+    let dest = cache_dir()?.join(artifact_file_name(url, kind.ext()).unwrap_or(fallback));
+
+    let expected = fetch_sha256(url)?;
+    download_verified(url, &expected, &dest, on_progress)?;
+    let result = linux::install_package(kind, &dest);
+    let _ = std::fs::remove_file(&dest);
+    result?;
+    Ok(InstallOutcome::Staged)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub fn install(
     _update: &UpdateAvailable,
     _on_progress: impl FnMut(u8),
 ) -> Result<InstallOutcome, String> {
-    // No in-place swap for packaged installers (.msi/.deb/.rpm) while running —
-    // hand the user the downloads page to run the installer themselves.
-    open_url("https://macros.dev/download/")?;
+    open_url(DOWNLOAD_PAGE)?;
     Ok(InstallOutcome::OpenedDownloadPage)
 }
 
-/// After [`InstallOutcome::Staged`], spawn the detached helper that re-opens the
-/// app once this process exits. The caller quits immediately afterward.
-#[cfg(target_os = "macos")]
+/// Set once a relaunch helper is running, so a second [`relaunch`] (the
+/// `check-for-updates` command spawns one, then the quit-and-relaunch path
+/// asks again) doesn't start a second helper — on Windows, a second installer.
+static RELAUNCH_SPAWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// After [`InstallOutcome::Staged`], spawn the detached helper that finishes
+/// the update once this process exits (Windows: runs the staged installer) and
+/// re-opens the app. The caller quits immediately afterward. Idempotent.
 pub fn relaunch() -> Result<(), String> {
-    macos::relaunch()
+    use std::sync::atomic::Ordering;
+    if RELAUNCH_SPAWNED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    macos::relaunch()?;
+    #[cfg(target_os = "windows")]
+    windows::relaunch()?;
+    #[cfg(target_os = "linux")]
+    linux::relaunch()?;
+    RELAUNCH_SPAWNED.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn relaunch() -> Result<(), String> {
-    Ok(())
+/// Per-user cache dir for staged downloads (`~/Library/Caches/macros/updates`,
+/// `~/.cache/macros/updates`, `%LOCALAPPDATA%\macros\updates`).
+fn cache_dir() -> Result<std::path::PathBuf, String> {
+    let d = dirs::cache_dir()
+        .ok_or("no cache dir")?
+        .join("macros")
+        .join("updates");
+    std::fs::create_dir_all(&d).map_err(|e| format!("creating {d:?}: {e}"))?;
+    Ok(d)
+}
+
+/// The artifact's own file name (the last path segment of `url`), if it is a
+/// plain `[A-Za-z0-9._-]` name ending in `.<ext>` — installers key off the
+/// extension, and the name ends up on a command line.
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
+fn artifact_file_name(url: &str, ext: &str) -> Option<String> {
+    let name = url.split(['?', '#']).next()?.rsplit('/').next()?;
+    let plain = !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    (plain && name.ends_with(&format!(".{ext}"))).then(|| name.to_string())
 }
 
 /// True when the running bundle sits somewhere that blocks in-place self-update
@@ -260,8 +386,11 @@ fn http_get_string(url: &str) -> Result<String, String> {
 
 /// Fetch and parse the `<url>.sha256` sidecar. Accepts either a bare 64-hex
 /// digest or `sha256:<hex>` / `<hex>  <filename>` (sha256sum) formats — the
-/// first 64-hex token wins. Only the macOS in-place install path calls this.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// first 64-hex token wins.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 fn fetch_sha256(url: &str) -> Result<String, String> {
     let body = http_get_string(&format!("{url}.sha256"))?;
     let token = body
@@ -274,18 +403,23 @@ fn fetch_sha256(url: &str) -> Result<String, String> {
 
 /// Hard cap on a downloaded artifact so a poisoned CDN can't fill the disk
 /// before the checksum mismatch fires. Well above any real macros artifact.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Stream `url` to `dest`, hashing as we go. Writes to `<dest>.partial` and only
 /// renames to `dest` once the SHA-256 matches `expected_sha256_hex`. Refuses
 /// non-`https` URLs (except `http` in debug builds, for local dev servers).
-/// Only the macOS in-place install path calls this.
 ///
 /// `on_progress` receives the percent complete (0–100) each time it advances by a
 /// whole point, computed from the `Content-Length`; if the server sends no length
 /// it is never called (the caller leaves its indicator indeterminate).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux")),
+    allow(dead_code)
+)]
 fn download_verified(
     url: &str,
     expected_sha256_hex: &str,
@@ -372,10 +506,8 @@ fn download_verified(
     Ok(())
 }
 
-/// Open `url` in the user's default browser. Used by the non-macOS `install`
-/// path and by the update pill's "download" click on those platforms (macOS
-/// downloads in place instead, so it never calls this).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// Open `url` in the user's default browser. Used when a build can't update
+/// itself in place (see [`InstallOutcome::OpenedDownloadPage`]).
 pub(crate) fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut cmd = {
@@ -450,6 +582,8 @@ mod macos {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use super::cache_dir;
+
     /// Path to the running `Macros.app` bundle. Errors for non-bundled dev
     /// builds (`cargo run`), which therefore never trigger update/relocation.
     pub fn current_app_path() -> Result<PathBuf, String> {
@@ -461,16 +595,6 @@ mod macos {
             }
         }
         Ok(p)
-    }
-
-    /// Per-user cache dir for staged downloads (`~/Library/Caches/macros/updates`).
-    pub fn cache_dir() -> Result<PathBuf, String> {
-        let d = dirs::cache_dir()
-            .ok_or("no cache dir")?
-            .join("macros")
-            .join("updates");
-        std::fs::create_dir_all(&d).map_err(|e| format!("creating {d:?}: {e}"))?;
-        Ok(d)
     }
 
     /// The Team ID a bundle is signed with, via `codesign -dv`; `None` when it
@@ -817,6 +941,244 @@ mod macos {
     }
 }
 
+// ── Windows platform ─────────────────────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+mod windows {
+    //! Staged MSI install. Windows won't overwrite a running exe, so the
+    //! verified installer runs from a detached helper once this process has
+    //! exited. The MSI is per-machine, so it raises one UAC prompt; it runs
+    //! `/passive` (a progress bar, no dialogs). A declined prompt or a failed
+    //! install just re-opens the old build — the next check offers it again.
+
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    use crate::util::HideConsole;
+
+    /// The verified installer [`super::install`] staged for [`relaunch`].
+    static STAGED_MSI: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// Windows PowerShell 5.1, by absolute path so `PATH` can't substitute it.
+    /// It ships with every supported Windows and has `Get-AuthenticodeSignature`.
+    fn powershell() -> PathBuf {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+    }
+
+    /// Prints the signer's subject when `$env:MACROS_SIG_PATH` carries a valid
+    /// Authenticode signature chaining to a trusted root; exits 1 otherwise.
+    const SIGNER_SCRIPT: &str = "$s = Get-AuthenticodeSignature -LiteralPath $env:MACROS_SIG_PATH; \
+         if ($s.Status -ne 'Valid' -or -not $s.SignerCertificate) { exit 1 }; \
+         $s.SignerCertificate.Subject";
+
+    /// The certificate subject `path` is validly signed with, or `None` when
+    /// it is unsigned, its signature doesn't verify, or PowerShell fails. The
+    /// subject (not the thumbprint) is the stable identity: Trusted Signing
+    /// issues short-lived certificates, so the thumbprint changes per release.
+    pub fn authenticode_signer(path: &Path) -> Option<String> {
+        let out = Command::new(powershell())
+            .args(["-NoProfile", "-NonInteractive", "-Command", SIGNER_SCRIPT])
+            // The path travels in the environment, never the script text, so
+            // it needs no PowerShell quoting.
+            .env("MACROS_SIG_PATH", path)
+            .hide_console()
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let subject = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!subject.is_empty()).then_some(subject)
+    }
+
+    /// Remember the verified `msi` for [`relaunch`] to install.
+    pub fn stage(msi: PathBuf) {
+        if let Ok(mut staged) = STAGED_MSI.lock() {
+            *staged = Some(msi);
+        }
+    }
+
+    /// Wait for `$env:MACROS_UPDATE_PID` to exit, run the staged installer (if
+    /// any) elevated into the running exe's directory, then re-open the exe.
+    /// Paths with spaces are quoted for msiexec; Windows paths can't contain
+    /// `"`, so that quoting can't be broken out of.
+    const APPLY_SCRIPT: &str = r#"
+Wait-Process -Id ([int]$env:MACROS_UPDATE_PID) -ErrorAction SilentlyContinue
+if ($env:MACROS_UPDATE_MSI) {
+  $a = @('/i', ('"{0}"' -f $env:MACROS_UPDATE_MSI), '/passive', '/norestart',
+         ('INSTALLDIR="{0}"' -f $env:MACROS_UPDATE_DIR.TrimEnd('\')),
+         '/l*v', ('"{0}"' -f $env:MACROS_UPDATE_LOG))
+  try {
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\msiexec.exe') `
+      -ArgumentList $a -Verb RunAs -Wait
+  } catch {}
+  Remove-Item -LiteralPath $env:MACROS_UPDATE_MSI -ErrorAction SilentlyContinue
+}
+Start-Process -FilePath $env:MACROS_UPDATE_EXE
+"#;
+
+    /// Spawn the detached helper running [`APPLY_SCRIPT`]. It outlives us:
+    /// Windows doesn't kill a child when its parent exits.
+    pub fn relaunch() -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let mut cmd = Command::new(powershell());
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", APPLY_SCRIPT])
+            .env("MACROS_UPDATE_PID", std::process::id().to_string())
+            .env("MACROS_UPDATE_EXE", &exe);
+        let staged = STAGED_MSI.lock().ok().and_then(|s| s.clone());
+        if let Some(msi) = staged {
+            // Install over the current location, so a custom install dir
+            // survives the upgrade and the relaunch finds the new exe.
+            let dir = exe.parent().ok_or("the running exe has no directory")?;
+            cmd.env("MACROS_UPDATE_MSI", &msi)
+                .env("MACROS_UPDATE_DIR", dir)
+                .env("MACROS_UPDATE_LOG", msi.with_extension("log"));
+        }
+        cmd.hide_console()
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("spawning the update helper: {e}"))
+    }
+}
+
+// ── Linux platform ───────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+mod linux {
+    //! Package-manager install. dpkg and rpm replace `/usr/bin/macros` by
+    //! rename, so the running process keeps its (now unlinked) binary and the
+    //! new one takes effect on relaunch. Installing needs root: `pkexec` asks
+    //! through the desktop's polkit agent.
+
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    /// Where our `.deb` / `.rpm` installs the binary (see `nfpm.yaml`).
+    const INSTALLED_BIN: &str = "/usr/bin/macros";
+    /// The package name in `nfpm.yaml`.
+    const PACKAGE_NAME: &str = "macros";
+
+    #[derive(Clone, Copy)]
+    pub enum Package {
+        Deb,
+        Rpm,
+    }
+
+    impl Package {
+        /// The artifact extension, also the manifest key suffix
+        /// (`linux-x86_64-deb`).
+        pub fn ext(self) -> &'static str {
+            match self {
+                Package::Deb => "deb",
+                Package::Rpm => "rpm",
+            }
+        }
+    }
+
+    /// The package format that installed the running binary, when it is our
+    /// own package's `/usr/bin/macros`. `None` for a cargo build, a tarball,
+    /// or a binary owned by some other package.
+    pub fn installed_package() -> Option<Package> {
+        let exe = std::env::current_exe().ok()?;
+        if exe != Path::new(INSTALLED_BIN) {
+            return None;
+        }
+        let query = |prog: &str, args: &[&str]| {
+            Command::new(prog)
+                .args(args)
+                .arg(INSTALLED_BIN)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        };
+        if query("dpkg-query", &["-S"]).is_some_and(|o| dpkg_owner_is_ours(&o)) {
+            Some(Package::Deb)
+        } else if query("rpm", &["-qf", "--queryformat", "%{NAME}"])
+            .is_some_and(|o| o.trim() == PACKAGE_NAME)
+        {
+            Some(Package::Rpm)
+        } else {
+            None
+        }
+    }
+
+    /// `dpkg-query -S` prints `<pkg>[:<arch>][, <pkg>…]: <path>` per match.
+    pub(super) fn dpkg_owner_is_ours(output: &str) -> bool {
+        output.lines().any(|line| {
+            line.rsplit_once(": ").is_some_and(|(owners, _)| {
+                owners
+                    .split(", ")
+                    .any(|o| o.split(':').next() == Some(PACKAGE_NAME))
+            })
+        })
+    }
+
+    /// Install the verified package at `file` as root. apt-get (when present)
+    /// resolves any new dependencies; plain `dpkg -i` / `rpm -U` otherwise.
+    pub fn install_package(kind: Package, file: &Path) -> Result<(), String> {
+        let pkexec = Path::new("/usr/bin/pkexec");
+        if !pkexec.exists() {
+            return Err("installing the update needs pkexec (polkit), which isn't \
+                 installed — install the package from the downloads page instead"
+                .to_string());
+        }
+        let mut cmd = Command::new(pkexec);
+        match kind {
+            Package::Deb if Path::new("/usr/bin/apt-get").exists() => {
+                cmd.args(["/usr/bin/apt-get", "install", "-y"])
+            }
+            Package::Deb => cmd.args(["/usr/bin/dpkg", "-i"]),
+            Package::Rpm => cmd.args(["/usr/bin/rpm", "-U"]),
+        };
+        let out = cmd
+            .arg(file)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("pkexec: {e}"))?;
+        match out.status.code() {
+            Some(0) => Ok(()),
+            // pkexec's own codes: the auth dialog was dismissed or denied.
+            Some(126 | 127) => {
+                Err("authorization was cancelled — the update wasn't installed".to_string())
+            }
+            _ => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let reason = stderr.lines().rev().find(|l| !l.trim().is_empty());
+                Err(format!(
+                    "installing the update failed: {}",
+                    reason.unwrap_or("unknown error").trim()
+                ))
+            }
+        }
+    }
+
+    /// Spawn a detached helper that waits for *this* process to exit, then
+    /// execs the (now updated) installed binary. Its own process group keeps a
+    /// Ctrl-C in the launching terminal from killing it.
+    pub fn relaunch() -> Result<(), String> {
+        use std::os::unix::process::CommandExt;
+        let pid = std::process::id();
+        let script = format!("while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec \"$1\"");
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .arg("sh")
+            .arg(INSTALLED_BIN)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("spawning relaunch helper: {e}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -932,6 +1294,44 @@ mod tests {
         );
         assert_eq!(manifest_url_from(Some(String::new()), true), default);
         assert_eq!(manifest_url_from(None, true), default);
+    }
+
+    #[test]
+    fn artifact_file_name_takes_plain_names_with_the_right_extension() {
+        let base = "https://downloads.macros.dev";
+        assert_eq!(
+            artifact_file_name(&format!("{base}/macros_0.7.0_amd64.deb"), "deb").as_deref(),
+            Some("macros_0.7.0_amd64.deb")
+        );
+        assert_eq!(
+            artifact_file_name(
+                &format!("{base}/Macros-windows-x86_64-0.7.0.msi?x=1"),
+                "msi"
+            )
+            .as_deref(),
+            Some("Macros-windows-x86_64-0.7.0.msi")
+        );
+        // Wrong extension, odd characters, and dotfiles are refused.
+        assert_eq!(artifact_file_name(&format!("{base}/a.rpm"), "deb"), None);
+        assert_eq!(
+            artifact_file_name(&format!("{base}/a%20b.deb"), "deb"),
+            None
+        );
+        assert_eq!(artifact_file_name(&format!("{base}/.deb"), "deb"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dpkg_owner_matches_only_our_package() {
+        assert!(linux::dpkg_owner_is_ours("macros: /usr/bin/macros\n"));
+        assert!(linux::dpkg_owner_is_ours("macros:amd64: /usr/bin/macros\n"));
+        assert!(linux::dpkg_owner_is_ours(
+            "other, macros: /usr/bin/macros\n"
+        ));
+        assert!(!linux::dpkg_owner_is_ours(
+            "macros-extra: /usr/bin/macros\n"
+        ));
+        assert!(!linux::dpkg_owner_is_ours(""));
     }
 
     #[cfg(target_os = "macos")]

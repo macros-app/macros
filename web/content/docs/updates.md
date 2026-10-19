@@ -14,7 +14,10 @@ On launch, Macros fetches a small version manifest from `https://macros.dev/late
 When a newer release exists, nothing downloads automatically. Instead an **update pill** appears on the right of the title bar. Click it to download (with a live progress ticker), then click again to restart into the new version.
 
 - **macOS** downloads the release archive, verifies its SHA-256 checksum, and atomically swaps the running `Macros.app` in place. If the app is running from a read-only location (a mounted DMG, or a quarantined download under App Translocation), Macros offers to move it into `/Applications` first so updates can install.
-- **Windows / Linux** open the [downloads page](https://macros.dev/download/) so you can run the packaged installer (`.msi` / `.deb` / `.rpm`) yourself — a running process isn't swapped from underneath these.
+- **Windows** downloads the `.msi`, verifies its SHA-256 checksum and that it is signed by the same publisher as the running app, and installs it when you restart: Macros quits, the installer runs with a progress bar (Windows asks for administrator approval once, since Macros installs for all users), and the new version opens. If you decline the prompt, the current version reopens and the update is offered again later.
+- **Linux** downloads the `.deb` or `.rpm` — whichever package manager installed Macros — verifies its SHA-256 checksum, and installs it through `pkexec`, so your desktop asks for your password once. The running editor keeps working; restarting opens the new version.
+
+Builds that can't update themselves — an unsigned development build, or a Linux binary that didn't come from the Macros package (built from source, a tarball) — open the [downloads page](https://macros.dev/download/) instead.
 
 ### Checking on demand
 

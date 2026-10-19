@@ -7,14 +7,12 @@ use super::*;
 /// downloaded until the user asks for it.
 #[derive(Clone)]
 pub(super) enum UpdatePhase {
-    /// A newer release exists. Click to start downloading it (macOS) or open the
-    /// downloads page in a browser (other platforms).
+    /// A newer release exists. Click to start downloading it.
     Available,
-    /// macOS only: the artifact is downloading; `percent` is 0–100.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// The artifact is downloading; `percent` is 0–100.
     Downloading { percent: u8 },
-    /// macOS only: the new build is staged in place. Click to relaunch into it.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// The new build is installed (or, on Windows, staged to install on exit).
+    /// Click to relaunch into it.
     Ready,
 }
 
@@ -22,9 +20,7 @@ pub(super) enum UpdatePhase {
 /// phase its click cycles through.
 #[derive(Clone)]
 pub(super) struct UpdateStatus {
-    /// The newer release found by the check, carrying this platform's download
-    /// URL (used to install on macOS).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// The newer release found by the check, carrying the download URLs.
     available: crate::update::UpdateAvailable,
     phase: UpdatePhase,
 }
@@ -46,7 +42,6 @@ impl Workspace {
     }
 
     /// Advance the pill to a new phase and repaint.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn set_update_phase(&mut self, phase: UpdatePhase, cx: &mut Context<Self>) {
         if let Some(status) = self.update_status.as_mut() {
             status.phase = phase;
@@ -55,23 +50,14 @@ impl Workspace {
     }
 
     /// Handle a click on the update pill, dispatching on its current phase:
-    /// `Available` starts the download (macOS) or opens the browser (others),
+    /// `Available` starts the download,
     /// `Downloading` is inert, and `Ready` relaunches into the staged build.
     pub(super) fn on_update_pill_click(&mut self, cx: &mut Context<Self>) {
         let Some(status) = self.update_status.clone() else {
             return;
         };
         match status.phase {
-            UpdatePhase::Available => {
-                #[cfg(target_os = "macos")]
-                {
-                    self.start_update_download(status.available, cx);
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let _ = crate::update::open_url("https://macros.dev/download/");
-                }
-            }
+            UpdatePhase::Available => self.start_update_download(status.available, cx),
             // A download is in flight; ignore clicks until it resolves.
             UpdatePhase::Downloading { .. } => {}
             // Same unsaved-buffer prompt as any other quit; the relaunch helper
@@ -83,10 +69,9 @@ impl Workspace {
         }
     }
 
-    /// macOS: download + stage the update in the background, streaming the
+    /// Download + install the update in the background, streaming the
     /// percent-complete back to the pill, then flip it to [`UpdatePhase::Ready`]
     /// (or back to `Available` so the user can retry on failure).
-    #[cfg(target_os = "macos")]
     pub(super) fn start_update_download(
         &mut self,
         available: crate::update::UpdateAvailable,
@@ -121,11 +106,12 @@ impl Workspace {
                     ws.log_message("Update downloaded — restart Macros to finish.", cx);
                     ws.set_update_phase(UpdatePhase::Ready, cx);
                 }
-                // Unsigned (dev) build: no team to verify an update against,
-                // so the download page was opened instead of auto-installing.
+                // A build the updater can't verify or own (unsigned dev build,
+                // a binary not from our package): the download page was opened
+                // instead of auto-installing.
                 Ok(crate::update::InstallOutcome::OpenedDownloadPage) => {
                     ws.log_message(
-                        "This build is unsigned — opened the download page instead.",
+                        "This build can't update itself — opened the download page instead.",
                         cx,
                     );
                     ws.set_update_phase(UpdatePhase::Available, cx);
