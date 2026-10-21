@@ -1622,3 +1622,74 @@ fn lisp_completion_keeps_hyphenated_prefix(cx: &mut TestAppContext) {
     assert_eq!(anchor, Some(1), "anchored at the symbol start, after `(`");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Helm multi-select acts on exactly what was marked: marks are per source (a
+/// candidate string shared with another source isn't swept in), RET runs each
+/// mark's own source action, and the M-a action menu applies the chosen action
+/// to every mark in that source — not just the highlighted candidate.
+#[gpui::test]
+fn helm_marks_drive_accept_and_the_action_menu(cx: &mut TestAppContext) {
+    let ed = setup(cx, "");
+    let open = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.update(cx, |e, cx| {
+            e.run_script_blocking(
+                r#"(begin
+                     (set! *picked* '())
+                     (helm (list (list "One" (list "x" "y")
+                                       (list (list "A" 'pick-a) (list "B" 'pick-b)))
+                                 (list "Two" (list "x" "z") 'pick-c))))"#,
+                cx,
+            );
+        });
+        settle(ed, cx);
+    };
+    let picked = |ed: &Entity<Editor>, cx: &mut TestAppContext| {
+        ed.read_with(cx, |e, _| {
+            e.script.eval("(reverse *picked*)").unwrap().value
+        })
+    };
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(begin
+                 (define *picked* '())
+                 (define (pick-a c) (set! *picked* (cons (string-append "a:" c) *picked*)))
+                 (define (pick-b c) (set! *picked* (cons (string-append "b:" c) *picked*)))
+                 (define (pick-c c) (set! *picked* (cons (string-append "c:" c) *picked*))))"#,
+            cx,
+        );
+    });
+
+    // Mark One/x and One/y (C-SPC advances); RET leaves Two/x alone.
+    open(&ed, cx);
+    ed.update(cx, |e, cx| {
+        e.helm_toggle_mark(cx);
+        e.helm_toggle_mark(cx);
+        e.helm_accept(cx);
+    });
+    settle(&ed, cx);
+    assert_eq!(picked(&ed, cx).as_deref(), Some(r#"("a:x" "a:y")"#));
+
+    // A mark in each source: each runs its own source's action.
+    open(&ed, cx);
+    ed.update(cx, |e, cx| {
+        e.helm_toggle_mark(cx); // One/x
+        e.helm_next(cx); // skip One/y, land on Two/x
+        e.helm_toggle_mark(cx);
+        e.helm_accept(cx);
+    });
+    settle(&ed, cx);
+    assert_eq!(picked(&ed, cx).as_deref(), Some(r#"("a:x" "c:x")"#));
+
+    // M-a → "B" runs on both marks in the source, not just the selection.
+    open(&ed, cx);
+    ed.update(cx, |e, cx| {
+        e.helm_toggle_mark(cx);
+        e.helm_toggle_mark(cx);
+        e.helm_previous(cx); // back from Two/x into the marked source
+        e.helm_action_menu(cx);
+        e.helm_next(cx); // "A" → "B"
+        e.helm_accept(cx);
+    });
+    settle(&ed, cx);
+    assert_eq!(picked(&ed, cx).as_deref(), Some(r#"("b:x" "b:y")"#));
+}

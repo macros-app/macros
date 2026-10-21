@@ -43,10 +43,12 @@ pub(super) fn helm_sources_from_specs(
         .collect()
 }
 
-/// Emacs-style file prompt shortcuts for Helm file sources. When a file picker
-/// is pre-filled with the current directory, typing `/` after that trailing `/`
-/// produces `//`; the second slash shadows everything before it and jumps to
-/// the filesystem root.
+/// Emacs-style file prompt shortcuts for Helm file sources (`file-name-shadow`).
+/// When a file picker is pre-filled with the current directory, typing `/`
+/// after that trailing `/` produces `//`, which shadows everything before it
+/// and jumps to the filesystem root; typing `~/` there jumps to the home
+/// directory, spelled out so candidates (absolute paths) still match. The
+/// later of the two shortcuts wins.
 pub(super) fn helm_file_shadow_pattern(sources: &[HelmSource], pattern: &str) -> Option<String> {
     let is_file_source = sources
         .iter()
@@ -54,8 +56,21 @@ pub(super) fn helm_file_shadow_pattern(sources: &[HelmSource], pattern: &str) ->
     if !is_file_source {
         return None;
     }
-    let (_, tail) = pattern.rsplit_once("//")?;
-    Some(format!("/{tail}"))
+    let root = pattern.rfind("//").map(|at| (at, at + 2, false));
+    let home = match pattern.rfind("/~/") {
+        Some(at) => Some((at, at + 3, true)),
+        None => pattern.starts_with("~/").then_some((0, 2, true)),
+    };
+    let (_, tail_start, is_home) = [root, home]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(at, ..)| *at)?;
+    let tail = &pattern[tail_start..];
+    Some(if is_home {
+        crate::util::expand_tilde(&format!("~/{tail}"))
+    } else {
+        format!("/{tail}")
+    })
 }
 
 /// For Helm file pickers, `RET` on text that is not an exact listed candidate
@@ -138,16 +153,16 @@ pub(super) fn helm_window(
 #[derive(Clone)]
 pub(super) enum HelmAction {
     /// `(label, function-name)` pairs — the first is the default (RET); the rest
-    /// are reachable via the TAB action menu. The function is called with the
+    /// are reachable via the M-a action menu. The function is called with the
     /// chosen candidate string.
     Scheme(Vec<(String, String)>),
     /// Treat the candidate itself as a command name and run it (helm-M-x).
     ExecuteCommand,
-    /// An action-menu session (TAB): the candidate is an action label, looked
-    /// up among `actions` (`(label, fn)` pairs) and run on `original`, the
-    /// candidate the menu was opened for.
+    /// An action-menu session (M-a): the candidate is an action label, looked
+    /// up among `actions` (`(label, fn)` pairs) and run on each of `targets` —
+    /// the candidates marked in the menu's source, else the one it was opened on.
     ActionMenu {
-        original: String,
+        targets: Vec<String>,
         actions: Vec<(String, String)>,
     },
     /// Jump to one of a set of LSP locations. The vec is parallel to the
@@ -195,9 +210,10 @@ pub(super) struct HelmSession {
     query_id: u64,
     /// Fuzzy (nucleo) vs substring matching, captured from settings at open.
     fuzzy: bool,
-    /// Candidates marked for multi-select (`C-SPC`). When non-empty, accepting
-    /// runs the action once per marked candidate instead of the selected one.
-    marked: Vec<String>,
+    /// Candidates marked for multi-select (`C-SPC`), as `(source_index,
+    /// candidate)` in mark order. When non-empty, accepting runs each one's own
+    /// source action instead of acting on the selected candidate.
+    marked: Vec<(usize, String)>,
     /// Preview text for the current selection (from the source's preview fn),
     /// shown in a side pane. Empty when the selected source has no preview.
     preview: String,
@@ -606,16 +622,16 @@ impl Editor {
         let Some(helm) = self.helm.as_mut() else {
             return;
         };
-        let Some(candidate) = helm.selected_match().map(|(_, c)| c.to_string()) else {
+        let Some(mark) = helm.selected_match().map(|(s, c)| (s, c.to_string())) else {
             return;
         };
-        if candidate.ends_with('/') {
+        if mark.1.ends_with('/') {
             return; // directories descend, not mark
         }
-        if let Some(pos) = helm.marked.iter().position(|m| m == &candidate) {
+        if let Some(pos) = helm.marked.iter().position(|m| m == &mark) {
             helm.marked.remove(pos);
         } else {
-            helm.marked.push(candidate);
+            helm.marked.push(mark);
         }
         helm.selected = wrap_index(helm.selected, helm.match_count(), Direction::Forward);
         cx.notify();
@@ -681,31 +697,45 @@ impl Editor {
         // actions use it to pick from their parallel target vec, since Helm
         // filters and reorders the visible matches.
         let candidate_index = helm.candidate_index(helm.selected);
-        // Multi-select: act on every marked candidate (in mark order). With none
-        // marked, fall back to the single candidate under the cursor.
-        let targets = if helm.marked.is_empty() {
-            vec![candidate.clone()]
+        // Multi-select: act on every marked candidate (in mark order), each with
+        // its own source's default action. With none marked, fall back to the
+        // single candidate under the cursor.
+        let targets: Vec<(String, String)> = if helm.marked.is_empty() {
+            match &action {
+                HelmAction::Scheme(actions) => actions
+                    .first()
+                    .map(|(_, f)| (f.clone(), candidate.clone()))
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            }
         } else {
-            helm.marked.clone()
+            helm.marked
+                .iter()
+                .filter_map(|(source, c)| match &helm.sources.get(*source)?.action {
+                    HelmAction::Scheme(actions) => Some((actions.first()?.1.clone(), c.clone())),
+                    _ => None,
+                })
+                .collect()
         };
         self.helm = None;
         // Actions are Steel functions, dispatched by name to the engine thread;
         // their commands arrive via `apply_script_outcome`.
         match action {
-            HelmAction::Scheme(actions) => {
-                if let Some((_, function)) = actions.first() {
-                    for target in &targets {
-                        self.script.dispatch_action(function, Some(target));
-                    }
+            HelmAction::Scheme(_) => {
+                for (function, target) in &targets {
+                    self.script.dispatch_action(function, Some(target));
                 }
             }
             HelmAction::ExecuteCommand => {
                 self.note_command(&candidate);
                 self.script.dispatch_action(&candidate, None);
             }
-            HelmAction::ActionMenu { original, actions } => {
+            HelmAction::ActionMenu { targets, actions } => {
                 if let Some((_, function)) = actions.iter().find(|(label, _)| label == &candidate) {
-                    self.script.dispatch_action(function, Some(&original));
+                    for target in &targets {
+                        self.script.dispatch_action(function, Some(target));
+                    }
                 }
             }
             HelmAction::GotoLocation(locations) => {
@@ -722,8 +752,8 @@ impl Editor {
         cx.notify();
     }
 
-    /// `TAB`: with multiple actions, open an action-menu sub-Helm; otherwise run
-    /// the default action.
+    /// `M-a` (`helm-actions`): with multiple actions, open an action-menu
+    /// sub-Helm; otherwise run the default action.
     pub(super) fn helm_action_menu(&mut self, cx: &mut Context<Self>) {
         let Some((source_index, candidate)) = self.helm_selected() else {
             return;
@@ -740,6 +770,22 @@ impl Editor {
             return;
         };
         let labels: Vec<String> = actions.iter().map(|(label, _)| label.clone()).collect();
+        // The menu acts on the candidates marked in this source (other sources'
+        // actions differ), else on the one under the cursor.
+        let mut targets: Vec<String> = self
+            .helm
+            .as_ref()
+            .map(|h| {
+                h.marked
+                    .iter()
+                    .filter(|(s, _)| *s == source_index)
+                    .map(|(_, c)| c.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if targets.is_empty() {
+            targets.push(candidate);
+        }
         self.helm_open(
             "Action: ".to_string(),
             vec![HelmSource {
@@ -748,10 +794,7 @@ impl Editor {
                 annotations: HashMap::new(),
                 dynamic: None,
                 raw: false,
-                action: HelmAction::ActionMenu {
-                    original: candidate,
-                    actions,
-                },
+                action: HelmAction::ActionMenu { targets, actions },
                 preview: None,
             }],
             String::new(),
@@ -791,7 +834,10 @@ impl Editor {
                     .cloned(),
                 header: false,
                 selected: i == helm.selected,
-                marked: helm.marked.iter().any(|m| m == candidate),
+                marked: helm
+                    .marked
+                    .iter()
+                    .any(|(s, c)| *s == source_index && c == candidate),
                 index: Some(i),
             });
         }
@@ -953,6 +999,46 @@ mod tests {
             helm_file_shadow_pattern(&sources, "/Users/me/project/"),
             None
         );
+    }
+
+    #[test]
+    fn helm_file_shadow_pattern_jumps_home_for_tilde() {
+        use super::{HelmAction, HelmSource, helm_file_shadow_pattern};
+        let sources = vec![HelmSource {
+            name: "Files".into(),
+            candidates: Vec::new(),
+            annotations: std::collections::HashMap::new(),
+            dynamic: Some("find-file-candidates".into()),
+            raw: false,
+            action: HelmAction::ExecuteCommand,
+            preview: None,
+        }];
+        let home = |tail: &str| crate::util::expand_tilde(&format!("~/{tail}"));
+
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/Users/me/project/~/"),
+            Some(home(""))
+        );
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/Users/me/project/~/notes.org"),
+            Some(home("notes.org"))
+        );
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "~/src"),
+            Some(home("src"))
+        );
+        // The later shortcut wins.
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/a/~/b//etc"),
+            Some("/etc".into())
+        );
+        assert_eq!(
+            helm_file_shadow_pattern(&sources, "/a//b/~/c"),
+            Some(home("c"))
+        );
+        // `~` inside a name is just a character.
+        assert_eq!(helm_file_shadow_pattern(&sources, "/a/backup~/x"), None);
+        assert_eq!(helm_file_shadow_pattern(&sources, "/a/~b"), None);
     }
 
     #[test]

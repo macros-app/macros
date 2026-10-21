@@ -80,7 +80,8 @@
   (helm (list (list "Recent files" (list 'raw "recentf-fuzzy") 'open-file))))
 
 ;; A source can also offer MULTIPLE actions — a list of (label fn) pairs. RET
-;; runs the first; TAB opens an action menu for the rest:
+;; runs the first; M-a opens an action menu for the rest (acting on every
+;; C-SPC-marked candidate, or the selected one):
 ;;   (helm (list (list "Files" "find-file-candidates"
 ;;                 (list (list "open" "open-file")
 ;;                       (list "insert path" "insert")))))
@@ -105,10 +106,11 @@
   (helm (list (list "Recent files" *recentf* 'open-file))))
 
 ;; --- helm-occur: live line search of the current buffer ---------------------
-;; All lines become "N: text" candidates; Helm's fuzzy filter narrows them as
-;; you type, and the action jumps to line N. Shared by helm-imenu.
+;; All lines become "N: text" candidates, N 1-based like the line-number
+;; gutter; Helm's fuzzy filter narrows them as you type, and the action jumps
+;; to line N. Shared by helm-imenu.
 (define (buffer-lines-numbered)
-  (let loop ((lines (buffer-lines)) (n 0) (acc '()))
+  (let loop ((lines (buffer-lines)) (n 1) (acc '()))
     (if (null? lines)
         (reverse acc)
         (loop (cdr lines) (+ n 1)
@@ -116,7 +118,7 @@
 (define (helm-occur-goto sel)
   (let ((parts (split-many sel ":")))
     (when (>= (string-match "^[0-9]" (car parts)) 0)
-      (goto-line (string->number (car parts))))))
+      (goto-line (- (string->number (car parts)) 1)))))  ; goto-line is 0-based
 (define (helm-occur)
   (helm (list (list "Occur" (buffer-lines-numbered) 'helm-occur-goto))))
 
@@ -128,7 +130,7 @@
              line)))
     (if (null? m) #f (nth m 1))))
 (define (imenu-candidates)
-  (let loop ((lines (buffer-lines)) (n 0) (acc '()))
+  (let loop ((lines (buffer-lines)) (n 1) (acc '()))
     (if (null? lines)
         (reverse acc)
         (let ((nm (imenu-name (car lines))))

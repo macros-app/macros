@@ -7718,6 +7718,16 @@ mod helm_lib {
             v(r#"(if (imenu-name "   x = 1") "hit" "none")"#),
             "\"none\""
         );
+        // Occur rows are numbered 1-based like the gutter; picking "3: …"
+        // lands on 0-based line 2.
+        let cmds = engine
+            .eval(r#"(helm-occur-goto "3: x = 1")"#)
+            .unwrap()
+            .commands;
+        assert!(
+            matches!(cmds.as_slice(), [EditorCommand::GotoLine(2)]),
+            "{cmds:?}"
+        );
         // new commands registered for M-x.
         for c in [
             "helm-buffers-list",

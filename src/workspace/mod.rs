@@ -334,16 +334,37 @@ impl Workspace {
                     .items_center()
                     .child(
                         div()
+                            .flex_none()
                             .text_color(prompt_color)
                             .child(SharedString::from(helm.prompt)),
                     )
-                    .child(SharedString::from(helm.pattern))
-                    .child(div().w(px(2.)).h(px(15.)).bg(cursor_color)),
+                    // A long pattern (a deep file path) shrinks from the left
+                    // with a leading "…", keeping its end and the cursor in view.
+                    .child(
+                        div()
+                            .flex_initial()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis_start()
+                            .child(SharedString::from(helm.pattern)),
+                    )
+                    .child(div().flex_none().w(px(2.)).h(px(15.)).bg(cursor_color)),
             );
         for row in helm.rows {
             // A leading "* " marks multi-selected candidates (C-SPC).
             let prefix = if row.marked { "* " } else { "  " };
             let text: SharedString = format!("{prefix}{}", row.text).into();
+            // One line per candidate: an overlong one (a deep path) is cut from
+            // the left, keeping the file name, instead of wrapping into the next row.
+            let label = || {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
+                    .child(text.clone())
+            };
             // A marginalia-style annotation, pushed to the right and dimmed.
             let annotation = row.annotation.clone();
             let with_annotation = |line: gpui::Div| match &annotation {
@@ -351,14 +372,15 @@ impl Workspace {
                     .flex()
                     .flex_row()
                     .justify_between()
-                    .child(text.clone())
+                    .child(label())
                     .child(
                         div()
+                            .flex_none()
                             .pl_4()
                             .text_color(dim)
                             .child(SharedString::from(ann.clone())),
                     ),
-                _ => line.child(text.clone()),
+                _ => line.child(label()),
             };
             let line = if row.header {
                 div()
