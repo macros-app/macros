@@ -599,6 +599,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_largest_parseable_trees_evaluate_without_overflow() {
+        // The parser's caps (8192 chars, nesting 256) bound the trees eval,
+        // print and drop recurse over; both extremes must fit a test thread's
+        // stack (2 MiB, smaller than the UI thread's).
+        let mut c = MockCtx::default();
+        let long = format!("={}1", "1+".repeat(4095));
+        assert_eq!(ev(&long, &mut c), n(4096.0));
+        let deep = format!("={}1{}", "ABS(".repeat(250), ")".repeat(250));
+        assert_eq!(ev(&deep, &mut c), n(1.0));
+        let parens = format!("={}1{}", "(".repeat(250), ")".repeat(250));
+        assert_eq!(ev(&parens, &mut c), n(1.0));
+    }
+
+    #[test]
     fn arithmetic_and_precedence() {
         let mut c = MockCtx::default();
         assert_eq!(ev("=1+2*3", &mut c), n(7.0));

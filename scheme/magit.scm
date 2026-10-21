@@ -2129,7 +2129,7 @@
         (message "No file at point")
         (let* ((path (magit-newpath (cadr cur)))
                (gi (path-join *magit-dir* ".gitignore"))
-               (existing (read-file gi))
+               (existing (read-file-strict gi))
                (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
           (write-file gi (string-append existing sep path "\n"))
           (magit-refresh)

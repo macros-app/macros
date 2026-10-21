@@ -1345,7 +1345,7 @@
 (define (org--capture-finish text)
   (when (not (equal? (string-trim text) ""))
     (let* ((path (org--capture-file))
-           (existing (if (file-exists? path) (read-file path) ""))
+           (existing (read-file-strict path))
            (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
       (write-file path (string-append existing sep "* TODO " (string-trim text) "\n"))
       (message (string-append "Captured to " (basename path))))))
@@ -2396,9 +2396,10 @@
     (org--delete-lines H E)))
 
 ;; Insert `block` as the last child of the heading at `tline` (level `tlvl`) in
-;; the on-disk file `path`.
+;; the on-disk file `path`. #t once written. Reads strictly: a file that exists
+;; but can't be read as text raises rather than being rewritten from "".
 (define (org--insert-into-file path tline tlvl block)
-  (let* ((lines (split-many (read-file path) "\n")) (n (length lines))
+  (let* ((lines (split-many (read-file-strict path) "\n")) (n (length lines))
          (E (org--subtree-end-in lines tline tlvl))
          (before (org--slice lines 0 E))
          (after (org--slice lines (+ E 1) (- n 1))))
@@ -2470,9 +2471,11 @@
             (else
              (let* ((st (org--subtree-text H))
                     (block (org--shift-levels (cdr st) (- (+ tlvl 1) (car st)))))
-               (org--insert-into-file tpath tline tlvl block)
-               (org--delete-subtree H)
-               (message (string-append "Refiled to " (basename tpath))))))))))
+               ;; Only drop the subtree once it is safely in the target file.
+               (if (org--insert-into-file tpath tline tlvl block)
+                   (begin (org--delete-subtree H)
+                          (message (string-append "Refiled to " (basename tpath))))
+                   (message (string-append "Refile failed: could not write " tpath))))))))))
 
 ;; Add the property line `prop` (":KEY: value") to the heading that heads
 ;; `block` (a subtree's lines): into its :PROPERTIES: drawer when it has one,
@@ -2499,11 +2502,14 @@
                (with-time (org--block-add-property
                            block (string-append ":ARCHIVE_TIME: [" (org--now-stamp) "]")))
                (apath (org--archive-file-path))
-               (existing (if (file-exists? apath) (read-file apath) ""))
+               (existing (read-file-strict apath))
                (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
-          (write-file apath (string-append existing sep (join-lines with-time) "\n"))
-          (org--delete-subtree H)
-          (message (string-append "Archived to " (basename apath)))))))
+          ;; Only drop the subtree once it is safely in the archive file.
+          (if (write-file apath (string-append existing sep (join-lines with-time) "\n"))
+              (begin
+                (org--delete-subtree H)
+                (message (string-append "Archived to " (basename apath))))
+              (message (string-append "Archive failed: could not write " apath)))))))
 
 ;; ===========================================================================
 ;; Layer 7f — capture templates
@@ -2552,11 +2558,11 @@
               (org--capture-commit tmpl (org--expand-template-final expanded "")))))))
 
 (define (org--capture-append path text)
-  (let* ((existing (if (file-exists? path) (read-file path) ""))
+  (let* ((existing (read-file-strict path))
          (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
     (write-file path (string-append existing sep text "\n"))))
 (define (org--capture-under-headline path headline text)
-  (let* ((lines (if (file-exists? path) (split-many (read-file path) "\n") '()))
+  (let* ((lines (if (file-exists? path) (split-many (read-file-strict path) "\n") '()))
          (n (length lines))
          (hidx (let loop ((i 0))
                  (cond ((>= i n) #f)

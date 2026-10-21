@@ -333,9 +333,21 @@ fn row_index(digits: &str) -> Option<usize> {
     (1..=MAX_ROW + 1).contains(&n).then(|| n - 1)
 }
 
+/// Excel's own cap on a formula's length, in characters. Past it the text is
+/// refused before lexing, which also bounds everything recursive downstream.
+const MAX_FORMULA_CHARS: usize = 8192;
+
+/// How deeply operands may nest (parentheses, calls, arrays, prefix operators)
+/// before the parser gives up. Excel allows 64 levels of function nesting; this
+/// is generous by comparison while keeping the recursive descent — and the
+/// recursive eval/print/drop of the tree it builds — far from the stack limit.
+const MAX_DEPTH: usize = 256;
+
 struct Parser {
     toks: Vec<(usize, Tok)>,
     i: usize,
+    /// Current operand nesting, checked against [`MAX_DEPTH`] in [`Self::unary`].
+    depth: usize,
 }
 
 impl Parser {
@@ -407,7 +419,21 @@ impl Parser {
     }
 
     /// Prefix `-`/`+` bind tighter than every binary operator (even `^`).
+    ///
+    /// Every operand is parsed through here, so this is where nesting depth is
+    /// counted: a file's `((((…` or `----…1` must be a parse error, not a stack
+    /// overflow that aborts the editor.
     fn unary(&mut self) -> Result<Expr, ParseError> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.err("formula is nested too deeply"));
+        }
+        self.depth += 1;
+        let e = self.unary_operand();
+        self.depth -= 1;
+        e
+    }
+
+    fn unary_operand(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
             Tok::Op("-") => {
                 self.next();
@@ -816,13 +842,23 @@ fn inside_quotes(text: &str) -> bool {
 
 /// Parse formula text. A leading `=` is optional (it's stripped).
 pub fn parse(text: &str) -> Result<Expr, ParseError> {
+    if text.chars().nth(MAX_FORMULA_CHARS).is_some() {
+        return Err(ParseError {
+            at: 0,
+            message: format!("formula is longer than {MAX_FORMULA_CHARS} characters"),
+        });
+    }
     let body = text.strip_prefix('=').unwrap_or(text);
     let offset = text.len() - body.len();
     let toks = Lexer { src: body, pos: 0 }.tokens().map_err(|mut e| {
         e.at += offset;
         e
     })?;
-    let mut p = Parser { toks, i: 0 };
+    let mut p = Parser {
+        toks,
+        i: 0,
+        depth: 0,
+    };
     let e = p.expr().map_err(|mut e| {
         e.at += offset;
         e
@@ -973,6 +1009,26 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].0, 1..3);
         assert!(ref_spans("=SUM(").is_empty());
+    }
+
+    #[test]
+    fn hostile_nesting_and_length_are_parse_errors() {
+        // From a crafted xlsx: these overflowed the stack and aborted the editor.
+        let deep = format!("={}1{}", "(".repeat(200_000), ")".repeat(200_000));
+        assert!(parse(&deep).is_err());
+        let negs = format!("={}1", "-".repeat(5_000));
+        assert!(parse(&negs).unwrap_err().message.contains("nested"));
+        let calls = format!("={}1{}", "ABS(".repeat(MAX_DEPTH), ")".repeat(MAX_DEPTH));
+        assert!(parse(&calls).unwrap_err().message.contains("nested"));
+        // Realistic nesting is untouched.
+        let ok = format!("={}1{}", "(".repeat(100), ")".repeat(100));
+        assert!(parse(&ok).is_ok());
+        // Excel's length cap: 8192 characters parse, one more doesn't.
+        let at_cap = format!("={}1", "1+".repeat((MAX_FORMULA_CHARS - 2) / 2));
+        assert!(at_cap.chars().count() <= MAX_FORMULA_CHARS);
+        assert!(parse(&at_cap).is_ok());
+        let over = format!("{at_cap}{}", "+1".repeat(MAX_FORMULA_CHARS));
+        assert!(parse(&over).unwrap_err().message.contains("longer"));
     }
 
     #[test]

@@ -129,10 +129,28 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
+    // `(read-file path)` → the file's text, or "" when it can't be read for any
+    // reason (missing, unreadable, not UTF-8). Right for scanners and previews;
+    // wrong for read-modify-write, which would then write "" + its addition
+    // over the original — use `read-file-strict` there.
     reg.register_fn("read-file", |path: String| -> String {
         let path = crate::util::expand_tilde(&path);
         std::fs::read_to_string(&path).unwrap_or_default()
     });
+    // `(read-file-strict path)` → the file's text, "" only when it doesn't exist,
+    // and an error otherwise (permission denied, a directory, invalid UTF-8), so
+    // a caller about to rewrite the file stops instead of truncating it.
+    reg.register_fn(
+        "read-file-strict",
+        |path: String| -> Result<String, String> {
+            let path = crate::util::expand_tilde(&path);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => Ok(text),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                Err(e) => Err(format!("{path}: {e}")),
+            }
+        },
+    );
     reg.register_fn("write-file", |path: String, text: String| -> bool {
         let path = crate::util::expand_tilde(&path);
         // Create parent directories first (Emacs's `make-directory ... t` before

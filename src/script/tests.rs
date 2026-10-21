@@ -420,6 +420,37 @@ mod engine_tests {
     }
 
     #[test]
+    fn read_file_strict_refuses_what_read_file_blanks() {
+        // Read-modify-write callers (org capture/archive/refile, magit's
+        // .gitignore) used `read-file`, which yields "" for a file it can't
+        // decode — and then wrote "" + the addition over it.
+        let (engine, _rx) = ScriptEngine::new();
+        let dir = std::env::temp_dir().join(format!("macros-strict-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("latin1.org");
+        std::fs::write(&bad, b"* caf\xe9\n").unwrap();
+        let eval = |src: String| engine.eval(&src);
+        let lenient = eval(format!(
+            r#"(string-length (read-file "{}"))"#,
+            bad.display()
+        ));
+        assert_eq!(lenient.unwrap().value.as_deref(), Some("0"));
+        let strict = eval(format!(r#"(read-file-strict "{}")"#, bad.display()));
+        assert!(strict.is_err(), "invalid UTF-8 must raise");
+        // A missing file is still "" (capture into a new file), and good text reads.
+        let missing = eval(format!(
+            r#"(string-length (read-file-strict "{}"))"#,
+            dir.join("new.org").display()
+        ));
+        assert_eq!(missing.unwrap().value.as_deref(), Some("0"));
+        let good = dir.join("ok.org");
+        std::fs::write(&good, "* ok\n").unwrap();
+        let text = eval(format!(r#"(read-file-strict "{}")"#, good.display()));
+        assert!(text.unwrap().value.unwrap().contains("* ok"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_hex_round_trips_binary() {
         let (engine, _rx) = ScriptEngine::new();
         let dir = std::env::temp_dir().join(format!("macros-hex-test-{}", std::process::id()));

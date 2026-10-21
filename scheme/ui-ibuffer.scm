@@ -16,7 +16,9 @@
 
 ;; Buffers killed from within this view. `kill-buffer-named` is queued, so the
 ;; `buffer-names` snapshot in the same command still lists the killed buffer —
-;; we filter it out here so it disappears immediately. Cleared on (re)open.
+;; we filter it out here so it disappears immediately. Cleared on (re)open and
+;; on `g`: a modified file buffer's kill waits on a yes/no prompt, and if that's
+;; declined the buffer must come back on the next refresh.
 (define *ibuffer-killed* '())
 
 (define (ibuffer-rows)
@@ -33,7 +35,12 @@
   (tabulated-setup-keys "ibuffer-mode")
   (define-key "ibuffer-mode" "d" 'ibuffer-kill)
   (define-key "ibuffer-mode" "x" 'ibuffer-kill)
-  (define-key "ibuffer-mode" "g" 'ibuffer-refresh))
+  (define-key "ibuffer-mode" "g" 'ibuffer-revert))
+
+;; g : forget optimistic kills (the snapshot has caught up by now) and redraw.
+(define (ibuffer-revert)
+  (set! *ibuffer-killed* '())
+  (ibuffer-refresh))
 
 ;; d / x : kill the buffer on the current line, then refresh in place.
 (define (ibuffer-kill)

@@ -1342,8 +1342,10 @@ pub fn apply_semantic_delta(prev: &[i64], result: &Value) -> Vec<i64> {
             .as_array()
             .map(|a| a.iter().map(|v| v.as_i64().unwrap_or(0)).collect())
             .unwrap_or_default();
+        // Both counts are the server's: saturate so a bogus `deleteCount`
+        // (u64::MAX) clamps to the end instead of wrapping below `start`.
         let start = start.min(data.len());
-        let end = (start + delete).min(data.len());
+        let end = start.saturating_add(delete).min(data.len());
         data.splice(start..end, new);
     }
     data
@@ -2118,6 +2120,11 @@ while True:
         let toks = decode_semantic_data(&merged, &legend);
         assert_eq!(toks[1], (0, 4, 2, "variable".to_string()));
         assert_eq!(semantic_result_id(&delta).as_deref(), Some("2"));
+
+        // A hostile/buggy deleteCount clamps to the end rather than panicking.
+        let huge = json!({ "edits": [{ "start": 5, "deleteCount": u64::MAX, "data": [] }] });
+        let clipped = apply_semantic_delta(&semantic_data(&result), &huge);
+        assert_eq!(clipped, vec![0, 0, 3, 0, 0]);
 
         // Legend parse from an initialize result.
         let init = json!({ "capabilities": { "semanticTokensProvider": {

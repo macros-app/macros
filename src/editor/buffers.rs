@@ -23,6 +23,15 @@ fn is_special_buffer_name(name: &str) -> bool {
     name.starts_with('*') && name.ends_with('*') && name.len() > 1
 }
 
+/// Does killing `doc` need a confirm? Emacs semantics: only a FILE-VISITING
+/// buffer guards unsaved changes — a scratch-like buffer (*scratch*, a
+/// package's query pane) has nowhere to save to, so killing it just discards.
+/// A modified grid counts even without a file (a workbook's sheet, an imported
+/// table): killing it loses the edits.
+fn doc_needs_kill_confirm(doc: &Document) -> bool {
+    doc.modified && (doc.path.is_some() || doc.grid.is_some())
+}
+
 /// The identity of the file at `path` for "is it already open?" checks: the
 /// canonical path (symlinks, `.`/`..`, and relative spellings resolved). A file
 /// that doesn't exist yet canonicalizes its directory and keeps its name; a
@@ -1245,14 +1254,25 @@ impl Editor {
         }
     }
 
-    /// Does killing the active buffer need a confirm? Emacs semantics: only a
-    /// FILE-VISITING buffer guards unsaved changes — a scratch-like buffer
-    /// (*scratch*, a package's query pane) has nowhere to save to, so killing
-    /// it just discards, no prompt.
+    /// Does killing the active buffer need a confirm? See [`doc_needs_kill_confirm`].
     fn kill_needs_confirm(&self) -> bool {
-        // A modified grid counts even without a file (a workbook's sheet, an
-        // imported table): killing it loses the edits.
-        self.active.modified && (self.active.path.is_some() || self.active.grid.is_some())
+        doc_needs_kill_confirm(&self.active)
+    }
+
+    /// `(kill-buffer-named name)` from Scheme — ibuffer's `d`/`x`, helm's "Kill
+    /// buffer", packages: the same unsaved-changes guard as `C-x k`, for any
+    /// buffer rather than just the active one. Internal callers that discard on
+    /// purpose (a grid cell popup, a deleted sheet) use [`Self::kill_buffer_named`].
+    pub(super) fn kill_buffer_named_confirming(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.doc(name).is_some_and(doc_needs_kill_confirm) {
+            self.open_confirm(
+                &format!("Buffer {name} modified; kill anyway?"),
+                PendingAction::KillBuffer(name.to_string()),
+                cx,
+            );
+        } else {
+            self.kill_buffer_named(name, cx);
+        }
     }
 
     /// `C-x k`: kill the active buffer (confirming first if it's a modified
@@ -1343,6 +1363,8 @@ impl Editor {
 
     /// Kill a buffer by name: the active one (via the normal path), or just drop
     /// an inactive [`Document`] (ibuffer/dired). Last buffer stays as scratch.
+    /// Kill `name` outright, unsaved changes and all (see
+    /// [`Self::kill_buffer_named_confirming`] for the guarded path).
     pub(super) fn kill_buffer_named(&mut self, name: &str, cx: &mut Context<Self>) {
         if name == self.active.name {
             self.kill_active_buffer(cx);
@@ -1892,6 +1914,45 @@ mod editor_state_tests {
             }
         });
         editor
+    }
+
+    #[gpui::test]
+    fn killing_a_modified_file_buffer_by_name_asks_first(cx: &mut TestAppContext) {
+        // ibuffer `d`/`x` and helm's "Kill buffer" go through
+        // `kill-buffer-named`: unsaved edits must get the same prompt as C-x k.
+        let ed = editor_with(cx, &["notes.txt", "scratch", "main.rs"]);
+        ed.update(cx, |e, cx| {
+            let i = e.inactive_index("notes.txt").unwrap();
+            e.inactive[i].path = Some(PathBuf::from("/tmp/notes.txt"));
+            e.inactive[i].modified = true;
+            e.kill_buffer_named_confirming("notes.txt", cx);
+            assert!(e.doc("notes.txt").is_some(), "killed without asking");
+            let purpose = e.minibuffer.as_ref().map(|m| m.purpose.clone());
+            assert!(matches!(
+                &purpose,
+                Some(MinibufferPurpose::Confirm(PendingAction::KillBuffer(n))) if n == "notes.txt"
+            ));
+            // Declining keeps it; confirming kills it.
+            e.mb_abort(cx);
+            assert!(e.doc("notes.txt").is_some());
+            e.perform(PendingAction::KillBuffer("notes.txt".into()), cx);
+            assert!(e.doc("notes.txt").is_none());
+
+            // The active buffer is guarded the same way.
+            e.active.path = Some(PathBuf::from("/tmp/main.rs"));
+            e.active.modified = true;
+            e.kill_buffer_named_confirming("main.rs", cx);
+            assert_eq!(e.active.name, "main.rs");
+            assert!(e.minibuffer.is_some());
+            e.mb_abort(cx);
+
+            // A fileless buffer (or an unmodified file) just goes.
+            let i = e.inactive_index("scratch").unwrap();
+            e.inactive[i].modified = true;
+            e.kill_buffer_named_confirming("scratch", cx);
+            assert!(e.doc("scratch").is_none());
+            assert!(e.minibuffer.is_none());
+        });
     }
 
     fn inactive_names(e: &Editor) -> Vec<String> {
