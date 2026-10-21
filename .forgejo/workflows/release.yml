@@ -22,6 +22,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
+          # Clone with the token, but don't leave it in .git/config where a
+          # dependency's build script could read it.
+          persist-credentials: false
       - name: Resolve version from Cargo.toml
         id: resolve
         run: |
@@ -78,10 +81,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
+          # Clone with the token, but don't leave it in .git/config where a
+          # dependency's build script could read it.
+          persist-credentials: false
       - name: Install Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      # Compile BEFORE the signing keychain is unlocked: cargo runs every
+      # dependency's build script and proc macros, and none of that third-party
+      # code should run while the Developer ID key is usable. build_macos.sh
+      # then only assembles and signs (--no-build).
+      - name: Build release binary
+        run: |
+          set -euo pipefail
+          if [ -n "$RUST_TARGET" ]; then
+            rustup target add "$RUST_TARGET"
+            cargo build --release --locked --bin macros --target "$RUST_TARGET"
+          else
+            cargo build --release --locked --bin macros
+          fi
       # The Developer ID identity lives in a dedicated signing keychain that was
       # set up once on the runner in a GUI session. The Developer ID identity is
       # per-team, so point MACOS_KEYCHAIN_PASSWORD / MACOS_SIGN_IDENTITY in this
@@ -103,8 +122,9 @@ jobs:
             exit 1
           fi
           security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$KC"
-          # No auto-lock, so it stays unlocked through the long cargo build.
-          security set-keychain-settings "$KC"
+          # Auto-lock after 15 minutes as a backstop; the "Lock signing
+          # keychain" step locks it explicitly once signing is done.
+          security set-keychain-settings -t 900 "$KC"
           # Add it to this session's search list (dedup, keep the others).
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed -e 's/[" ]//g' | grep -v "$KC" || true)
           echo "Keychains in search list:"
@@ -115,15 +135,20 @@ jobs:
             echo "::error::No 'Developer ID Application' identity visible after unlocking $KC. Re-run the one-time setup and confirm MACOS_KEYCHAIN_PASSWORD matches the keychain password."
             exit 1
           fi
-      - name: Build .app bundle
+      - name: Assemble and sign .app bundle
         env:
           # Sign with the Developer ID identity (e.g.
           # "Developer ID Application: Your Name (TEAMID)"). build_macos.sh
           # switches to a secure --timestamp automatically for a real identity.
           CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-          # RUST_TARGET (job env) tells build_macos.sh which slice to build; it
-          # runs `rustup target add` for the cross target itself. Empty = host.
-        run: scripts/build_macos.sh
+          # RUST_TARGET (job env) tells build_macos.sh which slice to package
+          # (the binary was already built above). Empty = host.
+        run: scripts/build_macos.sh --no-build
+      # The runner is persistent, so never leave the keychain unlocked after
+      # the job — including when an earlier step failed.
+      - name: Lock signing keychain
+        if: always()
+        run: security lock-keychain "$HOME/Library/Keychains/tukey-signing.keychain-db" || true
       # Submit to Apple's notary service and staple the ticket so the app passes
       # Gatekeeper on first launch, even offline. Uses an App Store Connect API
       # key (recommended over an Apple ID + app-specific password for CI).
@@ -189,6 +214,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
+          # Clone with the token, but don't leave it in .git/config where a
+          # dependency's build script could read it.
+          persist-credentials: false
       - name: Install system dependencies
         # Only on the fresh container leg; the self-hosted x86 runner already has
         # these (see the matrix note). Guarded by passwordless-sudo so it never
@@ -219,7 +247,7 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - name: Build
-        run: cargo build --release --bin macros
+        run: cargo build --release --locked --bin macros
       - name: Install nfpm
         # Same as the deps step: only the container leg needs it; the self-hosted
         # x86 runner already has nfpm on PATH.
@@ -269,6 +297,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ACCESS_TOKEN }}
+          # Clone with the token, but don't leave it in .git/config where a
+          # dependency's build script could read it.
+          persist-credentials: false
       # Rust/cargo are preinstalled on this self-hosted Windows runner, and its
       # native target is already x86_64-pc-windows-msvc, so no toolchain-install
       # step is needed.
@@ -292,7 +323,7 @@ jobs:
           wix extension add -g "WixToolset.UI.wixext/$wixVer"
       - name: Build release binary
         shell: pwsh
-        run: cargo build --release --bin macros
+        run: cargo build --release --locked --bin macros
       # ── Sign the EXE before packaging, so the installed app is signed too ──
       - name: Sign macros.exe (Azure Trusted Signing)
         uses: https://github.com/Azure/trusted-signing-action@v0.5.1
@@ -434,6 +465,8 @@ jobs:
       UPDATE_DOWNLOAD_BASE: ${{ secrets.UPDATE_DOWNLOAD_BASE }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
