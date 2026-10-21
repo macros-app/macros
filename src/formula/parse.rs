@@ -343,11 +343,22 @@ const MAX_FORMULA_CHARS: usize = 8192;
 /// recursive eval/print/drop of the tree it builds — far from the stack limit.
 const MAX_DEPTH: usize = 256;
 
+/// The cap on the built tree's height, which a long operator chain grows too:
+/// `1+1+…+1` is left-deep, one level per `+`, and eval recurses down it. Even
+/// 8192 characters of chain (~4000 levels) overflowed a 2 MiB thread stack.
+/// Measured at ~330 B per chain level and ~770 B per call level (arm64,
+/// dev profile), 256 calls plus 1024 chain levels stay well under 1 MiB even
+/// if another target's frames are twice as large.
+const MAX_HEIGHT: usize = 1024;
+
 struct Parser {
     toks: Vec<(usize, Tok)>,
     i: usize,
     /// Current operand nesting, checked against [`MAX_DEPTH`] in [`Self::unary`].
     depth: usize,
+    /// Tree height so far: nesting plus the operator chains above this point,
+    /// checked against [`MAX_HEIGHT`].
+    height: usize,
 }
 
 impl Parser {
@@ -390,7 +401,16 @@ impl Parser {
     /// Precedence climbing over the binary operators (all left-associative,
     /// `^` included, as in Excel).
     fn binary(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
-        let mut lhs = self.unary()?;
+        let lhs = self.unary()?;
+        let height = self.height;
+        let e = self.binary_chain(lhs, min_prec);
+        self.height = height;
+        e
+    }
+
+    /// The operator loop of [`Self::binary`]: each operator applied makes the
+    /// (left-deep) tree one level taller, counted against [`MAX_HEIGHT`].
+    fn binary_chain(&mut self, mut lhs: Expr, min_prec: u8) -> Result<Expr, ParseError> {
         while let Tok::Op(s) = self.peek() {
             let op = match *s {
                 "+" => BinOp::Add,
@@ -411,6 +431,10 @@ impl Parser {
             if prec < min_prec {
                 break;
             }
+            if self.height >= MAX_HEIGHT {
+                return Err(self.err("formula is nested too deeply"));
+            }
+            self.height += 1;
             self.next();
             let rhs = self.binary(prec + 1)?;
             lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs));
@@ -424,12 +448,14 @@ impl Parser {
     /// counted: a file's `((((…` or `----…1` must be a parse error, not a stack
     /// overflow that aborts the editor.
     fn unary(&mut self) -> Result<Expr, ParseError> {
-        if self.depth >= MAX_DEPTH {
+        if self.depth >= MAX_DEPTH || self.height >= MAX_HEIGHT {
             return Err(self.err("formula is nested too deeply"));
         }
         self.depth += 1;
+        self.height += 1;
         let e = self.unary_operand();
         self.depth -= 1;
+        self.height -= 1;
         e
     }
 
@@ -858,6 +884,7 @@ pub fn parse(text: &str) -> Result<Expr, ParseError> {
         toks,
         i: 0,
         depth: 0,
+        height: 0,
     };
     let e = p.expr().map_err(|mut e| {
         e.at += offset;
@@ -1023,11 +1050,16 @@ mod tests {
         // Realistic nesting is untouched.
         let ok = format!("={}1{}", "(".repeat(100), ")".repeat(100));
         assert!(parse(&ok).is_ok());
+        // A long operator chain is a deep (left-leaning) tree too.
+        let chain = format!("={}1", "1+".repeat(MAX_HEIGHT - 2));
+        assert!(parse(&chain).is_ok());
+        let chain = format!("={}1", "1+".repeat(MAX_HEIGHT + 10));
+        assert!(parse(&chain).unwrap_err().message.contains("nested"));
         // Excel's length cap: 8192 characters parse, one more doesn't.
-        let at_cap = format!("={}1", "1+".repeat((MAX_FORMULA_CHARS - 2) / 2));
-        assert!(at_cap.chars().count() <= MAX_FORMULA_CHARS);
+        let at_cap = format!("=\"{}\"", "a".repeat(MAX_FORMULA_CHARS - 3));
+        assert_eq!(at_cap.chars().count(), MAX_FORMULA_CHARS);
         assert!(parse(&at_cap).is_ok());
-        let over = format!("{at_cap}{}", "+1".repeat(MAX_FORMULA_CHARS));
+        let over = format!("=\"{}\"", "a".repeat(MAX_FORMULA_CHARS - 2));
         assert!(parse(&over).unwrap_err().message.contains("longer"));
     }
 

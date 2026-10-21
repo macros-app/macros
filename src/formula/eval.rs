@@ -600,12 +600,19 @@ pub(crate) mod tests {
 
     #[test]
     fn the_largest_parseable_trees_evaluate_without_overflow() {
-        // The parser's caps (8192 chars, nesting 256) bound the trees eval,
-        // print and drop recurse over; both extremes must fit a test thread's
-        // stack (2 MiB, smaller than the UI thread's).
+        // The parser's caps (nesting 256, tree height 1024) bound the trees
+        // eval, print and drop recurse over; the extremes, and both at once,
+        // must fit a test thread's stack (2 MiB, smaller than the UI thread's).
         let mut c = MockCtx::default();
-        let long = format!("={}1", "1+".repeat(4095));
-        assert_eq!(ev(&long, &mut c), n(4096.0));
+        let long = format!("={}1", "1+".repeat(1000));
+        assert_eq!(ev(&long, &mut c), n(1001.0));
+        let both = format!(
+            "={}{}1{}",
+            "1+".repeat(700),
+            "ABS(".repeat(250),
+            ")".repeat(250)
+        );
+        assert_eq!(ev(&both, &mut c), n(701.0));
         let deep = format!("={}1{}", "ABS(".repeat(250), ")".repeat(250));
         assert_eq!(ev(&deep, &mut c), n(1.0));
         let parens = format!("={}1{}", "(".repeat(250), ")".repeat(250));
