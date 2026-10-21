@@ -711,6 +711,8 @@ dependencies = [
 [[package]]
 name = "block"
 version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
 
 [[package]]
 name = "block-buffer"
@@ -3425,6 +3427,8 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macos"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af0fe6b615e579ce0180198417815547c1c9ae654dc1e2382299f0c3f3564f79"
 dependencies = [
  "accesskit",
  "accesskit_macos",

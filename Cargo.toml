@@ -267,11 +267,3 @@ gpui-platform = { version = "0.1.0", package = "gpui_ce_platform", features = [
 # zero-copy Span cells and byte-exact saves), which csv-core's copy-into-an-
 # output-buffer API doesn't expose, and csv-core silently skips blank lines.
 csv-core = "0.1"
-
-# block 0.1.6 (abandoned upstream) with its uninhabited-static future-
-# incompatibility fixed — see vendor/block/PATCHES.md.
-# gpui_ce_macos carries the Metal glyph contrast/gamma correction that
-# gpui-ce dropped — see vendor/gpui_ce_macos/PATCHES.md.
-[patch.crates-io]
-block = { path = "vendor/block" }
-gpui-ce-macos = { path = "vendor/gpui_ce_macos", package = "gpui_ce_macos" }

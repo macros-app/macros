@@ -74,9 +74,6 @@ ignore = []
 # Warn so they stay visible without blocking CI.
 multiple-versions = "warn"
 wildcards = "deny"
-# Path dependencies (the vendored gpui patch) carry no version; don't count
-# them as wildcards.
-allow-wildcard-paths = true
 
 [sources]
 # Only crates.io. A git dependency must be added here deliberately.
