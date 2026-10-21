@@ -45,6 +45,14 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         "kill-buffer-named",
         EditorCommand::KillBufferNamed,
     );
+    // `(retarget-file-buffers old new)`: after moving `old` to `new` on disk,
+    // point every buffer visiting `old` (or a file under it) at the new path.
+    register_binary(
+        reg,
+        queue,
+        "retarget-file-buffers",
+        EditorCommand::RetargetFileBuffers,
+    );
     register_unary(reg, queue, "set-major-mode", EditorCommand::SetMajorMode);
     register_unary(reg, queue, "open-file", EditorCommand::OpenFile);
     register_unary(

@@ -1,4 +1,4 @@
-;; requires: core
+;; requires: core dired
 
 ;; dired-sidebar.scm — the bundled file-tree, à la Emacs `dired-sidebar` +
 ;; `dired-subtree`. A real dired buffer pinned to a side window: you navigate the
@@ -19,9 +19,10 @@
 ;; the engine at eval time, so the engine and its consumer share a file.
 ;;
 ;; The flat directory editor in dired.scm is untouched — this is an additive tree
-;; layer, not a change to dired-mode. The file operations mirror dired.scm (rm /
-;; mv / cp / mkdir via call-process), but addressed at the entry under point in the
-;; tree rather than a single flat directory.
+;; layer, not a change to dired-mode. The file operations reuse dired.scm's
+;; (dired-move-file / -copy-file / -make-directory / -run: error reporting,
+;; overwrite confirmation, "~/" and absolute targets), addressed at the entry
+;; under point in the tree rather than a single flat directory.
 ;;
 ;; Built on general primitives (list-directory, render-buffer /
 ;; render-buffer-quiet, add-line-icon, overlays, window splitting, call-process,
@@ -59,6 +60,28 @@
 (define (dired-subtree-face name ignored?)
   (if (or ignored? (starts-with? name ".")) "comment" #f))
 
+;; Is the directory DIR (no trailing slash) a symlink? Its real path then differs
+;; from its parent's real path plus its own name.
+(define (dired-subtree-symlink-dir? dir)
+  (not (equal? (file-truename dir)
+               (path-join (file-truename (parent-directory dir)) (basename dir)))))
+
+;; PATHS as `git check-ignore` can take them. git aborts the WHOLE call ("beyond
+;; a symbolic link") on a symlinked directory spelled with a trailing "/" or on
+;; anything under one, so such a directory goes in as a plain link (no slash)
+;; and its contents are left out.
+(define (dired-subtree-git-paths paths)
+  (let loop ((ps paths) (links '()) (acc '()))
+    (if (null? ps)
+        (reverse acc)
+        (let* ((p (car ps)) (clean (strip-trailing-slash p)))
+          (cond ((not (null? (filter (lambda (l) (starts-with? p (string-append l "/")))
+                                     links)))
+                 (loop (cdr ps) links acc))
+                ((and (ends-with? p "/") (dired-subtree-symlink-dir? clean))
+                 (loop (cdr ps) (cons clean links) (cons clean acc)))
+                (else (loop (cdr ps) links (cons p acc))))))))
+
 ;; The gitignored subset of PATHS (full paths under ROOT, dirs with a trailing
 ;; "/"), as a hash keyed by slash-stripped full path. One `git check-ignore
 ;; --stdin` call per render; outside a git repo (or without git) it reports
@@ -68,7 +91,8 @@
          (plen (string-length prefix))
          (rel (lambda (p) (if (starts-with? p prefix)
                               (substring p plen (string-length p))
-                              p))))
+                              p)))
+         (paths (dired-subtree-git-paths paths)))
     (if (null? paths)
         (hash)
         (let ((out (nth (call-process-full
@@ -296,8 +320,11 @@
                   '()
                   (dired-subtree-ancestors *dired-sidebar-root* file)))
         (set! *dired-sidebar-marks* '())
-        ;; The split keeps the selected pane selected, so it (now the left 20%) is
-        ;; where the tree renders; the right 80% keeps the original buffer.
+        ;; Pin the tree to the frame's left edge: split the first (leftmost)
+        ;; window, not whichever pane happens to be selected. The split keeps
+        ;; that pane selected, so it (now the left 20%) is where the tree
+        ;; renders; the right 80% keeps its buffer.
+        (select-window (car (window-list)))
         (set! *dired-sidebar-window* (selected-window))
         (split-window-right-ratio 0.2)
         (dired-sidebar-render)
@@ -346,10 +373,15 @@
     (when e
       (let ((path (car e)) (is-dir (car (cdr e))))
         (if is-dir
-            (begin
+            (let ((dir (strip-trailing-slash path)))
+              ;; Collapsing hides the subtree: drop its marks too, so `x` never
+              ;; deletes something the tree no longer shows.
+              (when (member dir *dired-sidebar-expanded*)
+                (set! *dired-sidebar-marks*
+                      (filter (lambda (m) (not (starts-with? m (string-append dir "/"))))
+                              *dired-sidebar-marks*)))
               (set! *dired-sidebar-expanded*
-                    (dired-subtree-toggled *dired-sidebar-expanded*
-                                           (strip-trailing-slash path)))
+                    (dired-subtree-toggled *dired-sidebar-expanded* dir))
               (dired-sidebar-render))
             (open-file-other-window path))))))
 
@@ -377,24 +409,34 @@
                 'dired-sidebar-delete-confirmed)))
 (define (dired-sidebar-delete-confirmed ans)
   (when (equal? ans "yes")
-    (for-each (lambda (p) (call-process "rm" (list "-rf" (strip-trailing-slash p))))
-              *dired-sidebar-marks*)
-    (set! *dired-sidebar-marks* '())
-    (dired-sidebar-render)
-    (message "Deleted")))
+    ;; dired-run echoes each failure; only a clean run says "Deleted".
+    (let ((failed (filter (lambda (p)
+                            (not (dired-run "rm" (list "-rf" (strip-trailing-slash p)))))
+                          *dired-sidebar-marks*)))
+      (set! *dired-sidebar-marks* failed)
+      (dired-sidebar-render)
+      (when (null? failed) (message "Deleted")))))
 
 ;; --- rename / copy / mkdir --------------------------------------------------
+;; SRC was renamed to DEST: marks and open subdirectories follow it.
+(define (dired-sidebar-moved src dest)
+  (set! *dired-sidebar-marks*
+        (map (lambda (m) (dired-retarget m src dest)) *dired-sidebar-marks*))
+  (set! *dired-sidebar-expanded*
+        (map (lambda (d) (dired-retarget d src dest)) *dired-sidebar-expanded*))
+  (dired-sidebar-render))
+
+;; The source is captured in the closure — the callback runs with the minibuffer
+;; current, so the entry under point can't be re-read there. Targets resolve
+;; against the entry's own directory.
 (define (dired-sidebar-rename)
   (let ((p (dired-sidebar-path)))
     (when p
-      ;; The source is captured in the closure — the callback runs with the
-      ;; minibuffer current, so the entry under point can't be re-read there.
       (let ((src (strip-trailing-slash p)))
         (read-string (string-append "Rename " (basename src) " to: ")
           (lambda (name)
-            (when (not (equal? (trim-end name) ""))
-              (call-process "mv" (list src (path-join (parent-directory src) name)))
-              (dired-sidebar-render) (message "Renamed"))))))))
+            (dired-move-file src (parent-directory src) name
+              (lambda (dest) (dired-sidebar-moved src dest)))))))))
 
 (define (dired-sidebar-copy)
   (let ((p (dired-sidebar-path)))
@@ -402,17 +444,14 @@
       (let ((src (strip-trailing-slash p)))
         (read-string (string-append "Copy " (basename src) " to: ")
           (lambda (name)
-            (when (not (equal? (trim-end name) ""))
-              (call-process "cp" (list "-r" src (path-join (parent-directory src) name)))
-              (dired-sidebar-render) (message "Copied"))))))))
+            (dired-copy-file src (parent-directory src) name
+              (lambda (dest) (dired-sidebar-render)))))))))
 
 (define (dired-sidebar-mkdir)
   (let ((dir (dired-sidebar-context-dir)))
     (read-string "Create directory: "
       (lambda (name)
-        (when (not (equal? (trim-end name) ""))
-          (call-process "mkdir" (list "-p" (path-join dir name)))
-          (dired-sidebar-render) (message "Created directory"))))))
+        (dired-make-directory dir name (lambda (dest) (dired-sidebar-render)))))))
 
 ;; --- keymap -----------------------------------------------------------------
 ;; Single keys resolve against this mode keymap under both Emacs and evil: as a

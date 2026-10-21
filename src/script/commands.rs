@@ -268,6 +268,9 @@ pub enum EditorCommand {
     SwitchToBufferNamed(String),
     /// Kill a buffer by name (active or inactive).
     KillBufferNamed(String),
+    /// A file or directory moved on disk from `.0` to `.1` (a dired rename):
+    /// buffers visiting it, or a file under it, now visit the new path.
+    RetargetFileBuffers(String, String),
     /// Set the active (editable) buffer's major mode by name, so its keymap
     /// applies (e.g. shell-mode rebinding RET). Does not make the buffer special.
     SetMajorMode(String),

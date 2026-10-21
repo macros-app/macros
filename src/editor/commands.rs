@@ -487,6 +487,7 @@ impl Editor {
             }
             SwitchToBufferNamed(name) => self.switch_to_buffer(&name, cx),
             KillBufferNamed(name) => self.kill_buffer_named(&name, cx),
+            RetargetFileBuffers(old, new) => self.retarget_file_buffers(&old, &new, cx),
             SetMajorMode(mode) => {
                 // A mode whose name matches a bundled tree-sitter language carries
                 // that language, so highlighting AND the language server follow the

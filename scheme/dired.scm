@@ -52,11 +52,86 @@
           ((= (car (car es)) line) (cdr (car es)))
           (else (loop (cdr es) line)))))
 
+;; --- file operations (shared with dired-sidebar) ----------------------------
+;; Where NAME, typed at a rename/copy/mkdir prompt in DIR, points: a relative
+;; name lands in DIR; an absolute path, "~/…" or "//…" shadows DIR (the same
+;; expand-file-name rules as the file prompt).
+(define (dired-resolve dir name)
+  (expand-file-name (path-join dir name)))
+
+;; Where SRC ends up when moved/copied to TARGET: inside TARGET when it's an
+;; existing directory (as mv / cp do), else TARGET itself.
+(define (dired-destination src target)
+  (if (file-directory? target)
+      (path-join target (basename src))
+      target))
+
+;; Run PROGRAM with ARGS. #t on success; otherwise echo its error and return #f.
+(define (dired-run program args)
+  (let ((r (call-process-full program args "")))
+    (if (equal? (car r) "0")
+        #t
+        (let ((err (trim-end (nth r 2))))
+          (message (if (equal? err "") (string-append program " failed") err))
+          #f))))
+
+;; Call THUNK, first asking before it would overwrite an existing DEST.
+(define (dired-confirm-overwrite dest thunk)
+  (if (file-exists? dest)
+      (y-or-n-p (string-append (basename dest) " already exists; overwrite?")
+                (callback->name (lambda (ans) (when (equal? ans "yes") (thunk)))))
+      (thunk)))
+
+;; PATH with a moved OLD prefix (the file itself, or anything under it when it's
+;; a directory) replaced by NEW; PATH unchanged otherwise. A trailing "/" is kept.
+(define (dired-retarget path old new)
+  (let ((o (strip-trailing-slash old)) (n (strip-trailing-slash new)))
+    (cond ((equal? (strip-trailing-slash path) o)
+           (if (ends-with? path "/") (string-append n "/") n))
+          ((starts-with? path (string-append o "/"))
+           (string-append n (substring path (string-length o) (string-length path))))
+          (else path))))
+
+;; Move SRC to TARGET (relative to DIR) after any overwrite confirmation; on
+;; success re-point buffers visiting it and call (DONE dest).
+(define (dired-move-file src dir name done)
+  (when (not (equal? (trim-end name) ""))
+    (let* ((src (strip-trailing-slash src))
+           (dest (dired-destination src (dired-resolve dir name))))
+      (dired-confirm-overwrite dest
+        (lambda ()
+          (when (dired-run "mv" (list src dest))
+            (retarget-file-buffers src dest)
+            (done dest)
+            (message (string-append "Renamed to " dest))))))))
+
+;; Copy SRC to TARGET (relative to DIR), likewise; then call (DONE dest).
+(define (dired-copy-file src dir name done)
+  (when (not (equal? (trim-end name) ""))
+    (let* ((src (strip-trailing-slash src))
+           (dest (dired-destination src (dired-resolve dir name))))
+      (dired-confirm-overwrite dest
+        (lambda ()
+          (when (dired-run "cp" (list "-R" src dest))
+            (done dest)
+            (message (string-append "Copied to " dest))))))))
+
+;; Create directory NAME (relative to DIR, parents included); then (DONE dest).
+(define (dired-make-directory dir name done)
+  (when (not (equal? (trim-end name) ""))
+    (let ((dest (dired-resolve dir name)))
+      (when (dired-run "mkdir" (list "-p" dest))
+        (done dest)
+        (message "Created directory")))))
+
 ;; --- commands ---------------------------------------------------------------
 (define (dired-visit)
   (let ((p (dired-at-point)))
     (when p (if (ends-with? p "/") (dired-in p) (open-file p)))))
-(define (dired-up) (dired-in (parent-directory *dired-dir*)))
+;; At "/" there is no parent (parent-directory returns ""): stay put.
+(define (dired-up)
+  (let ((parent (parent-directory *dired-dir*)))
+    (dired-in (if (equal? parent "") "/" parent))))
 (define (dired-refresh) (dired-render))
 
 ;; basename/parent helpers keep a trailing "/", but the editor reports changed
@@ -97,10 +172,17 @@
                 'dired-delete-confirmed)))
 (define (dired-delete-confirmed ans)
   (when (equal? ans "yes")
-    (for-each (lambda (p) (call-process "rm" (list "-rf" p))) *dired-marks*)
-    (set! *dired-marks* '())
-    (dired-render)
-    (message "Deleted")))
+    ;; dired-run echoes each failure; only a clean run says "Deleted".
+    (let ((failed (filter (lambda (p) (not (dired-run "rm" (list "-rf" p))))
+                          *dired-marks*)))
+      (set! *dired-marks* failed)
+      (dired-render)
+      (when (null? failed) (message "Deleted")))))
+
+;; P was renamed to DEST: a mark on it (or on anything under it) follows it.
+(define (dired-moved p dest)
+  (set! *dired-marks* (map (lambda (m) (dired-retarget m p dest)) *dired-marks*))
+  (dired-render))
 
 ;; Rename / copy: the source path is captured in the prompt's closure (point is
 ;; in the minibuffer by the time the callback runs, so it can't be re-read).
@@ -109,22 +191,17 @@
     (when p
       (read-string (string-append "Rename " (basename p) " to: ")
         (lambda (name)
-          (when (not (equal? (trim-end name) ""))
-            (call-process "mv" (list p (path-join *dired-dir* name)))
-            (dired-render) (message "Renamed")))))))
+          (dired-move-file p *dired-dir* name
+            (lambda (dest) (dired-moved p dest))))))))
 (define (dired-copy)
   (let ((p (dired-at-point)))
     (when p
       (read-string (string-append "Copy " (basename p) " to: ")
         (lambda (name)
-          (when (not (equal? (trim-end name) ""))
-            (call-process "cp" (list "-r" p (path-join *dired-dir* name)))
-            (dired-render) (message "Copied")))))))
+          (dired-copy-file p *dired-dir* name (lambda (dest) (dired-render))))))))
 (define (dired-mkdir) (read-string "Create directory: " 'dired-mkdir-finish))
 (define (dired-mkdir-finish name)
-  (when (not (equal? (trim-end name) ""))
-    (call-process "mkdir" (list "-p" (path-join *dired-dir* name)))
-    (dired-render) (message "Created directory")))
+  (dired-make-directory *dired-dir* name (lambda (dest) (dired-render))))
 
 ;; --- keymap -----------------------------------------------------------------
 ;; The standard list keys (RET/n/p + no line numbers), then dired's own set.

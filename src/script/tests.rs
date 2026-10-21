@@ -8549,11 +8549,10 @@ mod dired_subtree_lib {
     #[test]
     fn sidebar_modal_overlay_motions() {
         let (engine, _rx) = ScriptEngine::new();
-        engine.eval(include_str!("../../scheme/core.scm")).unwrap();
-        let cmds = engine
-            .eval(include_str!("../../scheme/dired-sidebar.scm"))
-            .unwrap()
-            .commands;
+        let mut cmds = Vec::new();
+        for src in crate::runtime::script_with_deps("dired-sidebar") {
+            cmds.extend(engine.eval(src).unwrap().commands);
+        }
         let bound = |mode: &str, key: &str, cmd: &str| {
             cmds.iter().any(|c| {
                 matches!(c, EditorCommand::DefineKey(m, s, x)
@@ -8572,6 +8571,216 @@ mod dired_subtree_lib {
             "evil-goto-last-line"
         ));
         assert!(bound("dired-sidebar-mode", "g", "dired-sidebar-refresh"));
+    }
+}
+
+#[cfg(test)]
+mod dired_file_ops {
+    use super::*;
+
+    fn engine() -> ScriptEngine {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).unwrap();
+        }
+        engine
+    }
+
+    /// A fresh scratch directory (removed first if a previous run left it).
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("macros-dired-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Typed targets resolve like the file prompt: relative names join the
+    /// directory, absolute / `~/` / `//` paths shadow it; an existing directory
+    /// target means "into it"; marks follow a renamed entry.
+    #[test]
+    fn targets_resolve_and_marks_follow_renames() {
+        let engine = engine();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(v(r#"(dired-resolve "/a/b" "c.txt")"#), "\"/a/b/c.txt\"");
+        assert_eq!(v(r#"(dired-resolve "/a/b/" "/tmp/x")"#), "\"/tmp/x\"");
+        assert_eq!(
+            v(r#"(dired-resolve "/a/b" "~/x")"#),
+            format!("\"{home}/x\"")
+        );
+        let dir = scratch("dest");
+        let d = dir.to_string_lossy();
+        assert_eq!(
+            v(&format!(r#"(dired-destination "/src/f.txt" "{d}")"#)),
+            format!("\"{d}/f.txt\"")
+        );
+        assert_eq!(
+            v(&format!(
+                r#"(dired-destination "/src/f.txt" "{d}/new.txt")"#
+            )),
+            format!("\"{d}/new.txt\"")
+        );
+        assert_eq!(
+            v(r#"(dired-retarget "/a/b.txt" "/a/b.txt" "/a/c.txt")"#),
+            "\"/a/c.txt\""
+        );
+        assert_eq!(
+            v(r#"(dired-retarget "/a/sub/" "/a/sub" "/a/new")"#),
+            "\"/a/new/\""
+        );
+        assert_eq!(
+            v(r#"(dired-retarget "/a/sub/f" "/a/sub/" "/a/new")"#),
+            "\"/a/new/f\""
+        );
+        assert_eq!(
+            v(r#"(dired-retarget "/a/subway" "/a/sub" "/a/new")"#),
+            "\"/a/subway\""
+        );
+        engine
+            .eval(r#"(begin (set! *dired-dir* "/nonexistent-dired/") (set! *dired-marks* (list "/nonexistent-dired/a.txt" "/nonexistent-dired/b")) (dired-moved "/nonexistent-dired/a.txt" "/nonexistent-dired/z.txt"))"#)
+            .unwrap();
+        assert_eq!(
+            v("*dired-marks*"),
+            r#"("/nonexistent-dired/z.txt" "/nonexistent-dired/b")"#
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rename moves the file and re-points its buffers; a failing one echoes
+    /// the tool's error instead of claiming success; a clash asks first.
+    #[test]
+    fn moves_report_failures_and_confirm_overwrites() {
+        let engine = engine();
+        let dir = scratch("move");
+        let d = dir.to_string_lossy().into_owned();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+
+        let out = engine
+            .eval(&format!(
+                r#"(dired-move-file "{d}/a.txt" "{d}" "c.txt" (lambda (dest) dest))"#
+            ))
+            .unwrap();
+        assert!(!dir.join("a.txt").exists() && dir.join("c.txt").exists());
+        assert!(out.commands.iter().any(|c| matches!(
+            c,
+            EditorCommand::RetargetFileBuffers(old, new)
+                if *old == format!("{d}/a.txt") && *new == format!("{d}/c.txt")
+        )));
+
+        // Into a directory that doesn't exist: mv fails, and says so.
+        let out = engine
+            .eval(&format!(
+                r#"(dired-move-file "{d}/c.txt" "{d}" "nope/x.txt" (lambda (dest) dest))"#
+            ))
+            .unwrap();
+        assert!(dir.join("c.txt").exists());
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RetargetFileBuffers(..)))
+        );
+        assert!(
+            !out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::Message(m) if m.starts_with("Renamed")))
+        );
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::Message(m) if !m.is_empty()))
+        );
+
+        // Onto an existing file: nothing moves until the user confirms.
+        let out = engine
+            .eval(&format!(
+                r#"(dired-move-file "{d}/c.txt" "{d}" "b.txt" (lambda (dest) dest))"#
+            ))
+            .unwrap();
+        assert!(dir.join("c.txt").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "b");
+        assert!(out.commands.iter().any(
+            |c| matches!(c, EditorCommand::YesOrNo { prompt, .. } if prompt.contains("b.txt"))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `^` at the filesystem root stays at "/" instead of listing "".
+    #[test]
+    fn dired_up_stops_at_root() {
+        let engine = engine();
+        engine.eval(r#"(begin (dired-in "/") (dired-up))"#).unwrap();
+        assert_eq!(engine.eval("*dired-dir*").unwrap().value.unwrap(), "\"/\"");
+    }
+
+    /// Sidebar: collapsing a directory drops the marks it hides, and a rename
+    /// carries marks and open subdirectories to the new name.
+    #[test]
+    fn sidebar_marks_follow_collapse_and_rename() {
+        let engine = engine();
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+        engine
+            .eval(
+                r#"(begin
+                     (set! *dired-sidebar-root* "/nonexistent-sb")
+                     (set! *dired-sidebar-expanded* (list "/nonexistent-sb/sub" "/nonexistent-sb/sub/deep"))
+                     (set! *dired-sidebar-marks* (list "/nonexistent-sb/sub/a.txt" "/nonexistent-sb/b.txt"))
+                     (dired-sidebar-moved "/nonexistent-sb/sub" "/nonexistent-sb/new"))"#,
+            )
+            .unwrap();
+        assert_eq!(
+            v("*dired-sidebar-expanded*"),
+            r#"("/nonexistent-sb/new" "/nonexistent-sb/new/deep")"#
+        );
+        assert_eq!(
+            v("*dired-sidebar-marks*"),
+            r#"("/nonexistent-sb/new/a.txt" "/nonexistent-sb/b.txt")"#
+        );
+        // Point (line 0) on the open "new/" directory: RET collapses it.
+        engine
+            .eval(
+                r#"(begin
+                     (set! *dired-sidebar-entries* (list (list 0 "/nonexistent-sb/new/" #t)))
+                     (dired-sidebar-visit))"#,
+            )
+            .unwrap();
+        assert_eq!(v("*dired-sidebar-marks*"), r#"("/nonexistent-sb/b.txt")"#);
+        assert_eq!(
+            v("*dired-sidebar-expanded*"),
+            r#"("/nonexistent-sb/new/deep")"#
+        );
+    }
+
+    /// A symlinked directory in the tree must not abort `git check-ignore`
+    /// (git refuses paths "beyond a symbolic link"), which used to un-dim
+    /// every ignored entry.
+    #[cfg(unix)]
+    #[test]
+    fn gitignore_dimming_survives_symlinked_dirs() {
+        let engine = engine();
+        let dir = scratch("ignore");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return; // no git here
+        }
+        std::fs::write(dir.join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::create_dir_all(dir.join("ignored")).unwrap();
+        std::fs::create_dir_all(dir.join("real/deep")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let d = dir.to_string_lossy();
+        let q = format!(
+            r#"(let ((ig (dired-subtree-ignored "{d}" (list "{d}/ignored/" "{d}/link/" "{d}/link/deep/" "{d}/real/"))))
+                 (list (hash-contains? ig "{d}/ignored") (hash-contains? ig "{d}/real")))"#
+        );
+        assert_eq!(engine.eval(&q).unwrap().value.unwrap(), "(#true #false)");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

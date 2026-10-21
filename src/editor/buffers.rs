@@ -1364,6 +1364,45 @@ impl Editor {
         }
     }
 
+    /// `old` was moved to `new` on disk (a dired rename): every buffer visiting
+    /// `old`, or a file under it when it's a directory, now visits the matching
+    /// path under `new`, so saving writes there rather than resurrecting the old
+    /// file. Buffer names are kept (Scheme state is keyed by them — see
+    /// [`Self::unique_buffer_name`]). Language servers forget the old URIs; the
+    /// active buffer reopens under its new one, the rest when next shown.
+    pub(super) fn retarget_file_buffers(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+        let old = PathBuf::from(crate::util::expand_tilde(old.trim_end_matches('/')));
+        let new = PathBuf::from(crate::util::expand_tilde(new.trim_end_matches('/')));
+        if old.as_os_str().is_empty() || new.as_os_str().is_empty() {
+            return; // "" (or "/") would otherwise match every buffer
+        }
+        let mut moved = Vec::new();
+        for doc in self.docs_mut() {
+            let Some(rest) = doc.path.as_deref().and_then(|p| p.strip_prefix(&old).ok()) else {
+                continue;
+            };
+            let target = if rest.as_os_str().is_empty() {
+                new.clone()
+            } else {
+                new.join(rest)
+            };
+            moved.push(document_uri(doc));
+            doc.path = Some(target);
+        }
+        if moved.is_empty() {
+            return;
+        }
+        for uri in &moved {
+            self.lsp_close_document(uri);
+        }
+        if let Some(language) = self.active_language() {
+            self.lsp_open_active(&language);
+        }
+        self.sync_buffers();
+        self.reconcile_watches(cx);
+        cx.notify();
+    }
+
     /// `C-x C-c` / `cmd-q`: quit, offering to save first if any buffer is
     /// unsaved (same save/discard/cancel prompt as the title-bar close button).
     pub(super) fn quit(&mut self, cx: &mut Context<Self>) {
@@ -1912,6 +1951,33 @@ mod editor_state_tests {
             let pane = e.panes.iter().find(|p| p.id == other).unwrap();
             assert_ne!(pane.buffer, "zzz");
             assert!(e.doc(&pane.buffer).is_some(), "repointed at a live buffer");
+        });
+    }
+
+    #[gpui::test]
+    fn retargeting_a_moved_path_repoints_the_buffers_visiting_it(cx: &mut TestAppContext) {
+        let ed = editor_with(cx, &[]);
+        ed.update(cx, |e, cx| {
+            let visit = |e: &mut Editor, name: &str, path: &str| {
+                e.switch_to_doc(make_document(name.into(), Some(path.into()), "x"));
+            };
+            visit(e, "one", "/r/x/one.txt");
+            visit(e, "two", "/r/x/sub/two.txt");
+            visit(e, "three", "/r/xy/three.txt");
+            let path = |e: &Editor, name: &str| e.doc(name).and_then(|d| d.path.clone());
+            // A moved directory carries the files under it (a sibling sharing the
+            // name prefix does not move).
+            e.retarget_file_buffers("/r/x/sub/", "/r/z", cx);
+            assert_eq!(path(e, "two"), Some("/r/z/two.txt".into()));
+            assert_eq!(path(e, "three"), Some("/r/xy/three.txt".into()));
+            // A moved file (the active buffer is retargeted too), name kept.
+            e.retarget_file_buffers("/r/xy/three.txt", "/r/3.txt", cx);
+            assert_eq!(e.active.name, "three");
+            assert_eq!(path(e, "three"), Some("/r/3.txt".into()));
+            assert_eq!(path(e, "one"), Some("/r/x/one.txt".into()));
+            // An empty path never matches everything.
+            e.retarget_file_buffers("", "/elsewhere", cx);
+            assert_eq!(path(e, "one"), Some("/r/x/one.txt".into()));
         });
     }
 
