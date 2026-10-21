@@ -549,6 +549,20 @@ pub fn is_macros_scheme_path(path: &Path) -> bool {
             .any(|dir| path.starts_with(dir))
 }
 
+/// Whether `path` is Scheme the user already runs — it lives under the config
+/// directory or a local package dir their config registered — so it is safe to
+/// hand to Steel's compiler. Compiling is *not* inert: macro expansion runs
+/// `defmacro` bodies, and Steel's expansion kernel can spawn processes. A
+/// `*.macros.scm` name alone doesn't qualify (any cloned repo can ship one).
+/// Both sides are canonicalized, so `..` or a symlink can't fake the prefix.
+pub fn is_trusted_scheme_path(path: &Path) -> bool {
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    let under = |dir: &PathBuf| dir.canonicalize().is_ok_and(|dir| path.starts_with(dir));
+    config_dirs().iter().any(under) || LOCAL_SCHEME_DIRS.lock().unwrap().iter().any(under)
+}
+
 /// The active config directory: where `init.scm` was found, else the primary
 /// candidate location (so it resolves even before the user writes a config).
 /// `package-install` clones into its `packages/` subdirectory — exposed to Scheme

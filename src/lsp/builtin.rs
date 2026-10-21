@@ -562,15 +562,23 @@ impl SteelServer {
     }
 
     /// Diagnostics in layers: (1) delimiter/string balance (precise spots);
-    /// (2) the Steel compiler for structural/semantic errors; (3) when the file
-    /// otherwise compiles clean, a conservative unbound-operator scan over the
-    /// AST (likely typos — reported as warnings).
+    /// (2) the Steel compiler for structural/semantic errors — trusted files
+    /// only (see [`crate::runtime::is_trusted_scheme_path`]), since compiling runs
+    /// `defmacro` bodies and so would execute code from any file just opened;
+    /// (3) when the file otherwise compiles clean, a conservative
+    /// unbound-operator scan over the AST (likely typos — reported as warnings).
     fn compute_diagnostics(&mut self, text: &str, path: Option<&Path>) -> Vec<Value> {
         let balance = steel_diagnostics(text);
         if !balance.is_empty() {
             return balance;
         }
-        let mut diagnostics = match self.try_compile(text, path) {
+        let trusted = path.is_some_and(crate::runtime::is_trusted_scheme_path);
+        let compiled = if trusted {
+            self.try_compile(text, path)
+        } else {
+            CompileResult::Ok
+        };
+        let mut diagnostics = match compiled {
             CompileResult::Ok => Vec::new(),
             CompileResult::Error(err) => vec![self.steel_error_diagnostic(text, path, &err)],
             // Steel's compiler has panicked on malformed-but-balanced input
@@ -1515,8 +1523,10 @@ mod tests {
         let (mut server, mut rx) = SteelServer::start(false, &[]);
         let _init = futures::executor::block_on(rx.next()).unwrap();
 
-        // Balanced but malformed special form → a compiler diagnostic with a span.
-        server.set_document("file:///s.scm", "(if 1 2 3 4)");
+        // Balanced but malformed special form → a compiler diagnostic with a span
+        // (trusted files only: the compiler runs macros).
+        let uri = trusted_uri("semantic", "s.scm", "");
+        server.set_document(&uri, "(if 1 2 3 4)");
         let msg = futures::executor::block_on(rx.next()).unwrap();
         let diags = msg["params"]["diagnostics"].as_array().unwrap();
         assert_eq!(diags.len(), 1, "expected a semantic diagnostic: {msg}");
@@ -1525,8 +1535,16 @@ mod tests {
             "{msg}"
         );
 
+        // An untrusted file never reaches the compiler, so no semantic error.
+        server.set_document("file:///s.scm", "(if 1 2 3 4)");
+        let msg = futures::executor::block_on(rx.next()).unwrap();
+        assert!(
+            msg["params"]["diagnostics"].as_array().unwrap().is_empty(),
+            "untrusted files get syntax checks only: {msg}"
+        );
+
         // Valid code using a stdlib function compiles clean.
-        server.set_document("file:///s.scm", "(define (f x) (map (lambda (y) y) x))");
+        server.set_document(&uri, "(define (f x) (map (lambda (y) y) x))");
         let msg = futures::executor::block_on(rx.next()).unwrap();
         assert!(
             msg["params"]["diagnostics"].as_array().unwrap().is_empty(),
@@ -1601,12 +1619,13 @@ mod tests {
         let (mut server, mut rx) = SteelServer::start(false, &[]);
         let _init = futures::executor::block_on(rx.next()).unwrap();
 
-        server.set_document("file:///p.scm", "(define)");
+        let uri = trusted_uri("panics", "p.scm", "");
+        server.set_document(&uri, "(define)");
         let msg = futures::executor::block_on(rx.next()).unwrap();
         assert!(msg["params"]["diagnostics"].is_array(), "{msg}");
 
         // Still alive: a subsequent real error is still reported.
-        server.set_document("file:///p.scm", "(if 1 2 3 4)");
+        server.set_document(&uri, "(if 1 2 3 4)");
         let msg = futures::executor::block_on(rx.next()).unwrap();
         assert!(!msg["params"]["diagnostics"].as_array().unwrap().is_empty());
     }
@@ -1725,6 +1744,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The URI of `file` written into a fresh scratch dir registered as a local
+    /// package dir, so the server treats it as trusted and runs the compiler.
+    fn trusted_uri(dir_name: &str, file: &str, text: &str) -> String {
+        let dir = scratch_dir(dir_name);
+        crate::runtime::register_local_scheme_dir(dir.canonicalize().unwrap());
+        let path = dir.join(file);
+        std::fs::write(&path, text).unwrap();
+        path_to_uri(&path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_files_are_never_macro_expanded() {
+        // Compiling expands `defmacro`, which runs its body — and Steel's
+        // expansion kernel can spawn processes. A file the user merely opened
+        // (a cloned repo, a download) must not get that far.
+        let dir = scratch_dir("untrusted");
+        let marker = dir.join("PWNED");
+        let src = format!(
+            "(defmacro (m stx) (begin (spawn-process (command \"touch\" (list {:?}))) (quote (define z 1))))\n(m)\n",
+            marker.to_string_lossy()
+        );
+        let file = dir.join("evil.scm");
+        std::fs::write(&file, &src).unwrap();
+        for seed in [false, true] {
+            let (mut server, mut rx) = SteelServer::start(seed, &[]);
+            server.set_document(&path_to_uri(&file), &src);
+            let _ = next_diagnostics(&mut rx);
+            server.set_document("file:///unsaved.macros.scm", &src);
+            let _ = next_diagnostics(&mut rx);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!marker.exists(), "opening an untrusted file ran its macro");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
