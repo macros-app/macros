@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use gpui::{Context, Keystroke, MouseButton, Pixels, Point, SharedString};
 
@@ -107,6 +108,9 @@ pub(super) struct GridUi {
     pub formula_clip: Option<super::grid_formula::FormulaClip>,
     /// Where the grid's function-name dropdown was painted (for clicks).
     pub completion_hit: Option<PopupHit>,
+    /// A timer chain is scrolling the formula bar under a text drag held
+    /// past its edge.
+    pub bar_autoscroll: bool,
 }
 
 impl Default for GridUi {
@@ -124,6 +128,7 @@ impl Default for GridUi {
             recalc_scheduled: false,
             formula_clip: None,
             completion_hit: None,
+            bar_autoscroll: false,
         }
     }
 }
@@ -1949,6 +1954,8 @@ pub(super) struct GridGeom {
     pub bar_text_x: f32,
     pub bar_shift: f32,
     pub bar_char_w: f32,
+    /// How wide the formula bar's text area is.
+    pub bar_text_w: f32,
     /// The scrollbars as painted (vertical, horizontal), when shown.
     pub vbar: Option<ScrollBar>,
     pub hbar: Option<ScrollBar>,
@@ -1961,6 +1968,31 @@ impl GridGeom {
             f32::from(self.origin.x) + self.header_w,
             f32::from(self.origin.y) + self.bar_h + self.header_h,
         )
+    }
+
+    /// The formula bar's text area, from the pane's left.
+    pub fn bar_text_span(&self) -> (f32, f32) {
+        (self.bar_text_x, self.bar_text_x + self.bar_text_w)
+    }
+
+    /// The char index (into the bar's text) nearest `x` (from the pane's
+    /// left), allowing for how far the text is scrolled.
+    pub fn bar_char_at(&self, x: f32) -> usize {
+        let rel = (x - self.bar_text_x + self.bar_shift).max(0.0);
+        (rel / self.bar_char_w.max(1.0)).round() as usize
+    }
+
+    /// How far `x` lies past the bar's text area: negative to its left,
+    /// positive to its right, zero over it.
+    pub fn bar_overshoot(&self, x: f32) -> f32 {
+        let (lo, hi) = self.bar_text_span();
+        if x < lo {
+            x - lo
+        } else if x > hi {
+            x - hi
+        } else {
+            0.0
+        }
     }
 
     /// The scrollbar under `pos` (its band along the cells area's right or
@@ -2001,6 +2033,9 @@ pub(super) enum GridDrag {
         start: f32,
         size: f64,
     },
+    /// Selecting text in the formula bar: the pointer's last x (from the
+    /// pane's left).
+    BarText { pane: usize, x: f32 },
     /// Dragging a scrollbar thumb: grabbed `grab` px past its start. `bar`
     /// is the bar as it was on the press; its extent stays fixed until the
     /// release (see `crate::grid::scrollbar`).
@@ -3047,6 +3082,20 @@ impl Editor {
                 E::Redo => self.grid_command(GridCmd::Redo, cx),
                 E::SaveBuffer => self.grid_save(cx),
                 E::RevertBuffer => self.grid_revert(cx),
+                E::ClipboardCopy | E::KillRingSave if self.grid_edit_selection().is_some() => {
+                    if let Some(text) = self.grid_edit_selection() {
+                        self.set_clipboard(&text, cx);
+                    }
+                }
+                E::ClipboardCut | E::KillRegion if self.grid_edit_selection().is_some() => {
+                    if let Some(text) = self.grid_edit_selection() {
+                        self.set_clipboard(&text, cx);
+                    }
+                    self.grid_caret_edit(|e| _ = e.delete_selection(), cx);
+                }
+                E::MarkWholeBuffer if self.grid_editing() => {
+                    self.grid_caret_edit(CellEdit::select_all, cx)
+                }
                 E::ClipboardCopy | E::KillRingSave => self.grid_command(GridCmd::Yank, cx),
                 E::YankPop => self.grid_command(GridCmd::YankPop, cx),
                 E::Recenter => self.grid_command(GridCmd::Recenter, cx),
@@ -3459,6 +3508,12 @@ impl Editor {
     /// Typed text while editing a cell.
     pub(super) fn grid_edit_input(&mut self, text: &str, cx: &mut Context<Self>) {
         self.grid_caret_edit(|e| e.insert(text), cx);
+    }
+
+    /// The text selected in the cell being edited, if any.
+    fn grid_edit_selection(&self) -> Option<String> {
+        let e = self.active.grid.as_ref()?.view.edit.as_ref()?;
+        e.selected_text().map(str::to_string)
     }
 
     /// Apply `f` to the cell being edited. A caret edit ends any reference
@@ -4427,6 +4482,10 @@ impl Editor {
                 "right" => self.grid_caret_edit(CellEdit::right, cx),
                 "home" => self.grid_caret_edit(CellEdit::home, cx),
                 "end" => self.grid_caret_edit(CellEdit::end, cx),
+                "shift-left" => self.grid_caret_edit(|e| e.select_with(CellEdit::left), cx),
+                "shift-right" => self.grid_caret_edit(|e| e.select_with(CellEdit::right), cx),
+                "shift-home" => self.grid_caret_edit(|e| e.select_with(CellEdit::home), cx),
+                "shift-end" => self.grid_caret_edit(|e| e.select_with(CellEdit::end), cx),
                 "backspace" => self.grid_caret_edit(CellEdit::backspace, cx),
                 "delete" => self.grid_caret_edit(CellEdit::delete, cx),
                 _ => {}
@@ -4607,8 +4666,21 @@ impl Editor {
                 }
                 if let (Some(e), Some(geo)) = (g.view.edit.as_mut(), geo) {
                     e.in_bar = true;
-                    let rel = (x - geo.bar_text_x + geo.bar_shift).max(0.0);
-                    e.set_caret_chars((rel / geo.bar_char_w.max(1.0)).round() as usize);
+                    let at = geo.bar_char_at(x);
+                    match clicks {
+                        // Triple-click: everything (to copy, or Backspace
+                        // to clear); double-click: the word.
+                        3.. => e.select_all(),
+                        2 => e.select_word_at(at),
+                        _ => {
+                            if shift {
+                                e.extend_to_chars(at);
+                            } else {
+                                e.set_caret_chars(at);
+                            }
+                            self.grid_ui.drag = Some(GridDrag::BarText { pane, x });
+                        }
+                    }
                 }
             }
             GridHit::Corner => {
@@ -4764,6 +4836,24 @@ impl Editor {
                 self.grid_set_scroll(pane, axis, bar.offset_at(at - grab));
                 cx.notify();
             }
+            GridDrag::BarText { pane, .. } => {
+                let Some(geo) = self.grid_ui.geom.get(&pane).copied() else {
+                    return true;
+                };
+                let x = f32::from(pos.x) - f32::from(geo.origin.x);
+                self.grid_ui.drag = Some(GridDrag::BarText { pane, x });
+                // Past either end, the char at that end: the timer scrolls on.
+                let (lo, hi) = geo.bar_text_span();
+                let at = geo.bar_char_at(x.clamp(lo, hi));
+                if let Some(e) = self.pane_grid_mut(pane).and_then(|g| g.view.edit.as_mut()) {
+                    e.extend_to_chars(at);
+                }
+                if geo.bar_overshoot(x) != 0.0 && !self.grid_ui.bar_autoscroll {
+                    self.grid_ui.bar_autoscroll = true;
+                    self.schedule_grid_bar_autoscroll(cx);
+                }
+                cx.notify();
+            }
             GridDrag::Select { pane } => {
                 let Some(hit) = self.grid_hit(pane, pos) else {
                     return true;
@@ -4821,6 +4911,42 @@ impl Editor {
             }
         }
         true
+    }
+
+    /// One tick of the formula bar scrolling under a text drag held past its
+    /// edge: the selection grows by a few chars toward the pointer (faster
+    /// the further past it is), and the bar follows the caret. Stops itself
+    /// when the drag ends or the pointer comes back over the text.
+    fn schedule_grid_bar_autoscroll(&mut self, cx: &mut Context<Self>) {
+        let timer = cx.background_executor().timer(Duration::from_millis(30));
+        cx.spawn(async move |this, cx| {
+            timer.await;
+            this.update(cx, |editor, cx| {
+                let step = match editor.grid_ui.drag {
+                    Some(GridDrag::BarText { pane, x }) => {
+                        editor.grid_ui.geom.get(&pane).map(|geo| {
+                            (pane, geo.bar_overshoot(x) / (4.0 * geo.bar_char_w.max(1.0)))
+                        })
+                    }
+                    _ => None,
+                };
+                let Some((pane, over)) = step.filter(|&(_, over)| over != 0.0) else {
+                    editor.grid_ui.bar_autoscroll = false;
+                    return;
+                };
+                let n = (over.abs().ceil() as isize).clamp(1, 8) * over.signum() as isize;
+                if let Some(e) = editor
+                    .pane_grid_mut(pane)
+                    .and_then(|g| g.view.edit.as_mut())
+                {
+                    e.extend_by_chars(n);
+                }
+                cx.notify();
+                editor.schedule_grid_bar_autoscroll(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Mouse release: finish a resize (applied now, as one undo step) or a

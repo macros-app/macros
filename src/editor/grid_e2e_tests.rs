@@ -4100,3 +4100,156 @@ fn frozen_columns_stay_pinned_while_the_thumb_drags(cx: &mut TestAppContext) {
         );
     });
 }
+
+// --- Formula bar text selection ---------------------------------------------------
+
+/// A sheet whose A1 holds `n` letters: far wider than the formula bar.
+fn long_cell_csv(n: usize) -> (String, String) {
+    let text: String = (0..n).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    (format!("{text},b\n1,2\n"), text)
+}
+
+fn bar_edit(ed: &Entity<Editor>, vcx: &mut gpui::VisualTestContext) -> crate::grid::view::CellEdit {
+    ed.read_with(vcx, |e, _| {
+        e.active
+            .grid
+            .as_ref()
+            .unwrap()
+            .view
+            .edit
+            .clone()
+            .expect("editing")
+    })
+}
+
+fn bar_click(
+    ed: &Entity<Editor>,
+    vcx: &mut gpui::VisualTestContext,
+    x: f32,
+    y: f32,
+    clicks: usize,
+) {
+    let pos = gpui::point(gpui::px(x), gpui::px(y));
+    ed.update(vcx, |e, cx| {
+        assert!(e.grid_mouse_down(pos, gpui::MouseButton::Left, clicks, false, cx))
+    });
+}
+
+#[gpui::test]
+fn triple_click_in_the_bar_selects_all_to_copy_or_clear(cx: &mut TestAppContext) {
+    let (csv, text) = long_cell_csv(300);
+    let (ed, vcx) = windowed(cx, &csv);
+    let geo = paint_grid(&ed, vcx);
+    let (ox, oy) = (f32::from(geo.origin.x), f32::from(geo.origin.y));
+    let (x, y) = (ox + geo.bar_text_x + 30.0, oy + geo.bar_h / 2.0);
+    for clicks in 1..=3 {
+        bar_click(&ed, vcx, x, y, clicks);
+    }
+    mouse(&ed, vcx, "up", x, y);
+    let edit = bar_edit(&ed, vcx);
+    assert!(edit.in_bar);
+    assert_eq!(edit.selected_text(), Some(text.as_str()));
+    // The highlight is painted over the bar's text.
+    paint_grid(&ed, vcx);
+
+    ed.update(vcx, |e, cx| {
+        e.apply_command(EditorCommand::ClipboardCopy, cx)
+    });
+    let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+    assert_eq!(clip.as_deref(), Some(text.as_str()));
+    assert_eq!(
+        bar_edit(&ed, vcx).selected_text(),
+        Some(text.as_str()),
+        "copy keeps it"
+    );
+
+    ed.update(vcx, |e, cx| assert!(e.grid_action_key("backspace", cx)));
+    let edit = bar_edit(&ed, vcx);
+    assert_eq!((edit.text.as_str(), edit.caret), ("", 0));
+    ed.update(vcx, |e, cx| assert!(e.grid_action_key("enter", cx)));
+    ed.read_with(vcx, |e, _| {
+        assert_eq!(e.active.grid.as_ref().unwrap().source(0, 0), "")
+    });
+}
+
+#[gpui::test]
+fn dragging_in_the_bar_selects_and_scrolls_past_its_edge(cx: &mut TestAppContext) {
+    let (csv, text) = long_cell_csv(400);
+    let (ed, vcx) = windowed(cx, &csv);
+    let geo = paint_grid(&ed, vcx);
+    let (ox, oy) = (f32::from(geo.origin.x), f32::from(geo.origin.y));
+    let y = oy + geo.bar_h / 2.0;
+    let char_x = |geo: &super::grid::GridGeom, i: usize| {
+        ox + geo.bar_text_x - geo.bar_shift + i as f32 * geo.bar_char_w
+    };
+    // Clicking puts the caret under the pointer: the text scrolls back to it.
+    bar_click(&ed, vcx, char_x(&geo, 0) + 1.0, y, 1);
+    mouse(&ed, vcx, "up", 0.0, y);
+    let geo = paint_grid(&ed, vcx);
+    assert_eq!(geo.bar_shift, 0.0);
+    assert!(
+        (text.len() as f32) * geo.bar_char_w > geo.bar_text_w,
+        "the text overflows the bar"
+    );
+
+    // Press over char 2, drag to char 9: that span is selected.
+    mouse(&ed, vcx, "down", char_x(&geo, 2), y);
+    mouse(&ed, vcx, "move", char_x(&geo, 9), y);
+    assert_eq!(bar_edit(&ed, vcx).selected_text(), Some(&text[2..9]));
+    let geo = paint_grid(&ed, vcx);
+    assert_eq!(
+        geo.bar_shift, 0.0,
+        "a drag inside the bar doesn't scroll it"
+    );
+
+    // Past the right edge: the selection runs to the last char shown, then
+    // keeps growing (and the bar scrolling) while the pointer is held there.
+    let right = ox + geo.bar_text_x + geo.bar_text_w;
+    mouse(&ed, vcx, "move", right + 40.0, y);
+    let first = bar_edit(&ed, vcx).caret;
+    assert!(first > 9);
+    for _ in 0..20 {
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        paint_grid(&ed, vcx);
+    }
+    let edit = bar_edit(&ed, vcx);
+    assert!(
+        edit.caret > first + 10,
+        "held past the edge, it scrolls on ({first} → {})",
+        edit.caret
+    );
+    assert_eq!(edit.sel_anchor, Some(2));
+    let geo = paint_grid(&ed, vcx);
+    assert!(geo.bar_shift > 0.0, "the bar scrolled to show the caret");
+    let caret_x = char_x(&geo, edit.caret);
+    assert!(caret_x <= right + 0.5, "the caret is in view");
+
+    // Back over the text: scrolling stops, and the view holds still under
+    // the pointer instead of jumping back to the start.
+    let shift = geo.bar_shift;
+    let mid = ox + geo.bar_text_x + geo.bar_text_w / 2.0;
+    mouse(&ed, vcx, "move", mid, y);
+    let caret = bar_edit(&ed, vcx).caret;
+    for _ in 0..5 {
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        paint_grid(&ed, vcx);
+    }
+    assert_eq!(bar_edit(&ed, vcx).caret, caret);
+    assert_eq!(paint_grid(&ed, vcx).bar_shift, shift);
+
+    // And past the left edge it scrolls back toward the start.
+    mouse(&ed, vcx, "move", ox + geo.bar_text_x - 40.0, y);
+    for _ in 0..60 {
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        paint_grid(&ed, vcx);
+    }
+    mouse(&ed, vcx, "up", 0.0, y);
+    let edit = bar_edit(&ed, vcx);
+    assert_eq!(edit.caret, 0);
+    assert_eq!(edit.selected_text(), Some(&text[..2]));
+    assert_eq!(paint_grid(&ed, vcx).bar_shift, 0.0);
+    ed.read_with(vcx, |e, _| assert!(e.grid_ui.drag.is_none()));
+}

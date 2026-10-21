@@ -373,6 +373,11 @@ pub struct CellEdit {
     pub text: String,
     /// Caret byte offset into `text` (always a char boundary).
     pub caret: usize,
+    /// The other end of a text selection (byte offset), when one is active:
+    /// the selection runs between it and `caret`. Set by mouse drags and
+    /// clicks in the formula bar and by Shift-arrows; any other caret motion
+    /// clears it, and typing or deleting replaces what it covers.
+    pub sel_anchor: Option<usize>,
     /// The cell's value when the edit began — restored by `C-g`.
     pub original: String,
     pub in_bar: bool,
@@ -437,6 +442,7 @@ impl CellEdit {
             let (c0, c1) = (anchor.1.min(at.1), anchor.1.max(at.1));
             format!("{}:{}", cell_name(r0, c0), cell_name(r1, c1))
         };
+        self.sel_anchor = None;
         let span = match &self.point {
             Some(p) if p.span.end == self.caret => p.span.clone(),
             _ => self.caret..self.caret,
@@ -457,6 +463,7 @@ impl CellEdit {
             col,
             text,
             caret,
+            sel_anchor: None,
             original: original.to_string(),
             in_bar: false,
             completion: None,
@@ -466,8 +473,92 @@ impl CellEdit {
     }
 
     pub fn insert(&mut self, s: &str) {
+        self.delete_selection();
         self.text.insert_str(self.caret, s);
         self.caret += s.len();
+    }
+
+    /// The selected byte range, when the selection covers anything.
+    pub fn selection(&self) -> Option<std::ops::Range<usize>> {
+        let a = self.sel_anchor?;
+        if a > self.text.len() || !self.text.is_char_boundary(a) || a == self.caret {
+            return None;
+        }
+        Some(a.min(self.caret)..a.max(self.caret))
+    }
+
+    /// The selected text, when anything is selected.
+    pub fn selected_text(&self) -> Option<&str> {
+        self.selection().map(|r| &self.text[r])
+    }
+
+    /// Delete the selected text (the caret lands where it was). Returns
+    /// whether anything was selected.
+    pub fn delete_selection(&mut self) -> bool {
+        let sel = self.selection();
+        self.sel_anchor = None;
+        let Some(r) = sel else {
+            return false;
+        };
+        self.text.replace_range(r.clone(), "");
+        self.caret = r.start;
+        true
+    }
+
+    /// Select the whole text, caret at the end.
+    pub fn select_all(&mut self) {
+        self.sel_anchor = Some(0);
+        self.caret = self.text.len();
+    }
+
+    /// Select the word (or run of non-word chars) around char index `chars`.
+    pub fn select_word_at(&mut self, chars: usize) {
+        let at = self
+            .text
+            .char_indices()
+            .nth(chars)
+            .map_or(self.text.len(), |(i, _)| i);
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let kind = self.text[at..]
+            .chars()
+            .next()
+            .or_else(|| self.text[..at].chars().next_back())
+            .map(word);
+        let Some(kind) = kind else {
+            return;
+        };
+        let start = self.text[..at]
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| word(c) != kind)
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let end = self.text[at..]
+            .char_indices()
+            .find(|&(_, c)| word(c) != kind)
+            .map_or(self.text.len(), |(i, _)| at + i);
+        self.sel_anchor = Some(start);
+        self.caret = end;
+    }
+
+    /// Run caret motion `f`, extending the selection to where it lands
+    /// (Shift-arrows) instead of clearing it.
+    pub fn select_with(&mut self, f: impl FnOnce(&mut Self)) {
+        let anchor = self.sel_anchor.unwrap_or(self.caret);
+        f(self);
+        self.sel_anchor = Some(anchor);
+    }
+
+    /// Move the caret to char index `chars` (clamped), extending the
+    /// selection: a mouse drag.
+    pub fn extend_to_chars(&mut self, chars: usize) {
+        self.select_with(|e| e.set_caret_chars(chars));
+    }
+
+    /// Move the caret `delta` chars (clamped), extending the selection: the
+    /// formula bar scrolling under a drag held past its edge.
+    pub fn extend_by_chars(&mut self, delta: isize) {
+        let at = self.text[..self.caret].chars().count() as isize;
+        self.extend_to_chars((at + delta).max(0) as usize);
     }
 
     fn prev_boundary(&self) -> usize {
@@ -511,42 +602,57 @@ impl CellEdit {
     }
 
     pub fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let start = self.prev_boundary();
         self.text.replace_range(start..self.caret, "");
         self.caret = start;
     }
 
     pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let end = self.next_boundary();
         self.text.replace_range(self.caret..end, "");
     }
 
     pub fn left(&mut self) {
+        self.sel_anchor = None;
         self.caret = self.prev_boundary();
     }
 
     pub fn right(&mut self) {
+        self.sel_anchor = None;
         self.caret = self.next_boundary();
     }
 
     pub fn home(&mut self) {
+        self.sel_anchor = None;
         self.caret = 0;
     }
 
     pub fn end(&mut self) {
+        self.sel_anchor = None;
         self.caret = self.text.len();
     }
 
     pub fn word_left(&mut self) {
+        self.sel_anchor = None;
         self.caret = self.word_back();
     }
 
     pub fn word_right(&mut self) {
+        self.sel_anchor = None;
         self.caret = self.word_forward();
     }
 
     /// `C-w`: delete the word before the caret.
     pub fn kill_word_back(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let start = self.word_back();
         self.text.replace_range(start..self.caret, "");
         self.caret = start;
@@ -554,17 +660,20 @@ impl CellEdit {
 
     /// `C-u`: delete everything before the caret.
     pub fn kill_to_start(&mut self) {
+        self.sel_anchor = None;
         self.text.replace_range(..self.caret, "");
         self.caret = 0;
     }
 
     /// `C-k`: delete everything after the caret.
     pub fn kill_to_end(&mut self) {
+        self.sel_anchor = None;
         self.text.truncate(self.caret);
     }
 
     /// Place the caret at char index `chars` (clamped), for clicks.
     pub fn set_caret_chars(&mut self, chars: usize) {
+        self.sel_anchor = None;
         self.caret = self
             .text
             .char_indices()
@@ -1496,5 +1605,51 @@ mod tests {
         assert_eq!(v.selection((10, 5)).c1, 4);
         v.sel_kind = SelKind::Cols;
         assert_eq!(v.selection((10, 5)).r1, 9);
+    }
+
+    #[test]
+    fn cell_edit_selection_is_replaced_by_typing_and_deleting() {
+        let mut e = CellEdit::new(0, 0, "", "hello world".into(), true);
+        e.select_all();
+        assert_eq!(e.selected_text(), Some("hello world"));
+        e.backspace();
+        assert_eq!((e.text.as_str(), e.caret), ("", 0));
+
+        let mut e = CellEdit::new(0, 0, "", "hello world".into(), false);
+        e.set_caret_chars(2);
+        e.extend_to_chars(7);
+        assert_eq!(e.selected_text(), Some("llo w"));
+        e.insert("X");
+        assert_eq!((e.text.as_str(), e.caret), ("heXorld", 3));
+        assert_eq!(e.selection(), None);
+
+        // Dragging back past the anchor selects the other way.
+        e.set_caret_chars(5);
+        e.extend_to_chars(1);
+        assert_eq!(e.selected_text(), Some("eXor"));
+        e.delete();
+        assert_eq!(e.text, "hld");
+        // A plain motion collapses the selection.
+        e.set_caret_chars(0);
+        e.select_with(CellEdit::end);
+        e.left();
+        assert_eq!(e.selection(), None);
+        e.extend_by_chars(-1);
+        e.extend_by_chars(-5);
+        assert_eq!(e.selected_text(), Some("hl"));
+    }
+
+    #[test]
+    fn cell_edit_double_click_selects_the_word() {
+        let mut e = CellEdit::new(0, 0, "", "=SUM(A1, b_2)".into(), true);
+        e.select_word_at(2);
+        assert_eq!(e.selected_text(), Some("SUM"));
+        e.select_word_at(10);
+        assert_eq!(e.selected_text(), Some("b_2"));
+        e.select_word_at(7);
+        assert_eq!(e.selected_text(), Some(", "));
+        // Past the end: the word it ends with.
+        e.select_word_at(99);
+        assert_eq!(e.selected_text(), Some(")"));
     }
 }

@@ -1035,6 +1035,7 @@ impl Editor {
             return false;
         };
         let name = &c.names[index.unwrap_or(c.selected).min(c.names.len() - 1)];
+        e.sel_anchor = None;
         e.text.replace_range(c.start..e.caret, &format!("{name}("));
         e.caret = c.start + name.len() + 1;
         e.point = None;

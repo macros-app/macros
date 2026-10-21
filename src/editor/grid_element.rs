@@ -310,9 +310,14 @@ impl Element for GridElement {
             );
         }
         let bar_text = if f.bar_h > 0.0 {
-            f.formula_bar(&mut p, window)
+            let prev_shift = editor
+                .grid_ui
+                .geom
+                .get(&self.pane)
+                .map_or(0.0, |g| g.bar_shift);
+            f.formula_bar(prev_shift, &mut p, window)
         } else {
-            (0.0, 0.0)
+            (0.0, 0.0, 0.0)
         };
 
         let geom = f.geom(bar_text, bars);
@@ -713,7 +718,7 @@ impl<'a> Frame<'a> {
     /// What the element reports for hit-testing.
     fn geom(
         &self,
-        (bar_text_x, bar_shift): (f32, f32),
+        (bar_text_x, bar_shift, bar_text_w): (f32, f32, f32),
         (vbar, hbar): (Option<ScrollBar>, Option<ScrollBar>),
     ) -> GridGeom {
         GridGeom {
@@ -727,6 +732,7 @@ impl<'a> Frame<'a> {
             bar_text_x,
             bar_shift,
             bar_char_w: self.chrome_char_w,
+            bar_text_w,
             vbar,
             hbar,
         }
@@ -1554,10 +1560,17 @@ impl<'a> Frame<'a> {
     // --- formula bar ---------------------------------------------------------
 
     /// The formula bar: name box, `fx`, and the cursor cell's contents (or
-    /// the edit, with its caret). Returns where its text starts (from the
-    /// pane's left) and how far long text is scrolled, so a click lands on
-    /// the character under it.
-    fn formula_bar(&self, p: &mut GridPrepaint, window: &mut Window) -> (f32, f32) {
+    /// the edit, with its caret and selection). Returns where its text starts
+    /// (from the pane's left), how far long text is scrolled, and how wide
+    /// the text area is, so a click lands on the character under it.
+    /// `prev_shift` is last frame's scroll: it holds until the caret leaves
+    /// the view, so the text doesn't slide under a drag.
+    fn formula_bar(
+        &self,
+        prev_shift: f32,
+        p: &mut GridPrepaint,
+        window: &mut Window,
+    ) -> (f32, f32, f32) {
         let (g, pal, regular) = (self.g, &self.pal, &self.regular);
         let (font_size, char_w) = (self.chrome_size, self.chrome_char_w);
         let (left, top, width) = (self.left, self.top, self.width);
@@ -1619,11 +1632,12 @@ impl<'a> Frame<'a> {
         }
         let editing = g.view.edit.as_ref();
         let max_chars = (avail_text / char_w) as usize + 2;
+        // `↵` is two bytes longer than the `\n` it stands for.
+        let shown_index = |e: &CellEdit, i: usize| i + 2 * e.text[..i].matches('\n').count();
         let (shown, caret) = match editing {
             Some(e) => {
                 let shown = e.text.replace('\n', "↵");
-                let caret = e.caret + 2 * e.text[..e.caret].matches('\n').count();
-                (shown, Some(caret))
+                (shown, Some(shown_index(e, e.caret)))
             }
             None => {
                 let mut s: String = content.replace('\n', "↵").chars().take(max_chars).collect();
@@ -1646,9 +1660,32 @@ impl<'a> Frame<'a> {
             }
             None => shape(window, &shown, content_color),
         };
-        // Keep the caret in view when the edited text is wider than the bar.
+        // Keep the caret in view when the edited text is wider than the bar,
+        // scrolling only as far as it takes.
         let caret_x = caret.map(|c| f32::from(line.x_for_index(c)));
-        let shift = caret_x.map_or(0.0, |x| (x - avail_text + char_w).max(0.0));
+        let shift = caret_x.map_or(0.0, |x| {
+            let most = (f32::from(line.width) + char_w - avail_text).max(0.0);
+            let s = prev_shift.clamp(0.0, most);
+            if x < s {
+                x
+            } else if x > s + avail_text - char_w {
+                (x - avail_text + char_w).max(0.0)
+            } else {
+                s
+            }
+        });
+        if let Some(sel) = editing.and_then(|e| {
+            e.selection()
+                .map(|r| (shown_index(e, r.start), shown_index(e, r.end)))
+        }) {
+            let x0 = text_x - shift + f32::from(line.x_for_index(sel.0));
+            let x1 = text_x - shift + f32::from(line.x_for_index(sel.1));
+            let (x0, x1) = (x0.max(text_x), x1.min(text_x + avail_text));
+            if x1 > x0 {
+                p.over
+                    .push(fill(rect(x0, top + 4.0, x1 - x0, h - 8.0), pal.selection));
+            }
+        }
         if let (Some(x), Some(e)) = (caret_x, editing)
             && e.in_bar
         {
@@ -1672,7 +1709,7 @@ impl<'a> Frame<'a> {
             clip: rect(text_x, top, avail_text, h),
             line_height: lh,
         });
-        (text_x - left, shift)
+        (text_x - left, shift, avail_text)
     }
 }
 
