@@ -948,12 +948,16 @@ impl Editor {
             }
         }
         self.active.mark_active = false;
-        // In a special (read-only) buffer, a plain left click acts like a key:
-        // position the cursor on the clicked line, then resolve a `mouse-1`
-        // binding against the mode keymap and run it (dired-sidebar-visit, etc.). The
-        // line is mapped from pane geometry rather than `self.lines`, so a click
-        // that *also* focuses the pane (cursor was in another buffer) still lands
-        // on the right line this frame instead of needing a second click.
+        self.special_click = None;
+        // In a special (read-only) buffer, a plain left press positions the
+        // cursor on the clicked line and starts a drag selection, as in Emacs.
+        // When the mode binds `mouse-1` (dired-sidebar-visit, etc.), the
+        // binding runs on the release if the pointer stayed put (a click); a
+        // press that moves is a drag and selects text instead (see
+        // `SpecialClick`). The line is mapped from pane geometry rather than
+        // `self.lines`, so a click that *also* focuses the pane (cursor was in
+        // another buffer) still lands on the right line this frame instead of
+        // needing a second click.
         if self.active.special.is_some() && !event.modifiers.shift {
             // Normally map the click through the painted line layout (handles
             // wrapped lines exactly). On the frame a click *also* focuses this
@@ -970,19 +974,31 @@ impl Editor {
             if let Some(offset) = offset {
                 self.move_to(offset, cx);
             }
-            if let Some(expr) = self
+            match self
                 .keymap
                 .resolve(&self.active.modes, "mouse-1")
                 .map(str::to_string)
             {
-                self.dispatch_recorded(&expr, cx);
+                // The binding waits for the release; until then the press may
+                // still turn into a drag.
+                Some(expr) => {
+                    self.special_click = Some(SpecialClick {
+                        origin: event.position,
+                        expr,
+                    });
+                }
+                None => {
+                    if let Some(offset) = offset
+                        && event.click_count >= 2
+                    {
+                        self.select_by_click(offset, event.click_count >= 3, cx);
+                        return;
+                    }
+                }
             }
+            self.is_selecting = true;
             return;
         }
-        // Only a click in a normal buffer arms drag-selection. Special buffers
-        // return above; leaving `is_selecting` set there would let the click's
-        // mouse-up jitter extend a selection into whatever pane the `mouse-1`
-        // binding just switched to (e.g. the file dired-sidebar just opened).
         let offset = self.offset_for_position(event.position);
         if !event.modifiers.shift && event.click_count >= 2 {
             // Double-click selects the word, triple-click the line. No drag
@@ -1117,6 +1133,14 @@ impl Editor {
             return;
         }
         if self.is_selecting {
+            // A special-buffer press stays a click until the pointer leaves
+            // the slop; only then does it start selecting.
+            if let Some(click) = &self.special_click {
+                if !past_click_slop(click.origin, event.position) {
+                    return;
+                }
+                self.special_click = None;
+            }
             let offset = self.offset_for_position(event.position);
             self.select_to(offset, cx);
             self.evil_sync_mouse_selection();
@@ -1167,9 +1191,22 @@ impl Editor {
         }
     }
 
-    pub(super) fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.grid_mouse_up(cx);
         self.is_selecting = false;
+        // A special-buffer press that never became a drag is a click: run its
+        // `mouse-1` binding now. Selecting has already stopped, so a binding
+        // that switches panes cannot drag a selection along with it.
+        if let Some(click) = self.special_click.take()
+            && !past_click_slop(click.origin, event.position)
+        {
+            self.dispatch_recorded(&click.expr, cx);
+        }
         // The autoscroll timer chain checks `is_selecting` and stops itself.
         self.autoscroll.dy = 0.0;
         self.resizing = None;
