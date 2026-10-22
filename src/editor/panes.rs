@@ -897,6 +897,11 @@ impl Editor {
         if self.active.special.is_none() {
             return false;
         }
+        // Escape ends a keyboard selection before the buffer sees it.
+        if self.special_selecting() && key == "escape" {
+            self.special_select_end(cx);
+            return true;
+        }
         if let Some(expr) = self
             .keymap
             .resolve(&self.active.modes, key)

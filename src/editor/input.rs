@@ -164,6 +164,7 @@ impl Editor {
             Self::key_grid,
             Self::key_leader,
             Self::key_evil_insert,
+            Self::key_special_select,
             Self::key_special_chord_overlay,
             Self::key_special_buffer,
             Self::key_universal_argument,
@@ -949,6 +950,7 @@ impl Editor {
         }
         self.active.mark_active = false;
         self.special_click = None;
+        self.special_select_drop();
         // In a special (read-only) buffer, a plain left press positions the
         // cursor on the clicked line and starts a drag selection, as in Emacs.
         // When the mode binds `mouse-1` (dired-sidebar-visit, etc.), the
@@ -1024,7 +1026,10 @@ impl Editor {
     /// evil Normal this enters Visual / Visual Line like Vim; elsewhere it's a
     /// plain (exclusive) selection of the word or the whole line + newline.
     fn select_by_click(&mut self, offset: usize, line: bool, cx: &mut Context<Self>) {
-        let evil_visual = !self.modal_helix && matches!(self.evil, EvilState::Normal);
+        // Not in a special buffer: see `evil_sync_mouse_selection`.
+        let evil_visual = !self.modal_helix
+            && matches!(self.evil, EvilState::Normal)
+            && self.active.special.is_none();
         if self.modal_helix && self.has_extra_cursors() {
             self.mc_clear(cx);
         }
@@ -1064,7 +1069,7 @@ impl Editor {
             };
         }
         // Visual needs the mark active; so do Helix verbs (`all_selections`).
-        if evil_visual || self.modal_helix {
+        if evil_visual || self.modal_helix || self.active.special.is_some() {
             self.active.mark_active = true;
         }
         cx.notify();
@@ -1076,6 +1081,14 @@ impl Editor {
     /// Helix keeps selections in Normal, so it's left alone there.
     fn evil_sync_mouse_selection(&mut self) {
         if !matches!(self.evil, EvilState::Normal) || self.active.selected_range.is_empty() {
+            return;
+        }
+        // Special buffers bypass the modal layers (their own keymap gets every
+        // key), so Visual would do nothing there and, being shared across
+        // panes, would follow the user into the next buffer. Keep a plain
+        // region the copy commands can read.
+        if self.active.special.is_some() {
+            self.active.mark_active = true;
             return;
         }
         // Helix has no Visual state, but its verbs only see a selection whose

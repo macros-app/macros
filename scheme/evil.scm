@@ -2118,6 +2118,30 @@
 (for-each evil-collection-bind-readonly-motion
           (list "compile-mode" "grep-mode" "occur-mode"))
 
+;; Selecting text in a special buffer from the keyboard (evil or helix): `v` /
+;; `V`, when the buffer leaves them unbound, start a charwise / linewise
+;; selection, `y` copies it and `escape` ends it (the core owns those keys, see
+;; special_select.rs). While it is live these motions extend it, ahead of the
+;; buffer's own keys; anything unbound here still reaches the buffer.
+(define-keys "special-select"
+  '(("h" backward-char)
+    ("j" next-line)
+    ("k" previous-line)
+    ("l" evil-visual-forward-char)
+    ("w" forward-word-start)
+    ("b" backward-word-start)
+    ("e" evil-forward-word-end)
+    ("shift-w" forward-bigword-start)
+    ("shift-e" forward-bigword-end)
+    ("0" move-beginning-of-line)
+    ("$" move-end-of-line)
+    ("^" evil-first-non-blank)
+    ("g g" beginning-of-buffer)
+    ("shift-g" end-of-buffer)
+    ("ctrl-d" evil-scroll-down)
+    ("ctrl-u" evil-scroll-up)
+    ("o" exchange-point-and-mark)))
+
 ;; --- counts ------------------------------------------------------------------
 ;; These take their count as `(prefix-count)` and run once (`5G` = line 5,
 ;; `3yy` = three lines, `2fx` = second x). Everything else under a count simply

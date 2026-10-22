@@ -72,14 +72,15 @@ mod lsp_methods;
 mod mcp;
 mod minibuffer;
 mod modeline;
-#[cfg(test)]
-mod mouse_tests;
 mod net;
 mod overlays;
 mod panes;
 mod process;
 mod registers;
 mod session;
+mod special_select;
+#[cfg(test)]
+mod special_select_tests;
 mod structural;
 mod terminal;
 mod undo;
@@ -553,6 +554,9 @@ pub struct Editor {
     /// A press in a special buffer whose `mouse-1` binding waits for the
     /// release — see [`SpecialClick`].
     special_click: Option<SpecialClick>,
+    /// The special buffer holding a keyboard selection (evil/helix `v`), if
+    /// any — see `special_select.rs`.
+    special_select: Option<String>,
     /// Drag-select autoscroll state — see [`AutoscrollState`].
     autoscroll: AutoscrollState,
     /// Scrollback of echo-area messages (Emacs `*Messages*`), capped. Every
@@ -1444,6 +1448,7 @@ impl Editor {
             status: "Macros ready".into(),
             is_selecting: false,
             special_click: None,
+            special_select: None,
             messages: BoundedRing::new(MESSAGES_CAP),
             echo_count: 0,
             mcp: None,

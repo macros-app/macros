@@ -94,6 +94,8 @@ With multiple cursors, text you type replicates to every one of them.
 
 Read-only buffers (Magit, grep, compile, occur, …) get a vim/helix-style motion overlay under helix-mode, mirroring [evil's](/docs/modal-editing) collection layer: <kbd>j</kbd> / <kbd>k</kbd> everywhere, plus the full read-only motion set in plain-text result buffers.
 
+To copy text out of one, press <kbd>v</kbd> (or <kbd>V</kbd> for whole lines) where the buffer doesn't bind that key itself, extend the selection with the motions (<kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, <kbd>w</kbd> <kbd>b</kbd> <kbd>e</kbd>, <kbd>0</kbd> <kbd>$</kbd>, <kbd>g g</kbd> <kbd>G</kbd>), then <kbd>y</kbd> to copy it or <kbd>Esc</kbd> to cancel. A mouse drag selects too.
+
 ## Try it
 
 Run the in-editor Helix tutorial with <kbd>C-h t</kbd> and pick **[helix]** (or follow the `[helix]` link on the welcome screen).

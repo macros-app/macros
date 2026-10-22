@@ -117,6 +117,8 @@ impl Editor {
 
     pub(super) fn install_active(&mut self, doc: Document) {
         self.active = doc;
+        // A keyboard selection belongs to the buffer just left.
+        self.special_select_drop();
         if self.render_redirect.as_deref() == Some(self.active.name.as_str()) {
             self.render_redirect = None; // see `end_redirect_to`
         }
@@ -1497,6 +1499,11 @@ impl Editor {
             // line must not scroll back to point (they may have wheel-scrolled
             // away from it, which leaves point off-screen on purpose).
             let scroll = self.active.scroll_offset;
+            // New text: a keyboard selection's range means nothing in it.
+            if self.special_selecting() {
+                self.special_select_drop();
+                self.active.mark_active = false;
+            }
             self.active.buffer = Buffer::new(&text);
             // The old undo records address the replaced text; replaying one
             // against the new text corrupts it (or panics). Start fresh.

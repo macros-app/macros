@@ -133,6 +133,10 @@ Press <kbd>:</kbd> to enter an Ex command (from Visual it starts with `'<,'>`). 
 | --- | --- |
 | <kbd>C-d</kbd> / <kbd>C-u</kbd> | half-page down / up |
 
+## Copying from special buffers
+
+Special buffers (magit, dired, dashboards) take every key through their own keymap, so evil's states don't apply there. To copy text out of one, press <kbd>v</kbd> (or <kbd>V</kbd> for whole lines) where the buffer doesn't bind that key itself, extend the selection with the motions (<kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, <kbd>w</kbd> <kbd>b</kbd> <kbd>e</kbd>, <kbd>0</kbd> <kbd>$</kbd>, <kbd>g g</kbd> <kbd>G</kbd>), then <kbd>y</kbd> to copy it or <kbd>Esc</kbd> to cancel. A mouse drag selects too, and <kbd>Cmd-C</kbd> copies a dragged selection.
+
 ## No leader key by default
 
 Like vanilla evil-mode in Emacs, Macros' evil has **no <kbd>Space</kbd> leader bindings**. A leader menu is a Doom/Spacemacs convention, not part of evil itself, so it's left to you. Adding one is a few lines in your `init.scm`:
