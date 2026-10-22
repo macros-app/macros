@@ -4737,7 +4737,7 @@ dependencies = [
 
 [[package]]
 name = "macros"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "alacritty_terminal",
  "arc-swap",
