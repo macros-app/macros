@@ -3,7 +3,15 @@ import "./globals.css";
 import { plotFont } from "./_spectrum/plotFont";
 
 const DESCRIPTION =
-  "Macros is an Emacs-style, GPU-rendered code editor scripted in Steel (Scheme). Modal editing, a built-in git porcelain, LSP, projects, org-mode, an embedded terminal — every keybinding and command is yours to redefine.";
+  "Macros is an Emacs-style, GPU-rendered code editor written in Rust and scripted in Steel (Scheme). Spreadsheet buffers, charts drawn in text, Magit, Org mode, LSP, and Emacs, evil, or helix keys — every keybinding and command is yours to redefine.";
+
+// Rendered at build time by app/og.png/route.tsx.
+const OG_IMAGE = {
+  url: "/og.png",
+  width: 1200,
+  height: 630,
+  alt: "Macros — Emacs ideas, a modern engine. An Emacs-style editor in Rust, scripted in Steel Scheme.",
+};
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://macros.dev"),
@@ -39,11 +47,13 @@ export const metadata: Metadata = {
     title: "Macros — Emacs ideas, a modern engine",
     description: DESCRIPTION,
     url: "https://macros.dev",
+    images: [OG_IMAGE],
   },
   twitter: {
     card: "summary_large_image",
     title: "Macros — Emacs ideas, a modern engine",
     description: DESCRIPTION,
+    images: [OG_IMAGE],
   },
   icons: {
     icon: "/favicon-32.png",
