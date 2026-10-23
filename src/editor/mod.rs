@@ -743,6 +743,10 @@ pub struct Editor {
     /// The count published to Scheme as `(prefix-count)` while a count-aware
     /// command is dispatched (0 otherwise).
     prefix_count: usize,
+    /// The most recent buffer edit as `(beg end old-len)` (byte offsets; the
+    /// pre-change span length), published for `(last-change)` so
+    /// `after-change-functions` hooks can tell insertions from deletions.
+    last_change: (usize, usize, usize),
     /// Command names that take their count via `(prefix-count)` instead of
     /// being run N times (`set-count-aware!`).
     count_aware: HashSet<String>,
@@ -1522,6 +1526,7 @@ impl Editor {
             evil_replace_count: 1,
             vim: vim::VimState::default(),
             prefix_count: 0,
+            last_change: (0, 0, 0),
             count_aware: HashSet::new(),
             count_repeat: None,
             kill_append: false,
@@ -2239,9 +2244,11 @@ impl Editor {
             )
         });
 
+        // Capture the pre-change span length for `(last-change)` before
+        // `range` is consumed by the replace.
+        let old_span_len = range.end - range.start;
         let cursor = self.apply_tracked_replace(range, new_text);
         self.active.modified = true;
-
         if let Some((start_byte, old_end_byte, start_point, old_end_point)) = positions {
             let new_end_byte = start_byte + new_text.len();
             let new_end_point = self.active.buffer.point_at(new_end_byte);
@@ -2263,8 +2270,18 @@ impl Editor {
         let last_char = new_text.char_indices().next_back().map_or(0, |(i, _)| i);
         self.set_auto_mark(']', range_start + last_char);
         self.set_auto_mark('.', range_start);
-        // Emacs `after-change-functions`. Guarded, so it costs nothing unless a
-        // hook is registered (then it opts into a dispatch per edit).
+        // Emacs `after-change-functions` receive `(beg end old-len)`; publish
+        // the same triple so `(last-change)` can tell an insertion (old-len 0)
+        // from a deletion or replacement. `range` is pre-change, so its length
+        // is the replaced text's byte length.
+        self.last_change = (range_start, range_start + new_text.len(), old_span_len);
+        // Publishing builds the full snapshot (rope clone + prop/locals/
+        // diagnostics vectors), so only pay it when a hook will actually
+        // read the change — an unhooked buffer keeps its per-keystroke cost
+        // at the three marks.
+        if self.has_active_hook("after-change-functions") {
+            self.publish_point();
+        }
         self.run_hook("after-change-functions");
         cursor
     }
@@ -3668,6 +3685,7 @@ impl Editor {
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
             prefix_count: self.prefix_count,
+            last_change: self.last_change,
             evil_state: self.evil.as_str().to_string(),
             search_query: self.search_query.clone().unwrap_or_default(),
             search_forward: self.evil_search_forward,

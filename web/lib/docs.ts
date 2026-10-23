@@ -42,6 +42,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { slug: "editing-commands", label: "Editing commands", blurb: "Kill/yank, region, multiple cursors, occur" },
       { slug: "completion", label: "Completion", blurb: "The corfu-style popup and CAPFs" },
       { slug: "snippets", label: "Snippets", blurb: "YASnippet-style templates with tab-stops" },
+      { slug: "abbrev", label: "Abbreviations", blurb: "Emacs-style abbrevs: expand short words into longer text on demand" },
     ],
   },
   {

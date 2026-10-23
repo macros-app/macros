@@ -110,6 +110,11 @@ pub struct EditorSnapshot {
     /// The Vim/Helix count typed before a count-aware command (`3` in `3dd`),
     /// or 0 when none was typed. For `(prefix-count)`; see `set-count-aware!`.
     pub prefix_count: usize,
+    /// The most recent buffer edit as `(beg end old-len)` — byte offsets and
+    /// the pre-change span length, Emacs's `after-change-functions` triple.
+    /// `old-len == 0` means a pure insertion; `(0, 0, 0)` is the no-change
+    /// startup state. For `(last-change)`.
+    pub last_change: (usize, usize, usize),
     /// The modal state name ("normal", "insert", "visual", "visual-line",
     /// "visual-block"; "" when modal editing is off), for `(evil-state)`.
     pub evil_state: String,

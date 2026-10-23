@@ -129,6 +129,15 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             s.region.map_or(-1, |(_, b)| b as isize)
         });
         register_snapshot_read(reg, snapshot, "region-active?", |s| s.region.is_some());
+        // `(last-change)` → `(beg end old-len)` for the most recent buffer
+        // edit — byte offsets and the pre-change span length (Emacs's
+        // `after-change-functions` triple). `old-len == 0` is a pure
+        // insertion; `(0 0 0)` is the no-change startup state. Lets a hook
+        // tell a typed terminator from a deletion that happens to leave one
+        // behind.
+        register_snapshot_read(reg, snapshot, "last-change", |s| {
+            [s.last_change.0, s.last_change.1, s.last_change.2].to_vec()
+        });
         // `(selections)` → a flat list `(a0 h0 a1 h1 …)` of every selection's
         // anchor/head byte offsets, primary first (Helix multiple selections).
         // Flat (not pairs) so it round-trips straight into `(set-selections …)`.
