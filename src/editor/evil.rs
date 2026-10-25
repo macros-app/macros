@@ -736,6 +736,8 @@ impl Editor {
             // Write / quit.
             (Some(ExCmd::Write), false) if !arg.is_empty() => self.write_buffer_to(arg, cx),
             (Some(ExCmd::Write), false) => self.save_buffer(cx),
+            // `:w!` writes even over a file changed on disk since it was read.
+            (Some(ExCmd::Write), true) if arg.is_empty() => self.save_buffer_ex(false, cx),
             // Every quit here ends the APP (vim's would close one window),
             // so the non-`!` forms refuse while ANY buffer is unsaved —
             // vim's E37/E162 — and `!` is the explicit discard.
@@ -750,25 +752,25 @@ impl Editor {
             // (see `save_all_modified`'s quit-path contract). A failed write
             // aborts the quit so the error stays visible and no work is lost.
             (Some(ExCmd::WriteQuit), false) => {
-                if self.save_active_sync(cx) && !self.refuse_quit_if_modified(cx) {
+                if self.save_active_sync(true, cx) && !self.refuse_quit_if_modified(cx) {
                     self.quit_now(cx);
                 }
             }
             // `:wq!` writes this buffer, then quits discarding the others.
             (Some(ExCmd::WriteQuit), true) => {
-                if self.save_active_sync(cx) {
+                if self.save_active_sync(false, cx) {
                     self.quit_now(cx);
                 }
             }
             // Still refuses if something couldn't be written (a modified
             // buffer with no file, e.g. an edited *scratch*-like buffer).
             (Some(ExCmd::WriteQuitAll), false) => {
-                if self.save_all_modified(cx) && !self.refuse_quit_if_modified(cx) {
+                if self.save_all_modified(true, cx) && !self.refuse_quit_if_modified(cx) {
                     self.quit_now(cx);
                 }
             }
             (Some(ExCmd::WriteQuitAll), true) => {
-                if self.save_all_modified(cx) {
+                if self.save_all_modified(false, cx) {
                     self.quit_now(cx);
                 }
             }

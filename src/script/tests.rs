@@ -13189,54 +13189,54 @@ mod bookmarks_lib {
         );
     }
 
+    /// Play the editor's side of `edit-file-text`: check the capture asked for
+    /// `path`'s text, hand the callback `existing`, and return what it answered
+    /// with `set-file-text`.
+    fn answer_file_edit(engine: &ScriptEngine, cmds: &[EditorCommand], existing: &str) -> String {
+        let (path, callback) = cmds
+            .iter()
+            .find_map(|c| match c {
+                EditorCommand::EditFileText { path, callback } => Some((path, callback)),
+                _ => None,
+            })
+            .expect("capture should ask for the target's text");
+        let answer = engine
+            .eval(&format!(
+                "({callback} {} {})",
+                crate::script::steel_quote(path),
+                crate::script::steel_quote(existing)
+            ))
+            .unwrap();
+        answer
+            .commands
+            .into_iter()
+            .find_map(|c| match c {
+                EditorCommand::SetFileText { path: p, text } if &p == path => Some(text),
+                _ => None,
+            })
+            .expect("the callback should answer with set-file-text")
+    }
+
     #[test]
     fn org_capture_under_headline_lands_on_the_inserted_item() {
         let (engine, _rx) = ScriptEngine::new();
         load_with_deps(&engine, "org");
-        // The target path must pass org--resolve-path's POSIX "^[/~]" absolute
-        // test, and the file primitives must be able to write it:
-        //  - POSIX: an absolute /tmp dir (a runner's filesystem root isn't
-        //    writable),
-        //  - Windows: file primitives resolve a leading "/" against the CURRENT
-        //    DRIVE (and reject "/C:/…"-style paths), so use a unique drive-root
-        //    scratch dir; "/x" and "C:/x" land in the same place.
-        // Both dirs are removed at the end.
-        let (path, cleanup);
-        #[cfg(not(windows))]
-        {
-            let dir = format!("/tmp/macros-capture-{}", std::process::id());
-            path = format!("{dir}/capture.org");
-            cleanup = dir;
-        }
-        #[cfg(windows)]
-        {
-            let root = format!("macros-capture-{}", std::process::id());
-            path = format!("/{root}/capture.org");
-            cleanup = {
-                // "/x" resolves against the current drive; recover its letter from
-                // the cwd ("C:\…") so the scratch dir can be removed afterwards.
-                let cwd = std::env::current_dir()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-                let drive: String = cwd
-                    .chars()
-                    .take_while(|c| *c != '/' && *c != '\\')
-                    .collect();
-                format!("{drive}/{}", root)
-            };
-        }
-        engine
-            .eval(&format!(r#"(write-file "{path}" "** Inbox\n* Other\n")"#))
-            .unwrap();
+        // The capture never touches the file itself: it asks the editor for
+        // the target's text (an open buffer's, if any) and answers with the
+        // new text, so the path only has to pass org--resolve-path.
+        let path = "/tmp/capture.org";
+        let commit = |item: &str| {
+            engine
+                .eval(&format!(
+                    r#"(org--capture-commit (list "t" "T" (list "file+headline" "{path}" "Inbox")) "{item}")"#
+                ))
+                .unwrap()
+                .commands
+        };
         // A "file+headline" capture files the text as a child of the headline,
         // AFTER its subtree end — the bookmark must land on the inserted item,
         // not on the parent headline.
-        engine
-            .eval(&format!(
-                r#"(org--capture-commit (list "t" "T" (list "file+headline" "{path}" "Inbox")) "* TODO x")"#
-            ))
-            .unwrap();
+        let text = answer_file_edit(&engine, &commit("* TODO x"), "** Inbox\n* Other\n");
         // "** Inbox" (line 0) has no body, so the item is inserted at line 1:
         // position = bytes of the one preceding line + its newline.
         let e = v(
@@ -13252,22 +13252,13 @@ mod bookmarks_lib {
             "#true",
             "headline-capture position"
         );
-        let text = engine
-            .eval(&format!(r#"(read-file "{path}")"#))
-            .unwrap()
-            .value
-            .unwrap();
         assert!(
             text.contains("*** TODO x"),
             "item not filed as a child: {text}"
         );
 
         // A second capture under the same headline lands below the first item.
-        engine
-            .eval(&format!(
-                r#"(org--capture-commit (list "t" "T" (list "file+headline" "{path}" "Inbox")) "* TODO y")"#
-            ))
-            .unwrap();
+        let text = answer_file_edit(&engine, &commit("* TODO y"), &text);
         let e = v(
             &engine,
             r#"(alist-ref (cdr (alist-ref *bookmarks* "org-capture-last-stored")) "line")"#,
@@ -13281,7 +13272,43 @@ mod bookmarks_lib {
             "#true",
             "second capture position"
         );
-        let _ = std::fs::remove_dir_all(&cleanup);
+        assert_eq!(text, "** Inbox\n*** TODO x\n*** TODO y\n* Other\n");
+
+        // With no such headline the item is appended to the end.
+        let text = answer_file_edit(
+            &engine,
+            &engine
+                .eval(&format!(
+                    r#"(org--capture-commit (list "t" "T" (list "file+headline" "{path}" "Nope")) "* TODO z")"#
+                ))
+                .unwrap()
+                .commands,
+            "* Other",
+        );
+        assert_eq!(text, "* Other\n* TODO z\n");
+    }
+
+    #[test]
+    fn org_simple_capture_appends_through_the_editor() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "org");
+        engine
+            .eval(r#"(org-set-capture-file "/tmp/inbox.org")"#)
+            .unwrap();
+        let cmds = engine
+            .eval(r#"(org--capture-finish "  buy milk ")"#)
+            .unwrap()
+            .commands;
+        // The capture is never written straight to disk (where a buffer
+        // visiting the file would lose it on its next save).
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, EditorCommand::SetFileText { .. })),
+            "capture must wait for the target's current text: {cmds:?}"
+        );
+        let text = answer_file_edit(&engine, &cmds, "* DONE a");
+        assert_eq!(text, "* DONE a\n* TODO buy milk\n");
     }
 
     #[test]

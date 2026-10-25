@@ -124,6 +124,7 @@ pub fn write_sequenced(
     }
     atomic_write(path, contents)?;
     *last = ticket.generation;
+    note_synced(&ticket.key, stamp(&ticket.key), contents);
     Ok(SaveOutcome::Written)
 }
 
@@ -186,6 +187,163 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
         let _ = dir.sync_all();
     }
     Ok(())
+}
+
+// --- External changes ------------------------------------------------------
+//
+// A buffer's text is based on the file as it was when the buffer last read or
+// wrote it. If something else (`git pull`, a formatter, another editor) has
+// rewritten the file since, saving the buffer would silently destroy that
+// work, so saves ask first (Emacs's "changed on disk; really save?").
+//
+// Every buffer save goes through `write_sequenced`, which records what it
+// wrote; visits and reverts record what they read via `note_synced`. Plain
+// `atomic_write` (Scheme's `write-file`) records nothing on purpose: a script
+// rewriting a file that a buffer has open is exactly the change a later save
+// of that buffer must not clobber unasked.
+
+/// Enough of a file's metadata to notice it was rewritten, without reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    /// Unix inode (0 elsewhere): an atomic save by another program renames a
+    /// new file into place even when the size and mtime happen to match.
+    inode: u64,
+}
+
+/// The state of a file a buffer last read or wrote: its stamp and a hash of
+/// its contents. `None` when the file didn't exist (a new file being visited).
+#[derive(Debug, Clone, Copy)]
+struct Synced {
+    stamp: DiskStamp,
+    hash: u64,
+}
+
+fn synced() -> &'static Mutex<HashMap<PathBuf, Option<Synced>>> {
+    static SYNCED: OnceLock<Mutex<HashMap<PathBuf, Option<Synced>>>> = OnceLock::new();
+    SYNCED.get_or_init(Default::default)
+}
+
+fn content_hash(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = rustc_hash::FxHasher::default();
+    h.write(bytes);
+    h.write_usize(bytes.len());
+    h.finish()
+}
+
+/// `path`'s current [`DiskStamp`], or `None` if it doesn't exist (or can't be
+/// read). Take it *before* reading the file, so a write racing the read shows
+/// up as a change rather than being missed.
+pub fn stamp(path: &Path) -> Option<DiskStamp> {
+    let meta = fs::metadata(write_target(path)).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some(DiskStamp {
+        modified: meta.modified().ok(),
+        len: meta.len(),
+        inode,
+    })
+}
+
+/// A buffer now holds `contents`, which is what `path` held when `stamp` was
+/// taken (`None`: the file didn't exist). Call after visiting or reverting.
+pub fn note_synced(path: &Path, stamp: Option<DiskStamp>, contents: &[u8]) {
+    let entry = stamp.map(|stamp| Synced {
+        stamp,
+        hash: content_hash(contents),
+    });
+    synced()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(write_target(path), entry);
+}
+
+/// Whether `path` was changed by something else since a buffer last read or
+/// saved it — i.e. saving over it would lose that change. A file no buffer
+/// has read or written is never reported, nor is one that was deleted (saving
+/// just recreates it). A rewrite that left the bytes the same (`touch`, a
+/// checkout of the same content) isn't a change either.
+pub fn changed_on_disk(path: &Path) -> bool {
+    let key = write_target(path);
+    let Some(known) = synced()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied()
+    else {
+        return false;
+    };
+    let Some(now) = stamp(&key) else {
+        return false;
+    };
+    let Some(known) = known else {
+        return true; // created by someone else since we visited it as new
+    };
+    if now == known.stamp {
+        return false;
+    }
+    match fs::read(&key) {
+        Ok(bytes) if content_hash(&bytes) == known.hash => {
+            // Same bytes, new metadata: remember it so the next save is cheap.
+            note_synced(&key, Some(now), &bytes);
+            false
+        }
+        Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+// --- Saves still in flight -------------------------------------------------
+//
+// A save snapshots the text and marks the buffer clean at once, then writes in
+// the background. Quitting must not tear the app down until those writes have
+// landed — and must not quit at all if one of them failed, since the failure
+// re-dirties a buffer the user believes is saved.
+
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static FAILED: AtomicU64 = AtomicU64::new(0);
+
+/// Held by an asynchronous save from the moment it snapshots the text until
+/// its result has been handled on the UI thread (so a failure has already
+/// re-marked the buffer modified by the time [`in_flight`] reads zero).
+#[must_use]
+pub struct PendingSave {
+    _private: (),
+}
+
+/// Start tracking an asynchronous save. Keep the guard until the save's
+/// result has been reported; call [`PendingSave::failed`] if it failed.
+pub fn begin_pending() -> PendingSave {
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    PendingSave { _private: () }
+}
+
+impl PendingSave {
+    /// The write failed: count it, so a quit waiting on it is called off.
+    pub fn failed(self) {
+        FAILED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for PendingSave {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How many asynchronous saves haven't finished yet.
+pub fn in_flight() -> u64 {
+    IN_FLIGHT.load(Ordering::SeqCst)
+}
+
+/// A running count of asynchronous saves that failed. Compare two readings to
+/// see whether any failed in between.
+pub fn failures() -> u64 {
+    FAILED.load(Ordering::SeqCst)
 }
 
 /// Create a fresh, exclusively-owned temp file next to the target.
@@ -347,6 +505,58 @@ mod tests {
         no_temp_files_left(&dir);
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn external_changes_are_noticed_and_our_own_saves_are_not() {
+        let dir = scratch_dir("disk");
+        let file = dir.join("f.txt");
+        // A file no buffer has read is never reported.
+        fs::write(&file, "one\n").unwrap();
+        assert!(!changed_on_disk(&file));
+        // Visit it: unchanged until something else rewrites it.
+        note_synced(&file, stamp(&file), b"one\n");
+        assert!(!changed_on_disk(&file));
+        fs::write(&file, "someone else's\n").unwrap();
+        assert!(changed_on_disk(&file));
+        // Our own save becomes the new baseline.
+        write_now(&file, b"mine\n").unwrap();
+        assert!(!changed_on_disk(&file));
+        // Rewriting the same bytes (a `touch`, a checkout of the same content)
+        // is not a change.
+        fs::remove_file(&file).unwrap();
+        fs::write(&file, "mine\n").unwrap();
+        assert!(!changed_on_disk(&file));
+        // A deleted file can simply be saved again.
+        fs::remove_file(&file).unwrap();
+        assert!(!changed_on_disk(&file));
+        // Visited as a new file, then created by someone else: a change.
+        let new = dir.join("new.txt");
+        note_synced(&new, stamp(&new), b"");
+        fs::write(&new, "theirs").unwrap();
+        assert!(changed_on_disk(&new));
+        // Plain `atomic_write` (scripts) records nothing: a script rewriting
+        // a file a buffer has open is a change that buffer must not clobber.
+        let scripted = dir.join("scripted.txt");
+        fs::write(&scripted, "a").unwrap();
+        note_synced(&scripted, stamp(&scripted), b"a");
+        atomic_write(&scripted, b"from a script").unwrap();
+        assert!(changed_on_disk(&scripted));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pending_saves_are_counted_until_dropped_and_failures_recorded() {
+        // The counters are process-wide and other tests save concurrently, so
+        // only check what this test's own guards guarantee.
+        let before = failures();
+        let a = begin_pending();
+        let b = begin_pending();
+        assert!(in_flight() >= 2);
+        drop(a);
+        assert!(in_flight() >= 1);
+        b.failed();
+        assert!(failures() > before);
     }
 
     #[test]

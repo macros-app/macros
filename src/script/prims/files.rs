@@ -162,7 +162,10 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&path, text).is_ok()
+        // Atomic (temp file + rename), so a crash or full disk mid-write
+        // leaves the old file rather than a truncated one — these are the
+        // user's org files, bookmarks and desktop state.
+        crate::save::atomic_write(std::path::Path::new(&path), text.as_bytes()).is_ok()
     });
     // `(delete-file path)` → #t if the file was removed (or already absent),
     // #f on a real error (permission, path is a non-empty directory). Emacs's
@@ -193,6 +196,6 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&path, bytes).is_ok()
+        crate::save::atomic_write(std::path::Path::new(&path), &bytes).is_ok()
     });
 }

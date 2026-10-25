@@ -32,6 +32,70 @@ fn doc_needs_kill_confirm(doc: &Document) -> bool {
     doc.modified && (doc.path.is_some() || doc.grid.is_some())
 }
 
+/// What an `edit-file-text` read was based on.
+#[derive(Debug)]
+pub(super) enum FileEditBase {
+    /// The text of the buffer visiting the file, at this edit tick.
+    Buffer { name: String, tick: u64 },
+    /// The file itself, as stamped before reading (`None`: it didn't exist).
+    File(Option<crate::save::DiskStamp>),
+}
+
+/// An `edit-file-text` read awaiting its `set-file-text`.
+#[derive(Debug)]
+pub(super) struct FileEdit {
+    callback: String,
+    base: FileEditBase,
+    attempt: u8,
+}
+
+#[cfg(test)]
+impl FileEdit {
+    /// Point a recorded read at a different callback (for tests that answer
+    /// it by hand).
+    pub(super) fn set_callback_for_test(&mut self, callback: &str) {
+        self.callback = callback.to_string();
+    }
+}
+
+/// The span where `old` and `new` differ, as `(start, old_end, new_end)`: the
+/// longest common prefix and suffix (not overlapping, on char boundaries) are
+/// left out, so `old[start..old_end]` → `new[start..new_end]` is the change.
+fn differing_span(old: &str, new: &str) -> (usize, usize, usize) {
+    let mut start = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(start) || !new.is_char_boundary(start) {
+        start -= 1;
+    }
+    let max_suffix = (old.len() - start).min(new.len() - start);
+    let mut suffix = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix) {
+        suffix -= 1;
+    }
+    (start, old.len() - suffix, new.len() - suffix)
+}
+
+/// Why a save skipped `name`: its file changed on disk since it was read.
+pub(super) fn changed_on_disk_failure(name: &str) -> String {
+    format!("{name}: changed on disk since it was read — C-x C-s to save over it, or revert")
+}
+
+/// Whether `doc` visits the file `identity` (a [`file_identity`]).
+fn visits_identity(doc: &Document, identity: &Path) -> bool {
+    doc.path
+        .as_deref()
+        .is_some_and(|p| file_identity(p) == identity)
+}
+
 /// The identity of the file at `path` for "is it already open?" checks: the
 /// canonical path (symlinks, `.`/`..`, and relative spellings resolved). A file
 /// that doesn't exist yet canonicalizes its directory and keeps its name; a
@@ -307,13 +371,27 @@ impl Editor {
         // Raw bytes: a grid parses them directly (it may not even be UTF-8);
         // a text buffer validates them below.
         let read_path = path.clone();
-        let read = cx
-            .background_executor()
-            .spawn(async move { std::fs::read(&read_path) });
+        let read = cx.background_executor().spawn(async move {
+            // Stamp first: a write racing the read then shows as a change.
+            let stamp = crate::save::stamp(&read_path);
+            (stamp, std::fs::read(&read_path))
+        });
         cx.spawn(async move |this, cx| {
-            let result = read.await;
+            let (stamp, result) = read.await;
             this.update(cx, |editor, cx| {
                 editor.pending_opens.remove(&identity);
+                // Remember what the new buffer is based on, unless the file
+                // is already open (the existing buffer is shown instead, and
+                // its own baseline must stand).
+                if !editor.is_visiting(&identity) {
+                    match &result {
+                        Ok(bytes) => crate::save::note_synced(&path, stamp, bytes),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            crate::save::note_synced(&path, None, &[])
+                        }
+                        Err(_) => {}
+                    }
+                }
                 let result = match result {
                     Ok(bytes) if as_grid => {
                         editor.open_grid(name, path, bytes, cx);
@@ -347,11 +425,7 @@ impl Editor {
     /// If some buffer already visits the file `identity` (a [`file_identity`]),
     /// show it and return `true`.
     pub(super) fn switch_to_visiting(&mut self, identity: &Path, cx: &mut Context<Self>) -> bool {
-        let visits = |doc: &Document| {
-            doc.path
-                .as_deref()
-                .is_some_and(|p| file_identity(p) == identity)
-        };
+        let visits = |doc: &Document| visits_identity(doc, identity);
         if visits(&self.active) {
             self.echo(format!("Already in {}", self.active.name), cx);
             return true;
@@ -362,6 +436,11 @@ impl Editor {
             return true;
         }
         false
+    }
+
+    /// Whether some buffer already visits the file `identity` (a [`file_identity`]).
+    pub(super) fn is_visiting(&self, identity: &Path) -> bool {
+        self.docs().any(|doc| visits_identity(doc, identity))
     }
 
     /// Install a freshly-read file as the active buffer (foreground half of the
@@ -585,11 +664,13 @@ impl Editor {
             self.echo("Buffer is not visiting a file", cx);
             return;
         };
+        let stamp = crate::save::stamp(&path);
         match std::fs::read_to_string(&path) {
             Ok(contents) => {
                 let point = self.point();
                 self.replace_whole_buffer(&contents, point, cx);
                 self.active.modified = false;
+                crate::save::note_synced(&path, stamp, contents.as_bytes());
                 self.echo(format!("Reverted {}", self.active.name), cx);
             }
             Err(err) => self.echo(format!("Revert failed: {err}"), cx),
@@ -644,11 +725,15 @@ impl Editor {
         if self.grid_auto_revert(path, cx) {
             return;
         }
+        let stamp = crate::save::stamp(path);
         let Ok(disk) = std::fs::read_to_string(path) else {
             return; // unreadable / mid-rename / deleted — leave the buffer as-is
         };
+        // The buffer now matches the file (or has just been made to).
+        let synced = || crate::save::note_synced(path, stamp, disk.as_bytes());
         if self.active.path.as_deref() == Some(path) {
             if self.active.buffer.full_text() == disk {
+                synced();
                 return; // identical (e.g. our own write) — nothing to revert
             }
             if self.active.modified {
@@ -661,6 +746,7 @@ impl Editor {
             let point = self.point();
             self.replace_whole_buffer(&disk, point, cx);
             self.active.modified = false;
+            synced();
             self.echo(
                 format!("Reverted {} (changed on disk)", self.active.name),
                 cx,
@@ -674,6 +760,7 @@ impl Editor {
         {
             let doc = &self.inactive[idx];
             if doc.buffer.full_text() == disk {
+                synced();
                 return;
             }
             let name = doc.name.clone();
@@ -685,6 +772,7 @@ impl Editor {
             // buffer-locals, breakpoint dots, overlays and window positions.
             self.replace_inactive_text(idx, &disk, false);
             self.inactive[idx].modified = false;
+            synced();
             self.echo(format!("Reverted {name} (changed on disk)"), cx);
         }
     }
@@ -694,8 +782,7 @@ impl Editor {
     /// records the change as one undo step (an LSP edit); otherwise history
     /// restarts (a revert from disk, which old records no longer match). Its
     /// selection and every window showing it are clamped to the new text, and
-    /// its language servers get the new text. Highlighting is reparsed when the
-    /// buffer is next activated.
+    /// its language servers get the new text, and its highlighting is reparsed.
     pub(super) fn replace_inactive_text(&mut self, idx: usize, new: &str, undoable: bool) {
         let doc = &mut self.inactive[idx];
         let old = doc.buffer.full_text();
@@ -710,6 +797,11 @@ impl Editor {
             doc.undo = UndoTree::default();
         }
         doc.buffer.replace(0..old.len(), new);
+        // A window still showing this buffer paints from its tree: reparse
+        // now, or that pane reads stale node ranges against the new text.
+        if let Some(h) = doc.highlighter.as_mut() {
+            h.set_text(doc.buffer.rope());
+        }
         let snap = |p: usize| doc.buffer.snap(p);
         doc.selected_range = snap(doc.selected_range.start)..snap(doc.selected_range.end);
         let (name, uri) = (doc.name.clone(), document_uri(doc));
@@ -820,6 +912,27 @@ impl Editor {
 
     /// `C-x C-s`: write the active buffer back to its file.
     pub(super) fn save_buffer(&mut self, cx: &mut Context<Self>) {
+        self.save_buffer_ex(true, cx);
+    }
+
+    /// [`save_buffer`](Self::save_buffer); with `check_disk`, first ask before
+    /// overwriting a file something else changed since the buffer read it.
+    pub(super) fn save_buffer_ex(&mut self, check_disk: bool, cx: &mut Context<Self>) {
+        if check_disk
+            && let Some(path) = self.active_save_target()
+            && crate::save::changed_on_disk(&path)
+        {
+            let file = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |f| f.to_string_lossy().into_owned(),
+            );
+            self.open_confirm(
+                &format!("{file} changed on disk since it was read; save over it anyway?"),
+                PendingAction::SaveOverChanged(self.active.name.clone()),
+                cx,
+            );
+            return;
+        }
         if self.active.grid.is_some() {
             self.grid_save(cx);
             return;
@@ -846,6 +959,149 @@ impl Editor {
         self.write_active_to_disk(cx);
     }
 
+    /// `(edit-file-text path callback)`: hand `callback` the text of `path` —
+    /// its visiting buffer's when one is open, else the file's — remembering
+    /// what that text was based on, so [`set_file_text`](Self::set_file_text)
+    /// can tell whether it changed in between. `attempt` counts re-runs.
+    pub(super) fn edit_file_text(
+        &mut self,
+        path: String,
+        callback: String,
+        attempt: u8,
+        cx: &mut Context<Self>,
+    ) {
+        let file = PathBuf::from(crate::util::expand_tilde(&path));
+        let identity = file_identity(&file);
+        let visiting = self
+            .docs()
+            .find(|d| visits_identity(d, &identity))
+            .map(|d| (d.name.clone(), d.grid.is_some(), d.buffer.tick()));
+        let (text, base) = if let Some((name, grid, tick)) = visiting {
+            if grid {
+                self.echo(format!("Not changed: {name} is open as a grid"), cx);
+                return;
+            }
+            let text = self
+                .buffer_named(&name)
+                .map(Buffer::full_text)
+                .unwrap_or_default();
+            (text, FileEditBase::Buffer { name, tick })
+        } else {
+            let stamp = crate::save::stamp(&file);
+            match std::fs::read_to_string(&file) {
+                Ok(text) => (text, FileEditBase::File(stamp)),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    (String::new(), FileEditBase::File(None))
+                }
+                Err(err) => {
+                    self.echo(format!("Not changed: {}: {err}", file.display()), cx);
+                    return;
+                }
+            }
+        };
+        self.file_edits.insert(
+            identity,
+            FileEdit {
+                callback: callback.clone(),
+                base,
+                attempt,
+            },
+        );
+        self.publish_point();
+        let call = format!(
+            "({callback} {} {})",
+            crate::script::steel_quote(&path),
+            crate::script::steel_quote(&text)
+        );
+        self.script.dispatch(&call, false);
+    }
+
+    /// `(set-file-text path text)`, the answer to [`edit_file_text`]: write
+    /// `text` into the visiting buffer (one undoable edit, left unsaved) or,
+    /// when no buffer has the file, atomically into the file. If what the
+    /// callback was given has changed since, it is run again on the new text.
+    ///
+    /// [`edit_file_text`]: Self::edit_file_text
+    pub(super) fn set_file_text(&mut self, path: String, text: String, cx: &mut Context<Self>) {
+        /// Re-runs before giving up on text that keeps changing underneath.
+        const MAX_ATTEMPTS: u8 = 3;
+        let file = PathBuf::from(crate::util::expand_tilde(&path));
+        let identity = file_identity(&file);
+        let Some(edit) = self.file_edits.remove(&identity) else {
+            self.echo(
+                format!("set-file-text: {path} wasn't read with edit-file-text"),
+                cx,
+            );
+            return;
+        };
+        let visiting = self
+            .docs()
+            .find(|d| visits_identity(d, &identity))
+            .map(|d| (d.name.clone(), d.buffer.tick()));
+        let unchanged = match (&edit.base, &visiting) {
+            (FileEditBase::Buffer { name, tick }, Some((now_name, now_tick))) => {
+                name == now_name && tick == now_tick
+            }
+            (FileEditBase::File(stamp), None) => crate::save::stamp(&file) == *stamp,
+            // Opened or killed in between: the text came from the other one.
+            _ => false,
+        };
+        if !unchanged {
+            if edit.attempt + 1 >= MAX_ATTEMPTS {
+                self.echo(format!("Not changed: {path} kept changing; try again"), cx);
+            } else {
+                self.edit_file_text(path, edit.callback, edit.attempt + 1, cx);
+            }
+            return;
+        }
+        match visiting {
+            Some((name, _)) => self.set_buffer_text(&name, &text, cx),
+            None => {
+                if let Some(dir) = file.parent()
+                    && !dir.as_os_str().is_empty()
+                {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Err(err) = crate::save::atomic_write(&file, text.as_bytes()) {
+                    self.echo(format!("Not changed: {}: {err}", file.display()), cx);
+                }
+            }
+        }
+    }
+
+    /// Make buffer `name`'s text `new` as one undoable edit that marks it
+    /// modified. The active buffer gets only the span that differs, so point,
+    /// marks and overlays outside it stay where they were.
+    fn set_buffer_text(&mut self, name: &str, new: &str, cx: &mut Context<Self>) {
+        if self.active.name == name {
+            let old = self.active.buffer.full_text();
+            let (start, old_end, new_end) = differing_span(&old, new);
+            if start == old_end && start == new_end {
+                return;
+            }
+            let point = self.point();
+            self.edit(start..old_end, &new[start..new_end]);
+            if point >= old_end {
+                self.collapse_to(point - old_end + new_end);
+            }
+            cx.notify();
+        } else if let Some(idx) = self.inactive_index(name) {
+            self.replace_inactive_text(idx, new, true);
+            cx.notify();
+        }
+    }
+
+    /// The file saving the active buffer writes: its workbook's, for a sheet of
+    /// a workbook that saves whole; otherwise its own.
+    pub(super) fn active_save_target(&self) -> Option<PathBuf> {
+        if let Some(book) = self.active_book()
+            && book.borrow().saves_whole(self.active.path.is_some())
+        {
+            return book.borrow().path.clone();
+        }
+        self.active.path.clone()
+    }
+
     /// Save every modified file-visiting buffer (Emacs `save-some-buffers`).
     /// Inactive buffers are written synchronously here; the active one goes
     /// through the normal (async, hook-running) save path.
@@ -857,11 +1113,15 @@ impl Editor {
         let mut saved_uris = Vec::new();
         let mut written: Vec<PathBuf> = Vec::new();
         // Workbooks with several sheets save whole, once each.
-        failed.extend(self.grid_save_modified_books());
+        failed.extend(self.grid_save_modified_books(true));
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
+                if crate::save::changed_on_disk(&path) {
+                    failed.push(changed_on_disk_failure(&doc.name));
+                    continue;
+                }
                 match doc
                     .save_bytes()
                     .and_then(|b| crate::save::write_now(&path, &b))
@@ -885,7 +1145,14 @@ impl Editor {
         for path in written {
             self.rewatch_file(&path, cx);
         }
-        if self.active.path.is_some() && self.active.modified {
+        if self.active.path.is_some()
+            && self.active.modified
+            && self
+                .active_save_target()
+                .is_some_and(|p| crate::save::changed_on_disk(&p))
+        {
+            failed.push(changed_on_disk_failure(&self.active.name));
+        } else if self.active.path.is_some() && self.active.modified {
             // Async; reports its own failure (and restores `modified`) later.
             if self.active.grid.is_some() {
                 self.grid_save(cx);
@@ -924,6 +1191,8 @@ impl Editor {
         let uri = document_uri(&self.active);
         self.active.modified = false;
         let ticket = crate::save::ticket(&path);
+        // Until the result is handled, a quit waits for this save.
+        let pending = crate::save::begin_pending();
         let write_path = path.clone();
         let write = cx.background_executor().spawn(async move {
             let outcome = crate::save::write_sequenced(&ticket, &write_path, text.as_bytes());
@@ -931,6 +1200,9 @@ impl Editor {
         });
         cx.spawn(async move |this, cx| {
             let (ticket, result) = write.await;
+            if result.is_err() {
+                pending.failed();
+            }
             this.update(cx, |editor, cx| match result {
                 Ok(crate::save::SaveOutcome::Written) => {
                     editor.rewatch_file(&path, cx);
@@ -1150,11 +1422,13 @@ impl Editor {
     ///
     /// Returns whether every write succeeded; failed buffers keep `modified` set
     /// and are reported in the echo area, so the quit path can abort rather than
-    /// silently discard the changes.
-    pub(super) fn save_all_modified(&mut self, cx: &mut Context<Self>) -> bool {
+    /// silently discard the changes. With `check_disk`, a file changed on disk
+    /// since its buffer read it counts as failed rather than being overwritten.
+    pub(super) fn save_all_modified(&mut self, check_disk: bool, cx: &mut Context<Self>) -> bool {
         self.grid_commit_pending(cx);
         // Workbooks with several sheets save whole, once each.
-        let mut failed: Vec<String> = self.grid_save_modified_books();
+        let mut failed: Vec<String> = self.grid_save_modified_books(check_disk);
+        let conflicts = |path: &Path| check_disk && crate::save::changed_on_disk(path);
         // A modified grid with no file of its own (a sheet of a workbook, an
         // imported table) can't be saved here: say so rather than quit and
         // lose it.
@@ -1167,6 +1441,11 @@ impl Editor {
             }
         }
         if self.active.modified
+            && let Some(path) = self.active.path.clone()
+            && conflicts(&path)
+        {
+            failed.push(changed_on_disk_failure(&self.active.name));
+        } else if self.active.modified
             && let Some(path) = self.active.path.clone()
         {
             self.grid_commit_pending(cx);
@@ -1188,6 +1467,10 @@ impl Editor {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
+                if conflicts(&path) {
+                    failed.push(changed_on_disk_failure(&doc.name));
+                    continue;
+                }
                 match doc
                     .save_bytes()
                     .and_then(|b| crate::save::write_now(&path, &b))
@@ -1215,13 +1498,24 @@ impl Editor {
     /// the app down (the async `write_active_to_disk` would be cancelled
     /// mid-flight). Runs the synchronous `before-save-hook` but, like
     /// [`save_all_modified`](Self::save_all_modified), skips the async LSP
-    /// format-on-save. Returns whether the buffer is now safely on disk.
-    pub(super) fn save_active_sync(&mut self, cx: &mut Context<Self>) -> bool {
+    /// format-on-save. Returns whether the buffer is now safely on disk. With
+    /// `check_disk`, refuses to overwrite a file changed on disk since it was
+    /// read (`:wq`; `:wq!` overwrites).
+    pub(super) fn save_active_sync(&mut self, check_disk: bool, cx: &mut Context<Self>) -> bool {
+        if check_disk
+            && self
+                .active_save_target()
+                .is_some_and(|p| crate::save::changed_on_disk(&p))
+        {
+            let message = changed_on_disk_failure(&self.active.name);
+            self.echo(format!("Not saved — {message} (! overwrites)"), cx);
+            return false;
+        }
         if let Some(book) = self.active_book()
             && book.borrow().saves_whole(self.active.path.is_some())
         {
             self.grid_commit_pending(cx);
-            let failed = self.grid_save_modified_books();
+            let failed = self.grid_save_modified_books(false);
             if !failed.is_empty() {
                 self.echo(format!("Save failed — {}", failed.join("; ")), cx);
             }

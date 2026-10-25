@@ -1344,12 +1344,35 @@
       (org--capture-pick)))
 (define (org--capture-finish text)
   (when (not (equal? (string-trim text) ""))
-    (let* ((path (org--capture-file))
-           (existing (read-file-strict path))
-           (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
-      (write-file path (string-append existing sep "* TODO " (string-trim text) "\n"))
-      (org--bookmark-last-stored path existing sep (string-append "* TODO " (string-trim text)))
-      (message (string-append "Captured to " (basename path))))))
+    (let ((path (org--capture-file))
+          (entry (string-append "* TODO " (string-trim text))))
+      (org--edit-file path
+        (lambda (existing)
+          (org--bookmark-last-stored path existing (org--append-sep existing) entry)
+          (message (string-append "Captured to " (basename path)))
+          (org--capture-appended existing entry))))))
+
+;; Rewrite the Org file `path` with `edit`, a function from its text to the new
+;; text. When a buffer visits `path` the change goes into that buffer (undoable,
+;; left for the user to save): written to disk underneath it, the next save of
+;; the buffer would silently drop it. Otherwise the file is rewritten
+;; atomically. `edit` can run more than once — again on fresh text if the
+;; buffer changes before the result lands — so its side effects (bookmark,
+;; message) must be safe to repeat.
+(define *org--file-edits* '())
+(define (org--edit-file path edit)
+  (set! *org--file-edits* (cons (cons path edit) (alist-remove *org--file-edits* path)))
+  (edit-file-text path "org--file-edit-run"))
+(define (org--file-edit-run path text)
+  (let ((edit (alist-ref *org--file-edits* path)))
+    (when edit (set-file-text path (edit text)))))
+
+;; The newline that joins appended text to `existing`: none when it is empty or
+;; already ends in one.
+(define (org--append-sep existing)
+  (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n"))
+(define (org--capture-appended existing text)
+  (string-append existing (org--append-sep existing) text "\n"))
 
 ;; org-capture-last-stored: like Emacs's `org-capture` bookmarking the last
 ;; stored item — a bookmark named "org-capture-last-stored" lands on the
@@ -2511,7 +2534,14 @@
 (define (org--archive-file-path) (string-append (org--current-file-path) "_archive"))
 (define-command (org-archive-subtree)
   (let ((H (org--heading-line-at-point)))
-    (if (not H) (message "Not on a heading")
+    (cond
+      ((not H) (message "Not on a heading"))
+      ;; Writing to disk under a buffer that visits the archive would be lost
+      ;; (or clobber it) when that buffer is saved — as for refile.
+      ((find-buffer-visiting (org--archive-file-path))
+       (message (string-append (basename (org--archive-file-path))
+                               " is open in a buffer: save and kill it, then archive")))
+      (else
         (let* ((block (cdr (org--subtree-text H)))
                (with-time (org--block-add-property
                            block (string-append ":ARCHIVE_TIME: [" (org--now-stamp) "]")))
@@ -2523,7 +2553,7 @@
               (begin
                 (org--delete-subtree H)
                 (message (string-append "Archived to " (basename apath))))
-              (message (string-append "Archive failed: could not write " apath)))))))
+              (message (string-append "Archive failed: could not write " apath))))))))
 
 ;; ===========================================================================
 ;; Layer 7f — capture templates
@@ -2571,18 +2601,12 @@
                              (org--capture-commit tmpl (org--expand-template-final expanded input))))
               (org--capture-commit tmpl (org--expand-template-final expanded "")))))))
 
-(define (org--capture-append path text)
-  (let* ((existing (read-file-strict path))
-         (sep (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")))
-    (write-file path (string-append existing sep text "\n"))))
-
-(define (org--capture-under-headline path headline text lines)
-  ;; File the captured `text` under HEADLINE in `path`. LINES is the file's
-  ;; current content already split (org--capture-commit reads it once for both
-  ;; this and the last-stored offset). Inserted after the headline's subtree
-  ;; end, as a child of it. Returns the index of the FIRST inserted line in
-  ;; the rewritten file, or #f when the headline (or file) was missing — in
-  ;; which case the text was appended to the end instead.
+(define (org--capture-under-headline headline text lines)
+  ;; File the captured `text` under HEADLINE in a file whose content is LINES
+  ;; (already split; org--capture-commit also uses them for the last-stored
+  ;; offset). Inserted after the headline's subtree end, as a child of it.
+  ;; Returns (new-text . index of the FIRST inserted line in it), or #f when
+  ;; the headline is missing (the caller then appends instead).
   (let* ((n (length lines))
          (hidx (let loop ((i 0))
                  (cond ((>= i n) #f)
@@ -2591,16 +2615,16 @@
                                (equal? (nth (org--parse-headline l) 3) headline))) i)
                        (else (loop (+ i 1)))))))
     (if (not hidx)
-        (begin (org--capture-append path text) #f)
+        #f
         (let* ((hlvl (org--heading-level (nth lines hidx)))
                (E (org--subtree-end-in lines hidx hlvl))
                (before (org--slice lines 0 E))
                (after (org--slice lines (+ E 1) (- n 1))))
-          (begin (write-file path (join-lines (append before (org--as-child-lines text hlvl) after)))
-                 ;; before is lines[0..E] INCLUSIVE, so the captured text
-                 ;; starts one line BELOW the subtree's last line — at E+1,
-                 ;; not at the headline's own index.
-                 (+ E 1))))))
+          ;; before is lines[0..E] INCLUSIVE, so the captured text starts one
+          ;; line BELOW the subtree's last line — at E+1, not at the
+          ;; headline's own index.
+          (cons (join-lines (append before (org--as-child-lines text hlvl) after))
+                (+ E 1))))))
 
 ;; The lines of captured `text` re-leveled so its top heading becomes a child of
 ;; a level-`plvl` heading (a "* %?" template filed under "** Inbox" lands as
@@ -2615,29 +2639,32 @@
 
 (define (org--capture-commit tmpl text)
   (let* ((target (nth tmpl 2))
-         (path (org--resolve-path (nth target 1))))
-    (if (equal? (car target) "file+headline")
-        (let* ((lines (if (file-exists? path) (split-many (read-file-strict path) "\n") '()))
-               (existing (join-lines lines))
-               (at (org--capture-under-headline path (nth target 2) text lines)))
-          (if at
-              ;; The captured text was inserted after the headline's subtree:
-              ;; its first line is the line at index `at` in the rewritten
-              ;; file (org--rows-byte-prefix gives that line's byte offset,
-              ;; counting the unmodified lines 0..at-1 of the pre-insert
-              ;; `lines`).
-              (bookmark-store "org-capture-last-stored" path
-                              (org--rows-byte-prefix lines at) at 0
-                              (bookmark-clip (string-trim text)) "")
-              (org--bookmark-last-stored path existing
-                                         (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")
-                                         (string-trim text))))
-        (let ((existing (if (file-exists? path) (read-file-strict path) "")))
-          (org--capture-append path text)
-          (org--bookmark-last-stored path existing
-                                     (if (or (equal? existing "") (ends-with? existing "\n")) "" "\n")
-                                     (string-trim text))))
-    (message "Captured")))
+         (path (org--resolve-path (nth target 1)))
+         (entry (string-trim text))
+         (append-it
+          (lambda (existing)
+            (org--bookmark-last-stored path existing (org--append-sep existing) entry)
+            (org--capture-appended existing text))))
+    (org--edit-file path
+      (if (equal? (car target) "file+headline")
+          (lambda (existing)
+            (let* ((lines (if (equal? existing "") '() (split-many existing "\n")))
+                   (filed (org--capture-under-headline (nth target 2) text lines)))
+              (message "Captured")
+              (if filed
+                  ;; The captured text was inserted after the headline's
+                  ;; subtree: its first line is the line at index (cdr filed)
+                  ;; in the new text (org--rows-byte-prefix gives that line's
+                  ;; byte offset, counting the unmodified lines before it).
+                  (begin
+                    (bookmark-store "org-capture-last-stored" path
+                                    (org--rows-byte-prefix lines (cdr filed)) (cdr filed) 0
+                                    (bookmark-clip entry) "")
+                    (car filed))
+                  (append-it existing))))
+          (lambda (existing)
+            (message "Captured")
+            (append-it existing))))))
 
 ;; ===========================================================================
 ;; Layer 7g — tag search + custom agenda views

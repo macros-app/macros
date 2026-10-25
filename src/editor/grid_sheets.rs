@@ -555,8 +555,10 @@ impl Editor {
     }
 
     /// Save every workbook with a modified sheet buffer (`save-some-buffers`,
-    /// saving on quit): each once, whole. Returns what failed.
-    pub(super) fn grid_save_modified_books(&mut self) -> Vec<String> {
+    /// saving on quit): each once, whole. Returns what failed. With
+    /// `check_disk`, a workbook changed on disk since it was read is not
+    /// overwritten (it fails instead).
+    pub(super) fn grid_save_modified_books(&mut self, check_disk: bool) -> Vec<String> {
         let mut books: Vec<Book> = Vec::new();
         for d in self.docs() {
             if let Some(book) = d.grid.as_deref().and_then(|g| g.xlsx.book.as_ref())
@@ -584,6 +586,10 @@ impl Editor {
                 Some(_) if !lossy.is_empty() => Err(std::io::Error::other(format!(
                     "it has {lossy}, which saving over it would lose — save a copy with :w"
                 ))),
+                Some(path) if check_disk && crate::save::changed_on_disk(&path) => {
+                    failed.push(super::buffers::changed_on_disk_failure(&label));
+                    continue;
+                }
                 Some(path) => self.grid_write_book(&book, &path).map(|_| ()),
             };
             if let Err(err) = result {

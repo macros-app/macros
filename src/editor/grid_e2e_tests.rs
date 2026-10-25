@@ -1166,7 +1166,7 @@ fn csv_with_formulas_must_be_saved_as_xlsx(cx: &mut TestAppContext) {
     });
     ed.update(cx, |e, _| e.minibuffer = None);
     // Paths that can't prompt refuse rather than write formula text.
-    let ok = ed.update(cx, |e, cx| e.save_all_modified(cx));
+    let ok = ed.update(cx, |e, cx| e.save_all_modified(true, cx));
     assert!(!ok, "quit-time save refuses a CSV with formulas");
     assert_eq!(
         std::fs::read_to_string(&path).unwrap(),
@@ -2108,7 +2108,7 @@ fn regression_wq_during_background_load_truncates(cx: &mut TestAppContext) {
         e.open_grid("big.csv".into(), big.clone(), s.clone().into_bytes(), cx);
         assert!(e.active.grid.as_ref().unwrap().loading.is_some());
         // `:wq` / `:x` take this synchronous path.
-        e.save_active_sync(cx);
+        e.save_active_sync(true, cx);
     });
     settle(&ed, cx);
     let after = std::fs::read_to_string(&big).unwrap();
@@ -2147,7 +2147,7 @@ fn regression_quit_save_after_edit_during_load_truncates(cx: &mut TestAppContext
         e.grid_edit_input("X", cx);
         e.grid_commit_edit(0, 0, cx);
         // C-x C-c → "yes" (and `:wqa`).
-        e.save_all_modified(cx);
+        e.save_all_modified(true, cx);
     });
     settle(&ed, cx);
     let after = std::fs::read_to_string(&big).unwrap();
@@ -2292,7 +2292,7 @@ fn regression_quit_save_yes_discards_edited_sheet_buffer(cx: &mut TestAppContext
     assert!(ed.read_with(cx, |e, _| e.active.modified));
     assert!(ed.read_with(cx, |e, _| e.any_modified()), "quit prompts");
     // C-x C-c → "yes": quit proceeds when this returns true.
-    let ok = ed.update(cx, |e, cx| e.save_all_modified(cx));
+    let ok = ed.update(cx, |e, cx| e.save_all_modified(true, cx));
     let still = ed.read_with(cx, |e, _| e.active.modified);
     assert!(
         !(ok && still),
@@ -2634,7 +2634,7 @@ fn formatted_csv_saves_as_xlsx_and_reopens_formatted(cx: &mut TestAppContext) {
         assert!(mb.prompt.contains("formatting"), "{}", mb.prompt);
     });
     ed.update(cx, |e, _| e.minibuffer = None);
-    let ok = ed.update(cx, |e, cx| e.save_all_modified(cx));
+    let ok = ed.update(cx, |e, cx| e.save_all_modified(true, cx));
     assert!(!ok, "quit-time save refuses a formatted CSV");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), PRICES);
     // The .xlsx keeps the formatting and opens with it again, unprotected.
@@ -3105,7 +3105,7 @@ fn unsupported_content_still_protects_a_workbook(cx: &mut TestAppContext) {
     save(&ed, cx);
     assert!(ed.read_with(cx, |e, _| e.status.contains("Not saving over")));
     assert_eq!(std::fs::read(&book).unwrap(), orig);
-    let ok = ed.update(cx, |e, cx| e.save_all_modified(cx));
+    let ok = ed.update(cx, |e, cx| e.save_all_modified(true, cx));
     assert!(!ok, "a quit-time save refuses it too");
     assert_eq!(std::fs::read(&book).unwrap(), orig);
 }

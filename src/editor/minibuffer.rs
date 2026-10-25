@@ -609,7 +609,7 @@ impl Editor {
                 "yes" | "y" => {
                     // A failed write aborts the quit — the error echo would never
                     // be seen otherwise, and the unsaved buffer would be lost.
-                    if self.save_all_modified(cx) {
+                    if self.save_all_modified(true, cx) {
                         self.finish_quit(relaunch, cx);
                     }
                 }
@@ -739,6 +739,13 @@ impl Editor {
                         .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
                     self.echo(format!("Loading {name}…"), cx);
                     self.read_and_open(name, path, identity, true, cx);
+                }
+            }
+            PendingAction::SaveOverChanged(name) => {
+                if name == self.active.name {
+                    self.save_buffer_ex(false, cx);
+                } else {
+                    self.echo(format!("Not saved: {name} is no longer current"), cx);
                 }
             }
         }

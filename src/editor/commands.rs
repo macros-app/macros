@@ -587,6 +587,8 @@ impl Editor {
                 quiet: true,
             } => self.render_buffer_quiet(name, mode, text, line_faces, cx),
             AppendToBuffer { name, text } => self.append_to_buffer(name, text, cx),
+            EditFileText { path, callback } => self.edit_file_text(path, callback, 0, cx),
+            SetFileText { path, text } => self.set_file_text(path, text, cx),
             FontifyOrgBuffer(name) => self.fontify_org_buffer(name, cx),
             DiffBuffers { a, b, callback } => self.diff_buffers(&a, &b, &callback),
             BufferCopyLines {

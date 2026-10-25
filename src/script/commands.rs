@@ -757,6 +757,22 @@ pub enum EditorCommand {
         name: String,
         text: String,
     },
+    /// Evaluate `(callback path text)` with `text` what `path` holds now: the
+    /// text of the buffer visiting it when one does, else the file's ("" if it
+    /// doesn't exist). The callback answers with [`Self::SetFileText`].
+    EditFileText {
+        path: String,
+        callback: String,
+    },
+    /// Replace `path`'s text with `text`, answering [`Self::EditFileText`]:
+    /// into the buffer visiting it (an undoable edit, left unsaved) when one
+    /// does, else by rewriting the file atomically. If the buffer or file
+    /// changed since the callback was given its text, the callback is run
+    /// again on the new text instead.
+    SetFileText {
+        path: String,
+        text: String,
+    },
     /// Re-run Org fontification against the buffer `name`, even when it is not the
     /// active buffer — e.g. agent-shell streaming a reply into a buffer the user
     /// is viewing in a non-selected pane. The editor publishes a snapshot of that

@@ -102,6 +102,15 @@ pub fn continue_app_quit(cx: &mut App) {
             .ok();
         return;
     }
+    // A save still writing in the background has already marked its buffer
+    // clean: wait for it to land before tearing the app down. (The wait
+    // reports through a window; with none left there's nothing to wait for.)
+    if crate::save::in_flight() > 0
+        && let Some(anchor) = windows.first().copied()
+    {
+        wait_for_saves(anchor, cx);
+        return;
+    }
     if relaunch && let Err(err) = crate::update::relaunch() {
         // Stay running rather than quitting into nothing.
         cx.set_global(QuitFlow::default());
@@ -121,4 +130,50 @@ pub fn continue_app_quit(cx: &mut App) {
     }
     cx.set_global(QuitFlow::default());
     cx.quit();
+}
+
+/// How long a quit waits for background saves before giving up on quitting.
+const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Carry the quit on once every background save has landed. If one fails (its
+/// buffer is modified again) or they don't finish within [`SAVE_WAIT`], call
+/// the quit off instead, so no edit is lost to a save the user thought was
+/// done.
+fn wait_for_saves(anchor: gpui::WindowHandle<Workspace>, cx: &mut App) {
+    let failures = crate::save::failures();
+    anchor
+        .update(cx, |ws, _, cx| {
+            ws.log_message(
+                "Waiting for saves to finish before quitting…".to_string(),
+                cx,
+            )
+        })
+        .ok();
+    cx.spawn(async move |cx| {
+        let deadline = std::time::Instant::now() + SAVE_WAIT;
+        while crate::save::in_flight() > 0 && std::time::Instant::now() < deadline {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
+        }
+        // Through a window handle: it fails (rather than panicking) if the
+        // app is already gone.
+        anchor
+            .update(cx, |ws, _, cx| {
+                let failed = crate::save::failures() != failures;
+                if failed || crate::save::in_flight() > 0 {
+                    cx.set_global(QuitFlow::default());
+                    let why = if failed {
+                        "a save failed"
+                    } else {
+                        "a save is still being written"
+                    };
+                    ws.log_message(format!("Quit cancelled: {why}"), cx);
+                } else {
+                    continue_app_quit(cx);
+                }
+            })
+            .ok();
+    })
+    .detach();
 }

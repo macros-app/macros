@@ -3826,12 +3826,17 @@ impl Editor {
         self.active.modified = false;
         let name = self.active.name.clone();
         let ticket = crate::save::ticket(&path);
+        // Until the result is handled, a quit waits for this save.
+        let pending = crate::save::begin_pending();
         let write_path = path.clone();
         let write = cx
             .background_executor()
             .spawn(async move { crate::save::write_sequenced(&ticket, &write_path, &bytes) });
         cx.spawn(async move |this, cx| {
             let result = write.await;
+            if result.is_err() {
+                pending.failed();
+            }
             this.update(cx, |editor, cx| match result {
                 Ok(crate::save::SaveOutcome::Written) => {
                     editor.echo(
@@ -3870,9 +3875,13 @@ impl Editor {
             return;
         };
         let name = self.active.name.clone();
+        let stamp = crate::save::stamp(&path);
         match std::fs::read(&path).map_err(|e| e.to_string()) {
-            Ok(bytes) => match self.grid_reload(None, bytes, cx) {
-                Ok(()) => self.echo(format!("Reverted {name}"), cx),
+            Ok(bytes) => match self.grid_reload(None, bytes.clone(), cx) {
+                Ok(()) => {
+                    crate::save::note_synced(&path, stamp, &bytes);
+                    self.echo(format!("Reverted {name}"), cx)
+                }
                 Err(err) => self.echo(format!("Revert failed: {err} ({name} kept as it was)"), cx),
             },
             Err(err) => self.echo(format!("Revert failed: {err}"), cx),
@@ -4035,11 +4044,15 @@ impl Editor {
         if targets.is_empty() {
             return false;
         }
+        let stamp = crate::save::stamp(path);
         let Ok(bytes) = std::fs::read(path) else {
             return true;
         };
         let hash = bytes_hash(&bytes);
         let mut reverted = Vec::new();
+        // Whether some buffer kept contents that differ from the file: then
+        // the file is still a change a save of it would overwrite.
+        let mut kept = false;
         for target in targets {
             let doc = match target {
                 None => &self.active,
@@ -4055,13 +4068,20 @@ impl Editor {
                 continue; // our own save, or no real change
             }
             if g.modified() || g.view.edit.is_some() {
+                kept = true;
                 self.echo(format!("{name} changed on disk (unsaved edits kept)"), cx);
                 continue;
             }
             match self.grid_reload(target, bytes.clone(), cx) {
                 Ok(()) => reverted.push((target, name)),
-                Err(err) => self.echo(format!("{name} changed on disk but won't load: {err}"), cx),
+                Err(err) => {
+                    kept = true;
+                    self.echo(format!("{name} changed on disk but won't load: {err}"), cx)
+                }
             }
+        }
+        if !kept {
+            crate::save::note_synced(path, stamp, &bytes);
         }
         if !reverted.is_empty() {
             let names: Vec<&str> = reverted.iter().map(|(_, n)| n.as_str()).collect();

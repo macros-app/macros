@@ -1474,6 +1474,7 @@ impl Editor {
             self.activate(index, true, cx);
             return true;
         }
+        let stamp = crate::save::stamp(path);
         let contents = match std::fs::read_to_string(path) {
             Ok(contents) => contents,
             // Missing file → visit it as a fresh (empty) buffer, matching
@@ -1487,6 +1488,9 @@ impl Editor {
         let name = path
             .file_name()
             .map_or_else(fallback_name, |f| f.to_string_lossy().into_owned());
+        if !self.is_visiting(&super::buffers::file_identity(path)) {
+            crate::save::note_synced(path, stamp, contents.as_bytes());
+        }
         self.open_file(name, path.to_path_buf(), contents, cx);
         true
     }

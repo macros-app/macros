@@ -77,6 +77,8 @@ mod overlays;
 mod panes;
 mod process;
 mod registers;
+#[cfg(test)]
+mod save_tests;
 mod session;
 mod special_select;
 #[cfg(test)]
@@ -152,6 +154,8 @@ enum PendingAction {
     KillBufferAndWindow(String),
     /// Open this (very large) file as a grid anyway.
     OpenLargeGrid(String),
+    /// Save this buffer although its file changed on disk since it was read.
+    SaveOverChanged(String),
 }
 
 /// Which way a search or a selection cycle moves.
@@ -897,6 +901,8 @@ pub struct Editor {
     /// script snapshotted it); `apply_script_outcome` drops the rest of that
     /// batch — its byte-offset decorations are stale. Reset around every batch.
     script_batch_stale: bool,
+    /// `edit-file-text` reads awaiting their `set-file-text`, by file identity.
+    file_edits: HashMap<PathBuf, buffers::FileEdit>,
 }
 
 /// An open transient popup: a title and its `(key, label, command)` rows.
@@ -1592,6 +1598,7 @@ impl Editor {
             },
             render_redirect: None,
             script_batch_stale: false,
+            file_edits: HashMap::new(),
         };
         // Drain async script outcomes from the engine thread onto the foreground.
         editor.script_task = Some(cx.spawn(async move |this, cx| {

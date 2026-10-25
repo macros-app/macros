@@ -39,6 +39,22 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         "switch-to-buffer",
         EditorCommand::SwitchToBufferNamed,
     );
+    // `(edit-file-text path callback)` — read-modify-write a file that a buffer
+    // may be visiting. Calls Steel fn `callback` with `path` and the file's
+    // current text — the visiting buffer's text when a buffer has it open, so
+    // its unsaved edits are included — and the callback answers with
+    // `(set-file-text path new-text)`. The callback may be run again (on fresh
+    // text) if the text changes in between, so it should only compute.
+    register_binary(reg, queue, "edit-file-text", |path, callback| {
+        EditorCommand::EditFileText { path, callback }
+    });
+    // `(set-file-text path text)` — the answer to `edit-file-text`: puts `text`
+    // into the buffer visiting `path` (one undoable edit, left for the user to
+    // save), or atomically rewrites the file when no buffer has it open. Never
+    // writes a file underneath its buffer, where the next save would lose it.
+    register_binary(reg, queue, "set-file-text", |path, text| {
+        EditorCommand::SetFileText { path, text }
+    });
     register_unary(
         reg,
         queue,
