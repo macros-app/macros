@@ -4812,6 +4812,7 @@ dependencies = [
  "tree-sitter-zig",
  "tungstenite",
  "unicode-segmentation",
+ "unicode-width 0.2.2",
  "ureq",
  "uuid",
  "winresource",

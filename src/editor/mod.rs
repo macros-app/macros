@@ -76,6 +76,9 @@ mod net;
 mod overlays;
 mod panes;
 mod process;
+mod rectangle;
+#[cfg(test)]
+mod rectangle_tests;
 mod registers;
 #[cfg(test)]
 mod save_tests;
@@ -356,6 +359,27 @@ struct GhostText {
     /// Byte offset of point when the ghost was shown.
     at: usize,
     text: String,
+}
+
+/// A column-block highlight for the renderer (see [`Editor::pane_visual_block`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockSel {
+    /// Evil block-wise Visual (`C-v`): rows `top..=bottom`, CHARACTER columns
+    /// `left..=right` (inclusive, vim semantics).
+    Chars {
+        top: usize,
+        bottom: usize,
+        left: usize,
+        right: usize,
+    },
+    /// Emacs `rectangle-mark-mode` (`C-x SPC`): rows `top..=bottom` between
+    /// the `(mark, point)` byte offsets, whose DISPLAY columns (tabs, wide
+    /// chars) bound the strip, right edge exclusive.
+    Display {
+        top: usize,
+        bottom: usize,
+        corners: (usize, usize),
+    },
 }
 
 /// A working-tree-vs-HEAD change marker for one buffer line — the git-gutter /
@@ -747,6 +771,8 @@ pub struct Editor {
     /// The count published to Scheme as `(prefix-count)` while a count-aware
     /// command is dispatched (0 otherwise).
     prefix_count: usize,
+    /// `rectangle-mark-mode` (`C-x SPC`) is on; see [`Self::rect_mark_active`].
+    rect_mark: bool,
     /// Command names that take their count via `(prefix-count)` instead of
     /// being run N times (`set-count-aware!`).
     count_aware: HashSet<String>,
@@ -1528,6 +1554,7 @@ impl Editor {
             evil_replace_count: 1,
             vim: vim::VimState::default(),
             prefix_count: 0,
+            rect_mark: false,
             count_aware: HashSet::new(),
             count_repeat: None,
             kill_append: false,
@@ -2453,6 +2480,7 @@ impl Editor {
         self.active.selection_reversed = false;
         self.active.marked_range = None;
         self.active.mark_active = false;
+        self.rect_mark = false;
     }
 
     fn region(&self) -> Option<Range<usize>> {
@@ -2520,11 +2548,26 @@ impl Editor {
     }
 
     /// Block-selection rectangle for pane `id`, for the renderer (selected pane
-    /// only; `None` otherwise or when not in block-wise Visual).
-    pub fn pane_visual_block(&self, id: usize) -> Option<(usize, usize, usize, usize)> {
-        (id == self.selected_pane)
-            .then(|| self.visual_block_rect())
-            .flatten()
+    /// only; `None` otherwise or when neither block-wise Visual nor
+    /// `rectangle-mark-mode` is on).
+    pub fn pane_visual_block(&self, id: usize) -> Option<BlockSel> {
+        if id != self.selected_pane {
+            return None;
+        }
+        if let Some((top, bottom, mark, point)) = self.rect_mark_corners() {
+            return Some(BlockSel::Display {
+                top,
+                bottom,
+                corners: (mark, point),
+            });
+        }
+        let (top, bottom, left, right) = self.visual_block_rect()?;
+        Some(BlockSel::Chars {
+            top,
+            bottom,
+            left,
+            right,
+        })
     }
 
     // --- Command implementations ------------------------------------------
@@ -3278,6 +3321,7 @@ impl Editor {
         self.active.selected_range = p..p;
         self.active.selection_reversed = false;
         self.active.mark_active = true;
+        self.rect_mark = false;
         self.echo("Mark set", cx);
     }
 
@@ -3674,6 +3718,8 @@ impl Editor {
             helix_enabled: self.modal_helix,
             kbd_macro_recording: self.macro_recording.is_some(),
             prefix_count: self.prefix_count,
+            prefix_arg: self.uarg.pending,
+            rect_mark: self.rect_mark_active(),
             evil_state: self.evil.as_str().to_string(),
             search_query: self.search_query.clone().unwrap_or_default(),
             search_forward: self.evil_search_forward,
@@ -5597,6 +5643,7 @@ impl EntityInputHandler for Editor {
             },
         );
         self.active.mark_active = false;
+        self.rect_mark = false;
         self.ensure_cursor_visible();
         cx.notify();
     }

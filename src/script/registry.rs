@@ -42,6 +42,8 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("beginning-of-buffer", BeginningOfBuffer),
         ("end-of-buffer", EndOfBuffer),
         ("set-mark", SetMark),
+        ("deactivate-mark", DeactivateMark),
+        ("rectangle-mark-mode", RectangleMarkMode),
         ("exchange-point-and-mark", ExchangePointAndMark),
         ("mark-whole-buffer", MarkWholeBuffer),
         ("newline", Newline),

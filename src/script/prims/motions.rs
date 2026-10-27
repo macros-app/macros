@@ -2,6 +2,7 @@
 //! moving.
 
 use super::*;
+use steel::rvals::SteelVal;
 
 pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     let EngineShared { snapshot, .. } = ctx;
@@ -109,6 +110,58 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             move |NonNeg(line): NonNeg, NonNeg(col): NonNeg| -> usize {
                 let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
                 buf.byte_at_char_column(line, col)
+            },
+        );
+    }
+    {
+        // `(display-column pos tab-width)` → the DISPLAY column of `pos` on its
+        // line (Emacs `current-column`): tabs run to the next tab stop, wide
+        // characters count two. Rectangles (C-x r …) work in these columns.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "display-column",
+            move |pos: isize, NonNeg(tab): NonNeg| -> usize {
+                let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
+                let pos = buf.snap(scheme_pos(pos));
+                let start = buf.line_range_at(pos).start;
+                crate::rect::display_width(&buf.slice_to_string(start..pos), tab)
+            },
+        );
+    }
+    {
+        // `(rectangle-row line left right tab-width)` → how (0-based) `line`
+        // meets the display-column rectangle [left, right): the list
+        // `(start end before after pad inside)`. [start, end) is the buffer
+        // byte range it touches (widened to whole chars where an edge cuts a
+        // tab or wide char); `before`/`after` are the columns of those cut
+        // chars outside the rectangle (to put back as spaces); `pad` is how far
+        // the line falls short of `left`; `inside` is the rectangle's text on
+        // the line, space-padded to exactly `right - left` columns.
+        let shared = snapshot.clone();
+        reg.register_fn(
+            "rectangle-row",
+            move |NonNeg(line): NonNeg,
+                  NonNeg(left): NonNeg,
+                  NonNeg(right): NonNeg,
+                  NonNeg(tab): NonNeg|
+                  -> SteelVal {
+                let buf = crate::buffer::Buffer::from_rope(shared.load().text.clone());
+                let last = buf.line_count().saturating_sub(1);
+                let lr = buf.line_range(line.min(last));
+                let span =
+                    crate::rect::row_span(&buf.slice_to_string(lr.clone()), left, right, tab);
+                let int = |n: usize| SteelVal::IntV(n as isize);
+                SteelVal::ListV(
+                    vec![
+                        int(lr.start + span.start),
+                        int(lr.start + span.end),
+                        int(span.before),
+                        int(span.after),
+                        int(span.pad),
+                        SteelVal::StringV(span.inside.into()),
+                    ]
+                    .into(),
+                )
             },
         );
     }

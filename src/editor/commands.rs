@@ -160,6 +160,8 @@ impl Editor {
                 self.select_to(o, cx);
             }
             SetMark => self.set_mark(cx),
+            DeactivateMark => self.deactivate_mark(cx),
+            RectangleMarkMode => self.rectangle_mark_mode(cx),
             ExchangePointAndMark => self.exchange_point_and_mark(cx),
             MarkWholeBuffer => self.mark_whole_buffer(cx),
             GotoLine(n) => {
@@ -218,6 +220,9 @@ impl Editor {
             && command.is_interactive_edit()
         {
             self.echo("Buffer is read-only", cx);
+            return Ok(());
+        }
+        if self.rect_mark_redirect(&command, cx) {
             return Ok(());
         }
         match command {

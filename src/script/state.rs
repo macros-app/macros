@@ -110,6 +110,12 @@ pub struct EditorSnapshot {
     /// The Vim/Helix count typed before a count-aware command (`3` in `3dd`),
     /// or 0 when none was typed. For `(prefix-count)`; see `set-count-aware!`.
     pub prefix_count: usize,
+    /// A pending universal argument (`C-u` → 4, `C-u 7` → 7) when the
+    /// command was invoked, for `(current-prefix-arg)`; `None` without one.
+    pub prefix_arg: Option<i64>,
+    /// Whether `rectangle-mark-mode` (`C-x SPC`) is on, for
+    /// `(rectangle-mark-mode?)`.
+    pub rect_mark: bool,
     /// The modal state name ("normal", "insert", "visual", "visual-line",
     /// "visual-block"; "" when modal editing is off), for `(evil-state)`.
     pub evil_state: String,
@@ -182,6 +188,12 @@ pub(crate) type SharedSnapshot = Arc<ArcSwap<EditorSnapshot>>;
 pub(crate) struct MarkerStore {
     pub(crate) next: u64,
     pub(crate) positions: HashMap<u64, usize>,
+    /// Buffer-bound markers (`make-buffer-marker`): id → the buffer they
+    /// belong to. Unlike plain markers these survive a buffer switch.
+    pub(crate) owners: HashMap<u64, String>,
+    /// Buffer-bound markers whose buffer is not the active one, frozen at
+    /// their last position until it is again (see [`Self::switch`]).
+    pub(crate) parked: HashMap<u64, usize>,
 }
 
 impl MarkerStore {
@@ -194,6 +206,41 @@ impl MarkerStore {
         let id = self.next;
         self.positions.insert(id, pos);
         id
+    }
+
+    /// A marker's position, live or parked.
+    pub(crate) fn position(&self, id: u64) -> Option<usize> {
+        self.positions
+            .get(&id)
+            .or_else(|| self.parked.get(&id))
+            .copied()
+    }
+
+    /// The active buffer changed from `left` to `entered`. Plain markers are
+    /// positions in `left` and are dropped; buffer-bound ones of `left` park,
+    /// and those of `entered` resume tracking edits.
+    pub(crate) fn switch(&mut self, left: &str, entered: &str) {
+        for (id, pos) in std::mem::take(&mut self.positions) {
+            if self.owners.get(&id).is_some_and(|b| b == left) {
+                self.parked.insert(id, pos);
+            }
+        }
+        let owners = &self.owners;
+        let back: Vec<u64> = (self.parked.keys().copied())
+            .filter(|id| owners.get(id).is_some_and(|b| b == entered))
+            .collect();
+        for id in back {
+            if let Some(pos) = self.parked.remove(&id) {
+                self.positions.insert(id, pos);
+            }
+        }
+    }
+
+    /// Forget marker `id` entirely.
+    pub(crate) fn remove(&mut self, id: u64) {
+        self.positions.remove(&id);
+        self.parked.remove(&id);
+        self.owners.remove(&id);
     }
 }
 pub(crate) type Markers = Arc<Mutex<MarkerStore>>;

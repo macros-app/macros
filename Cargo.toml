@@ -26,6 +26,8 @@ gpui-platform = { version = "0.1.0", package = "gpui_ce_platform", features = [
 steel = { package = "steel-core", version = "0.8.2" }
 # Grapheme-aware cursor movement.
 unicode-segmentation = "1"
+# Display widths (wide CJK / emoji = 2 columns) for rectangle columns.
+unicode-width = "0.2"
 # Embed the `scheme/` Steel runtime into the binary at compile time.
 include_dir = "0.7"
 # LSP client: JSON-RPC messages and an async channel from the reader thread.

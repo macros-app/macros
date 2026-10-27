@@ -417,7 +417,7 @@ impl Editor {
         if id == self.selected_pane {
             // Block-wise Visual draws its own rectangular highlight
             // (`pane_visual_block`), so suppress the contiguous range here.
-            if matches!(self.evil, EvilState::VisualBlock) {
+            if matches!(self.evil, EvilState::VisualBlock) || self.rect_mark_active() {
                 return 0..0;
             }
             // Inclusive of the grapheme under the block cursor in evil Visual.

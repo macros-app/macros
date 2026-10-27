@@ -1,6 +1,6 @@
 ---
 title: Editing commands
-description: Region and kill-ring editing, search and replace, occur, sorting, and case commands.
+description: Region and kill-ring editing, rectangles, registers, search and replace, occur, sorting, and case commands.
 ---
 
 # Editing commands
@@ -36,6 +36,47 @@ The same keys paste into a **minibuffer** prompt: <kbd>cmd-v</kbd> inserts the c
 | <kbd>C-x C-t</kbd> | `transpose-lines` |
 | <kbd>M-^</kbd> | `join-line` |
 | <kbd>C-o</kbd> | `open-line` |
+
+## Rectangles
+
+A **rectangle** is the block of text between mark and point taken as two corners: every line from the mark's line to point's, and the columns between the mark's column and point's. Set the mark (<kbd>C-Space</kbd>), move to the opposite corner, then run a command. Columns are *display* columns, as in Emacs: a tab counts up to its next tab stop (the `tab-width` option) and a wide CJK or emoji character counts two. When an edge cuts through a tab or wide character, that character is split into spaces.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-x r k</kbd> | `kill-rectangle` | Delete the rectangle, saving it as the last killed rectangle |
+| <kbd>C-x r M-w</kbd> | `copy-rectangle-as-kill` | Save the rectangle without deleting it |
+| <kbd>C-x r d</kbd> | `delete-rectangle` | Delete the rectangle without saving it |
+| <kbd>C-x r y</kbd> | `yank-rectangle` | Insert the last killed rectangle with its top-left corner at point |
+| <kbd>C-x r o</kbd> | `open-rectangle` | Insert blank space filling the rectangle, pushing text right |
+| <kbd>C-x r c</kbd> | `clear-rectangle` | Replace the rectangle with spaces |
+| <kbd>C-x r t</kbd> | `string-rectangle` | Replace each line of the rectangle with a string from the minibuffer |
+| <kbd>C-x r N</kbd> | `rectangle-number-lines` | Number the lines from 1 at the rectangle's left edge |
+| <kbd>C-x SPC</kbd> | `rectangle-mark-mode` | Show the region as a column block |
+
+A killed rectangle is a list of lines, and short lines are padded with spaces so every line has the rectangle's width. It also goes on the clipboard as newline-joined text. <kbd>C-x r y</kbd> pads short lines out to point's column and adds lines at the end of the buffer if it needs them. A rectangle of width zero still works: <kbd>C-x r t</kbd> then inserts the string on every line, and <kbd>C-x r N</kbd> numbers them. As in Emacs, <kbd>C-x r o</kbd> and <kbd>C-x r c</kbd> leave alone any line that ends before the rectangle's left edge. Each command undoes as one step.
+
+**Rectangle mark mode.** <kbd>C-x SPC</kbd> sets the mark if none is active and highlights the region as a column block (the same highlight as evil's <kbd>C-v</kbd> block selection). While it's on, <kbd>C-w</kbd> kills the rectangle, <kbd>M-w</kbd> copies it and <kbd>C-t</kbd> runs `string-rectangle`. <kbd>C-g</kbd> or a second <kbd>C-x SPC</kbd> turns it off.
+
+## Registers
+
+A **register** is a slot named by one character that holds text, a number, a rectangle, a position or a window layout (Emacs `register.el`). Each command prompts for the character. These are separate from evil's <kbd>"a</kbd> registers. They last for the session and are not saved across restarts.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-x r s</kbd> / <kbd>C-x r x</kbd> | `copy-to-register` | Copy the region into a register (with <kbd>C-u</kbd>, delete it too) |
+| <kbd>C-x r i</kbd> / <kbd>C-x r g</kbd> | `insert-register` | Insert a register's text, number or rectangle. Point stays before it (after it with <kbd>C-u</kbd>) |
+| <kbd>C-x r r</kbd> | `copy-rectangle-to-register` | Copy the region's rectangle into a register (with <kbd>C-u</kbd>, delete it too) |
+| <kbd>C-x r SPC</kbd> | `point-to-register` | Remember point |
+| <kbd>C-x r j</kbd> | `jump-to-register` | Jump to a remembered position, or restore a window layout |
+| <kbd>C-x r n</kbd> | `number-to-register` | Store a number: the prefix argument, otherwise the number at point (and move past it), otherwise 0 |
+| <kbd>C-x r +</kbd> | `increment-register` | Add the prefix argument (default 1) to a number register. For a text register, append the region to it |
+| <kbd>C-x r w</kbd> | `window-configuration-to-register` | Remember the window split layout |
+| <kbd>M-x</kbd> `view-register` | | Describe one register in the echo area |
+| <kbd>M-x</kbd> `list-registers` | | List every register in a `*Register List*` buffer (<kbd>q</kbd> closes it) |
+
+A position register follows its text as you edit, even while another buffer is current, because it holds a marker bound to its buffer. If that buffer has been killed, <kbd>C-x r j</kbd> visits its file again at the stored position. A register used for counting goes like this: <kbd>C-u 1 C-x r n a</kbd> to start at 1, <kbd>C-x r i a</kbd> to insert the number, <kbd>C-x r + a</kbd> to step it.
+
+Scheme can use these directly: `(get-register "a")` and `(set-register "a" (cons "text" "hi"))` read and write registers, `(rectangle-bounds)` gives the region's rectangle as `(top bottom left right)`, `(rectangle-extract top bottom left right)` returns its lines and `(insert-rectangle lines)` inserts lines at point.
 
 ## Search
 

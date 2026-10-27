@@ -195,6 +195,11 @@ pub enum EditorCommand {
     EndOfBuffer,
     // Region / mark
     SetMark,
+    /// Emacs `deactivate-mark`: drop the region, leaving point in place.
+    DeactivateMark,
+    /// Emacs `rectangle-mark-mode` (`C-x SPC`): toggle treating the region as
+    /// a rectangle (highlighted as a column block; `C-w`/`M-w`/`C-t` act on it).
+    RectangleMarkMode,
     ExchangePointAndMark,
     MarkWholeBuffer,
     ExtendBackwardChar,

@@ -180,14 +180,15 @@ impl Editor {
     }
 
     pub(super) fn install_active(&mut self, doc: Document) {
-        self.active = doc;
+        let left = std::mem::replace(&mut self.active, doc).name;
         // A keyboard selection belongs to the buffer just left.
         self.special_select_drop();
         if self.render_redirect.as_deref() == Some(self.active.name.as_str()) {
             self.render_redirect = None; // see `end_redirect_to`
         }
-        // Markers are positions in the previous buffer; drop them on a switch.
-        self.script.clear_markers();
+        // Markers are positions in the previous buffer; drop them on a switch
+        // (buffer-bound ones — point registers — park until it is back).
+        self.script.switch_markers(&left, &self.active.name);
         // Secondary selections / snippet fields are marker-backed, so they're
         // gone with the markers — forget their (now dangling) head+anchor pairs
         // and any avy hints.
