@@ -77,6 +77,9 @@ mod overlays;
 mod panes;
 mod process;
 mod registers;
+mod remote;
+#[cfg(all(test, unix))]
+mod remote_tests;
 #[cfg(test)]
 mod save_tests;
 mod session;
@@ -1653,6 +1656,17 @@ impl Editor {
                     .update(cx, |editor, _| editor.flush_lsp_fullsync())
                     .is_err()
                 {
+                    break; // editor dropped
+                }
+            }
+        })
+        .detach();
+        // Remote-file status ("Connecting to host…", a failed background
+        // listing) from whichever thread runs the ssh, into the echo area.
+        let mut remote_status = crate::remote::subscribe();
+        cx.spawn(async move |this, cx| {
+            while let Some(line) = remote_status.next().await {
+                if this.update(cx, |editor, cx| editor.echo(line, cx)).is_err() {
                     break; // editor dropped
                 }
             }
@@ -3381,6 +3395,10 @@ impl Editor {
     }
 
     fn keyboard_quit(&mut self, cx: &mut Context<Self>) {
+        // C-g also abandons a remote-file operation stuck on the network.
+        if crate::remote::cancel_all() > 0 {
+            self.echo("Quit (cancelled the remote operation)", cx);
+        }
         if self.minibuffer.is_some() {
             self.mb_abort(cx);
             return;
@@ -3451,13 +3469,14 @@ impl Editor {
         let enabled = cx.global::<crate::settings::Settings>().magit_gutter();
         let new_marks: HashMap<usize, DiffMark> = if enabled {
             match self.active.path.clone() {
-                Some(path) => {
+                // A remote file's repository isn't on this machine.
+                Some(path) if !crate::remote::is_remote(&path) => {
                     let text = self.active.buffer.full_text();
                     crate::script::git_diff_marks(&path, &text)
                         .into_iter()
                         .collect()
                 }
-                None => HashMap::new(),
+                _ => HashMap::new(),
             }
         } else {
             HashMap::new()
@@ -3597,7 +3616,7 @@ impl Editor {
             .active
             .path
             .as_deref()
-            .and_then(|p| p.parent())
+            .and_then(crate::remote::parent_of)
             .map_or_else(
                 || self.process_cwd.clone(),
                 |d| d.to_string_lossy().into_owned(),
@@ -4207,6 +4226,16 @@ impl Editor {
     // --- LSP --------------------------------------------------------------
 
     /// The URI identifying the active buffer for LSP (see [`document_uri`]).
+    /// Whether the active buffer visits a file on another host (`/ssh:…`):
+    /// local-only machinery (language servers, the git gutter, file watches)
+    /// leaves it alone.
+    fn active_is_remote(&self) -> bool {
+        self.active
+            .path
+            .as_deref()
+            .is_some_and(crate::remote::is_remote)
+    }
+
     fn active_uri(&self) -> Option<String> {
         Some(document_uri(&self.active))
     }

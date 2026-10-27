@@ -62,6 +62,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { slug: "ediff", label: "Ediff", blurb: "Diff files and merge hunks between buffers" },
       { slug: "dired", label: "Dired", blurb: "The directory editor / file manager" },
       { slug: "dired-sidebar", label: "Dired sidebar", blurb: "The bundled file-tree sidebar" },
+      { slug: "remote-files", label: "Remote files (ssh)", blurb: "TRAMP-style /ssh:host:/path editing — find-file, save, dired over ssh" },
       { slug: "grid", label: "Grid (CSV & spreadsheets)", blurb: "CSV, TSV, and .xlsx as a spreadsheet; flip to raw text with one key" },
       { slug: "grid-formulas", label: "Grid formulas", blurb: "Excel-compatible formulas, 150 functions, and functions in Scheme" },
       { slug: "org-mode", label: "Org mode", blurb: "Headings, TODOs, agenda, tables, babel" },
