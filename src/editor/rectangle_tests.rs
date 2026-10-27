@@ -229,3 +229,18 @@ fn bookmark_keys_still_bound(cx: &mut TestAppContext) {
         );
     });
 }
+
+#[gpui::test]
+fn rectangles_stay_inside_the_narrowing(cx: &mut TestAppContext) {
+    let (ed, vcx) = setup(cx, GRID);
+    // Narrow to the first two lines; a yanked rectangle taller than that
+    // gets its extra rows at the narrowing's end, not past it.
+    press(
+        &ed,
+        vcx,
+        "C-SPC C-n C-n C-x n n M-< C-f C-SPC C-n C-f C-f C-x r k",
+    );
+    assert_eq!(text(&ed, vcx), "adef\ngjkl\nmnopqr\n");
+    press(&ed, vcx, "M-< C-n C-e C-x r y");
+    assert_eq!(text(&ed, vcx), "adef\ngjklbc\n    hi\nmnopqr\n");
+}

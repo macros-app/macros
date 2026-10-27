@@ -110,8 +110,8 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     register_snapshot_read(reg, snapshot, "prefix-count", |s| s.prefix_count);
     // `(current-prefix-arg)` → the universal argument the command was invoked
     // with (Emacs's numeric value: `C-u` → 4, `C-u C-u` → 16, `C-u 7` → 7), or
-    // #f without one. Only the command's FIRST queued effect consumes it, so
-    // a command reading it should start with a non-repeating one.
+    // #f without one. The argument is spent on the Scheme command itself
+    // (`(prefix-count)` holds it too), never repeating its queued effects.
     register_snapshot_read(reg, snapshot, "current-prefix-arg", |s| {
         s.prefix_arg
             .map_or(SteelVal::BoolV(false), |n| SteelVal::IntV(n as isize))

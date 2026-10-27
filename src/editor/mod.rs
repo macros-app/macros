@@ -4728,10 +4728,15 @@ impl Editor {
             // `current-prefix-arg`: `C-u M-!` inserts the output) instead of
             // leaking onto the first builtin the command queues.
             let saved_count = self.prefix_count;
-            if let Some(n) = self.uarg.pending.take() {
+            let pending = self.uarg.pending.take();
+            if let Some(n) = pending {
                 self.prefix_count = usize::try_from(n).unwrap_or(0);
             }
+            // …and as `(current-prefix-arg)`, which tells "no C-u" (#f) from
+            // a typed count: published, then consumed.
+            self.uarg.pending = pending;
             self.publish_point();
+            self.uarg.pending = None;
             self.prefix_count = saved_count;
             self.script.dispatch(source, false);
             self.vim.went_async = true;

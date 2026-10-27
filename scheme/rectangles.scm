@@ -64,27 +64,36 @@
     (if (< row top) acc (loop (- row 1) (cons (f row) acc)))))
 
 ;; Apply EDITS — (start end text) triples or #f, top row first — bottom-up as
-;; one undo step.
+;; one undo step. In a narrowed buffer (C-x n n) a row whose span reaches
+;; outside the accessible part is left alone.
 (define (rect--apply edits)
-  (undo-amalgamate-begin)
-  (for-each (lambda (e)
-              (when e (replace-region (car e) (cadr e) (caddr e))))
-            (reverse edits))
-  (undo-amalgamate-end))
+  (let ((lo (point-min)) (hi (point-max)))
+    (undo-amalgamate-begin)
+    (for-each (lambda (e)
+                (when (and e (>= (car e) lo) (<= (cadr e) hi))
+                  (replace-region (car e) (cadr e) (caddr e))))
+              (reverse edits))
+    (undo-amalgamate-end)))
 
 ;; Where pre-edit offset `pos` ends up once EDITS are applied: shifted by every
 ;; edit lying wholly before it.
 (define (rect--shift edits pos)
-  (let loop ((es edits) (p pos))
+  (let loop ((es (rect--accessible edits)) (p pos))
     (cond ((null? es) p)
           ((and (car es) (< (car (car es)) pos) (<= (cadr (car es)) pos))
            (let ((e (car es)))
              (loop (cdr es) (+ p (- (utf8-length (caddr e)) (- (cadr e) (car e)))))))
           (else (loop (cdr es) p)))))
 
+;; EDITS without those `rect--apply` skips (outside the narrowing).
+(define (rect--accessible edits)
+  (let ((lo (point-min)) (hi (point-max)))
+    (map (lambda (e) (and e (>= (car e) lo) (<= (cadr e) hi) e)) edits)))
+
 ;; The total length change EDITS make.
 (define (rect--delta edits)
-  (apply + (map (lambda (e) (- (utf8-length (caddr e)) (- (cadr e) (car e)))) edits)))
+  (apply + (map (lambda (e) (- (utf8-length (caddr e)) (- (cadr e) (car e))))
+                (filter (lambda (e) e) (rect--accessible edits)))))
 
 ;; The pre-edit offset of display column `col` on `row` (or the row's end
 ;; when it is shorter).
@@ -144,7 +153,12 @@
   (unless (null? lines)
     (let* ((p (point)) (tab (rect--tab))
            (row0 (line-of-pos p)) (col (display-column p tab))
-           (nrows (line-count)) (n (length lines))
+           ;; Rows past the narrowing's end count as missing and are added at
+           ;; its end. When it ends at a line start, that line is outside too
+           ;; (unless it is the buffer's last, empty line).
+           (pm (point-max))
+           (open-end (= (line-end-pos pm) pm))
+           (nrows (+ (line-of-pos pm) (if open-end 1 0))) (n (length lines))
            ;; Lines that land on existing rows, and those that need new rows.
            (have (max 0 (min n (- nrows row0))))
            (edits (let loop ((i 0) (ls lines) (acc '()))
@@ -160,16 +174,20 @@
                                       acc))))))
            (extra (list-tail lines have))
            (tail (apply string-append
-                        (map (lambda (l) (string-append "\n" (rect--spaces col) l)) extra))))
+                        (map (lambda (l)
+                               (if open-end
+                                   (string-append "\n" (rect--spaces col) l)
+                                   (string-append (rect--spaces col) l "\n")))
+                             extra))))
       (undo-amalgamate-begin)
-      (unless (null? extra) (insert-at (point-max) tail))
+      (unless (null? extra) (insert-at pm tail))
       (rect--apply edits)
       (undo-amalgamate-end)
       (if (null? extra)
           (let ((last (list-ref edits (- (length edits) 1))))
             (goto-char (+ (rect--shift edits (car last)) (utf8-length (caddr last)))))
           ;; Every edit lies before the added rows: point lands at the very end.
-          (goto-char (+ (point-max) (rect--delta edits) (utf8-length tail)))))))
+          (goto-char (+ pm (rect--delta edits) (utf8-length tail) (if open-end 0 -1)))))))
 
 ;; C-x r y — insert the last killed rectangle at point.
 (define-command (yank-rectangle)
