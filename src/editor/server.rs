@@ -159,7 +159,6 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufRead as _;
 
     use gpui::{Entity, TestAppContext};
 
