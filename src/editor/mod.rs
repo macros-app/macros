@@ -88,6 +88,7 @@ mod remote;
 mod remote_tests;
 #[cfg(test)]
 mod save_tests;
+mod server;
 mod session;
 mod special_select;
 #[cfg(test)]
@@ -96,6 +97,7 @@ mod structural;
 mod terminal;
 mod undo;
 mod vim;
+mod winner;
 
 pub use helm::HelmView;
 use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_index};
@@ -827,6 +829,8 @@ pub struct Editor {
     last_isearch: Option<String>,
     /// Search ring + command history kept for session persistence (savehist).
     session: session::SessionRings,
+    /// winner-mode's window-layout history (`C-c left` / `C-c right`).
+    winner: winner::Winner,
     /// `C-l` (recenter-top-bottom) cycle position: 0 = middle, 1 = top, 2 = bottom.
     /// Advances on each consecutive press; resets when point has moved since.
     recenter_cycle: usize,
@@ -1579,6 +1583,7 @@ impl Editor {
             isearch: None,
             last_isearch: None,
             session: session::SessionRings::default(),
+            winner: winner::Winner::default(),
             recenter_cycle: 0,
             recenter_point: usize::MAX,
             image_cache: HashMap::new(),
@@ -5429,6 +5434,8 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.window_handle = Some(window.window_handle());
+        // Every window change (command, mouse drag, Scheme) ends in a render.
+        self.winner_observe(cx);
         // Observe window focus once, so the cursor only blinks while the window
         // is active. Seed the current state here; the observer handles later
         // activate/deactivate changes.

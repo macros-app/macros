@@ -28,6 +28,12 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-v</kbd> / <kbd>M-v</kbd> | `scroll-up` / `scroll-down` |
 | <kbd>C-l</kbd> | `recenter` |
 | <kbd>M-g g</kbd> | `goto-line-cmd` |
+| <kbd>C-M-f</kbd> / <kbd>C-M-b</kbd> | `forward-sexp` / `backward-sexp` |
+| <kbd>C-M-n</kbd> / <kbd>C-M-p</kbd> | `forward-list` / `backward-list` |
+| <kbd>C-M-u</kbd> / <kbd>C-M-d</kbd> | `backward-up-list` / `down-list` |
+| <kbd>C-M-a</kbd> / <kbd>C-M-e</kbd> | `beginning-of-defun` / `end-of-defun` |
+
+Sexp and defun motion works in every language, not just Lisp; see [Sexps and defuns](/docs/editing-commands#sexps-and-defuns).
 
 ## Editing, kill & yank
 
@@ -35,6 +41,8 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | --- | --- |
 | <kbd>C-d</kbd> | `delete-char` |
 | <kbd>C-k</kbd> | `kill-line` |
+| <kbd>C-S-Backspace</kbd> | `kill-whole-line` |
+| <kbd>C-M-k</kbd> | `kill-sexp` |
 | <kbd>M-d</kbd> / <kbd>M-Backspace</kbd> | `kill-word` / `backward-kill-word` |
 | <kbd>C-Space</kbd> | `set-mark` |
 | <kbd>C-w</kbd> / <kbd>M-w</kbd> | `kill-region` / `kill-ring-save` |
@@ -44,9 +52,20 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-t</kbd> | `transpose-chars` |
 | <kbd>C-o</kbd> | `open-line` |
 | <kbd>M-;</kbd> | `comment-dwim` |
+| <kbd>C-M-t</kbd> | `transpose-sexps` |
+| <kbd>C-M-SPC</kbd> / <kbd>C-M-@</kbd> | `mark-sexp` |
+| <kbd>C-M-h</kbd> | `mark-defun` |
+| <kbd>M-\\</kbd> | `delete-horizontal-space` |
+| <kbd>C-x TAB</kbd> | `indent-rigidly` (then <kbd>←</kbd> / <kbd>→</kbd>) |
+| <kbd>M-/</kbd> | `dabbrev-expand` (repeat to cycle) |
+| <kbd>C-x 8 RET</kbd> | `insert-char` (by name or hex code point) |
+| <kbd>M-=</kbd> | `count-words-region` |
+| <kbd>C-x =</kbd> | `what-cursor-position` |
 | <kbd>C-x n n</kbd> / <kbd>C-x n d</kbd> | `narrow-to-region` / `narrow-to-defun` |
 | <kbd>C-x n s</kbd> | `org-narrow-to-subtree` (Org) |
 | <kbd>C-x n w</kbd> | `widen` |
+
+More editing commands without a key (`delete-trailing-whitespace`, `align-regexp`, `keep-lines`, `flush-lines`, `delete-duplicate-lines`) are on <kbd>M-x</kbd>; see [Editing commands](/docs/editing-commands).
 
 The system clipboard always works, including inside modal states: <kbd>cmd-c</kbd> / <kbd>cmd-x</kbd> / <kbd>cmd-v</kbd> (`clipboard-copy` / `-cut` / `-paste`).
 
@@ -63,7 +82,12 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | <kbd>C-x o</kbd> | `other-window` |
 | <kbd>C-x 0</kbd> / <kbd>C-x 1</kbd> | `delete-window` / `delete-other-windows` |
 | <kbd>C-x ^</kbd> / <kbd>C-x }</kbd> / <kbd>C-x {</kbd> | resize windows |
+| <kbd>C-c left</kbd> / <kbd>C-c right</kbd> | `winner-undo` / `winner-redo` (window layout history; evil: <kbd>C-w u</kbd> / <kbd>C-w U</kbd>) |
 | <kbd>C-x C-c</kbd> | `quit` |
+
+**winner-mode** records every change to the window layout — splits, sizes and which buffer each window shows. <kbd>C-c left</kbd> goes back to the previous layout and keeps going back on repeat; <kbd>C-c right</kbd> goes forward again. It's on by default; `(winner-mode #f)` in `init.scm` (the same as `(set-option "winner-mode" #f)`) turns it off.
+
+In a [Dired](/docs/dired) listing, <kbd>C-x C-q</kbd> makes the file names editable (wdired); <kbd>C-c C-c</kbd> renames, <kbd>C-c C-k</kbd> aborts.
 
 ## Search, command, eval
 

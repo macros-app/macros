@@ -6,7 +6,7 @@
 ;; ANY buffer with a tree-sitter grammar — no language server required.
 ;;
 ;;   C-=    er/expand     widen selection to the enclosing syntax node
-;;   M-=    er/contract   step back to the previous (narrower) selection
+;;   C--    er/contract   step back to the previous (narrower) selection
 ;;
 ;; Built on `tree-sitter-node-at`, which returns the enclosing node chain
 ;; (innermost → outermost) as "kind\tstart\tend" lines. We pick the smallest
@@ -58,7 +58,7 @@
   (when (not (region-active?)) (set! *er-history* '()))
   (tree-sitter-node-at (er--query-byte) 'er--apply-expand))
 
-;; M-= : shrink back to the previous selection on the expansion stack.
+;; C-- : shrink back to the previous selection on the expansion stack.
 (define (er/contract)
   (if (null? *er-history*)
       (message "expand-region: nothing to contract")
@@ -69,7 +69,7 @@
             (goto-char (nth prev 0))))))
 
 (define-key "fundamental" "ctrl-=" 'er/expand)
-(define-key "fundamental" "alt-=" 'er/contract)
+(define-key "fundamental" "ctrl--" 'er/contract)   ; M-= is count-words-region
 ;; Evil: keep growing with `+` / shrinking with `-` in visual state (harmless
 ;; if evil-mode is never enabled — it's just an unused keymap entry).
 (define-key "evil-visual" "+" 'er/expand)

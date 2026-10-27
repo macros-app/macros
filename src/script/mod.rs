@@ -43,3 +43,5 @@ mod commands_tests;
 mod shell_grep_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wdired_tests;

@@ -1384,6 +1384,15 @@ impl Editor {
             }
             return true;
         }
+        // The key completes a pending prefix (`C-c <left>`, `C-w <left>`):
+        // route it like any other keystroke so the sequence resolves.
+        if !self.pending_keys.is_empty()
+            && self.minibuffer.is_none()
+            && let Ok(ks) = Keystroke::parse(k.name)
+        {
+            self.dispatch_keystroke(&ks, cx);
+            return true;
+        }
         match &k.popup {
             PopupKey::Ignore => {}
             PopupKey::Dismiss => self.completion_popup = None,

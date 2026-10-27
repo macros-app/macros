@@ -376,6 +376,9 @@ pub enum EditorCommand {
     KillBuffer,
     /// Show the MCP server's status, connection command, and log.
     McpServerInfo,
+    /// `C-x #`: done with this client buffer — save it and release the
+    /// waiting `macros --client` (src/server.rs).
+    ServerEdit,
     /// Kill the active buffer and close its window (Emacs `kill-buffer-and-window`).
     KillBufferAndWindow,
     Quit,
@@ -623,6 +626,9 @@ pub enum EditorCommand {
     BottomRightWindow,
     /// `C-w =` (Emacs `C-x +`).
     BalanceWindows,
+    /// `C-c left` / `C-c right`: step through the window-layout history.
+    WinnerUndo,
+    WinnerRedo,
     /// `C-w _` / `C-w |`.
     MaximizeWindowHeight,
     MaximizeWindowWidth,

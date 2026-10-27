@@ -36,6 +36,50 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     register_pos_fn!("bigword-forward-end", |b, p| b.forward_bigword_end(p));
     register_pos_fn!("word-backward-end", |b, p| b.backward_word_end(p));
     register_pos_fn!("bigword-backward-end", |b, p| b.backward_bigword_end(p));
+    // --- Sexp positions (compute, don't move) -----------------------------
+    // On the same language-aware reader as `forward-sexp`: Lisp buffers read
+    // as Lisp, everything else as bracket-balanced code whose strings and
+    // comments come from the syntax tree.
+    let read_sexps = |snap: &EditorSnapshot| {
+        crate::sexp::parse_buffer(
+            &snap.text.to_string(),
+            &snap.language,
+            &snap.major_mode,
+            snap.tree.as_ref(),
+        )
+    };
+    // `(lisp-buffer?)` → whether the buffer reads as Lisp for sexp motion.
+    register_snapshot_read(reg, snapshot, "lisp-buffer?", |s| {
+        crate::sexp::is_lisp(&s.language, &s.major_mode)
+    });
+    {
+        // `(sexp-forward-pos pos)` → end of the sexp at or after pos, or -1.
+        let shared = snapshot.clone();
+        reg.register_fn("sexp-forward-pos", move |NonNeg(pos): NonNeg| -> isize {
+            let snap = shared.load();
+            crate::sexp::forward_sexp_in(&read_sexps(&snap), pos).map_or(-1, |p| p as isize)
+        });
+    }
+    {
+        // `(sexp-backward-pos pos)` → start of the sexp before pos, or -1.
+        let shared = snapshot.clone();
+        reg.register_fn("sexp-backward-pos", move |NonNeg(pos): NonNeg| -> isize {
+            let snap = shared.load();
+            crate::sexp::backward_sexp_in(&read_sexps(&snap), pos).map_or(-1, |p| p as isize)
+        });
+    }
+    {
+        // `(sexp-top-level-ranges)` → flat `(start end …)` of every top-level
+        // datum: Lisp's defuns, and the fallback for buffers with no tree.
+        let shared = snapshot.clone();
+        reg.register_fn("sexp-top-level-ranges", move || -> Vec<usize> {
+            let snap = shared.load();
+            crate::sexp::top_level_ranges(&read_sexps(&snap))
+                .into_iter()
+                .flat_map(|(s, e)| [s, e])
+                .collect()
+        });
+    }
     {
         // `(buffer-regex-matches pattern start end)` → a flat list
         // `(s0 e0 s1 e1 …)` of the BUFFER byte ranges of every match inside

@@ -207,6 +207,7 @@ const OPTIONS: &[OptionSpec] = &[
     float("magit-gutter-width", 2.0, Some(1.0), Some(8.0)),
     flag("magit-gutter-deleted", true),
     flag("lsp-log-on-start", false),
+    flag("winner-mode", true),
     flag("auto-update", true),
     flag("helm-fuzzy", true),
     flag("line-numbers", true),
@@ -219,6 +220,7 @@ const OPTIONS: &[OptionSpec] = &[
     flag("mcp-server", false),
     int("mcp-server-port", 7811, Some(1.0), Some(65535.0)),
     text("mcp-server-token", ""),
+    flag("server", true),
 ];
 
 /// `a == b`, usable in a `const` context.
@@ -626,6 +628,12 @@ impl Settings {
         self.bool_of(const { spec("cursor-blink") })
     }
 
+    /// Whether winner-mode records window layouts for `C-c left` / `C-c right`
+    /// (on by default; `(set-option "winner-mode" #f)` turns it off).
+    pub fn winner_mode(&self) -> bool {
+        self.bool_of(const { spec("winner-mode") })
+    }
+
     /// Cursor blink half-period in milliseconds (time the cursor stays shown,
     /// then hidden). Default 530, matching Emacs `blink-cursor-interval` (0.53s).
     /// The 60ms minimum is enforced when the option is set.
@@ -762,6 +770,13 @@ impl Settings {
         Some(self.str_of(const { spec("mcp-server-token") }).trim()).filter(|t| !t.is_empty())
     }
 
+    /// The edit server (src/server.rs) that `macros --client` hands files to.
+    /// ON by default: it only listens on a socket private to the user, and
+    /// without it every `macros --client` would start a second editor.
+    pub fn server(&self) -> bool {
+        self.bool_of(const { spec("server") })
+    }
+
     /// Bevel edge widths (px) per side, default 1 (minimum 0 enforced on set).
     pub fn helm_bevel_top(&self) -> f32 {
         self.f32_of(const { spec("helm-bevel-top") })
@@ -825,6 +840,7 @@ mod tests {
         assert!(!s.mcp_server());
         assert_eq!(s.mcp_server_port(), 7811);
         assert_eq!(s.mcp_server_token(), None);
+        assert!(s.server());
         assert_eq!(s.helm_bevel_top(), 1.0);
         assert_eq!(s.helm_bevel_right(), 1.0);
         assert_eq!(s.helm_bevel_bottom(), 1.0);

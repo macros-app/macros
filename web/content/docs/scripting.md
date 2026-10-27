@@ -170,14 +170,16 @@ So the workflow is: edit a function in your `init.scm`, press <kbd>C-c C-e</kbd>
 
 ### Structural editing
 
-Lisp buffers (`steel`, `macros-steel`, and the other Lisp modes) get Emacs's sexp motions and the core paredit edits. They work on reader-aware boundaries, so a paren inside a string, a `;` comment or a `#\(` char literal is never treated as a delimiter.
+Lisp buffers (`steel`, `macros-steel`, and the other Lisp modes) get the core paredit edits on top of Emacs's sexp motions. Both work on reader-aware boundaries, so a paren inside a string, a `;` comment or a `#\(` char literal is never treated as a delimiter. The motions are global and work in other languages too; see [Sexps and defuns](/docs/editing-commands#sexps-and-defuns).
 
 | Key | Command | Action |
 | --- | --- | --- |
 | <kbd>C-M-f</kbd> / <kbd>C-M-b</kbd> | `forward-sexp` / `backward-sexp` | Move over a sexp |
-| <kbd>C-M-u</kbd> / <kbd>C-M-n</kbd> | `backward-up-list` / `up-list` | Move out of the enclosing list |
+| <kbd>C-M-u</kbd> | `backward-up-list` | Move out of the enclosing list |
+| <kbd>C-M-n</kbd> / <kbd>C-M-p</kbd> | `forward-list` / `backward-list` | Move over the next / previous list |
 | <kbd>C-M-d</kbd> | `down-list` | Move into the next list |
 | <kbd>C-M-k</kbd> | `kill-sexp` | Kill the sexp after point |
+| <kbd>C-M-a</kbd> / <kbd>C-M-e</kbd> | `beginning-of-defun` / `end-of-defun` | Move to the start / end of the top-level form |
 | <kbd>C-)</kbd> / <kbd>C-}</kbd> | `paredit-forward-slurp-sexp` / `-barf-sexp` | Pull the next sexp in / push the last one out |
 | <kbd>M-(</kbd> | `paredit-wrap-round` | Wrap the sexp at point in parens |
 | <kbd>M-r</kbd> | `paredit-raise-sexp` | Replace the enclosing list with the sexp at point |

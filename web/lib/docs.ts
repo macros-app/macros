@@ -58,6 +58,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: "Tools",
     items: [
+      { slug: "server", label: "Edit server", blurb: "macros --client: open files in the running editor; use it as $EDITOR" },
       { slug: "git", label: "Git (Magit)", blurb: "Stage, commit, branch, read diffs" },
       { slug: "ediff", label: "Ediff", blurb: "Diff files and merge hunks between buffers" },
       { slug: "dired", label: "Dired", blurb: "The directory editor / file manager" },
