@@ -107,6 +107,15 @@ impl Editor {
         }
     }
 
+    /// Buffer `old` was renamed to `new`: processes writing to it follow.
+    pub(super) fn rename_process_buffers(&mut self, old: &str, new: &str) {
+        for h in self.processes.values_mut() {
+            if h.buffer.as_deref() == Some(old) {
+                h.buffer = Some(new.to_string());
+            }
+        }
+    }
+
     /// App quit: SIGTERM every `make-process` group, give them a brief grace
     /// to exit, SIGKILL the stragglers; and drop embedded terminals (their PTY
     /// teardown SIGHUPs the shell). Synchronous — the app is exiting, so a

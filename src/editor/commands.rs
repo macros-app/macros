@@ -34,6 +34,7 @@ impl Editor {
             }
             _ => self.apply_command_once(command, cx),
         }
+        self.reconcile_locks(cx);
     }
 
     /// Apply a single command exactly once.
@@ -544,6 +545,13 @@ impl Editor {
             SaveSomeBuffers => self.save_some_buffers(cx),
             RevertBuffer => self.revert_buffer(cx),
             OpenFileOtherWindow(path) => self.open_file_other_window(path, cx),
+            WriteFile(path) => self.write_file(&path, false, cx),
+            RenameBuffer(name) => self.rename_buffer(&name, cx),
+            InsertFile(path) => self.insert_file(&path, cx),
+            FindFileOtherWindow(path) => self.find_file_other_window(&path, cx),
+            SwitchToBufferOtherWindow(name) => self.switch_to_buffer_other_window(&name, cx),
+            DisplayBuffer(name) => self.display_buffer(&name, cx),
+            ToggleReadOnly => self.toggle_read_only(cx),
             KillBuffer => self.kill_buffer(cx),
             McpServerInfo => self.show_mcp_server_info(cx),
             KillBufferAndWindow => self.kill_buffer_and_window(cx),
@@ -1291,6 +1299,7 @@ impl Editor {
                 if touched_mcp {
                     self.reconcile_mcp_server(cx);
                 }
+                self.sync_file_options(cx);
                 cx.notify();
             }
             AddHook(mode, function) => {

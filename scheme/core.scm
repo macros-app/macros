@@ -510,6 +510,17 @@
        (define name value)
        (register-command 'name)))))
 
+;; `write-file` — two jobs under Emacs's name. With PATH and TEXT, a script's
+;; file write (the `write-file-text` primitive; #t on success). With just PATH,
+;; Emacs's `write-file`: save the current buffer as PATH and visit it from now
+;; on (asking before overwriting another file). With nothing — M-x, C-x C-w —
+;; read the path in the minibuffer, completing file names.
+(define (write-file . args)
+  (cond ((null? args) (read-file-name "Write file: " 'write-file-impl))
+        ((null? (cdr args)) (write-file-impl (car args)))
+        (else (write-file-text (car args) (cadr args)))))
+(register-command 'write-file)
+
 ;; `load-theme` — load a built-in theme. With an argument (string or symbol) it
 ;; loads directly: (load-theme 'macros-dark). With no argument — e.g. M-x
 ;; load-theme — it prompts with completion over (theme-names), reusing itself as

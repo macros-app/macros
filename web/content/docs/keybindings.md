@@ -53,14 +53,23 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | --- | --- |
 | <kbd>C-x C-f</kbd> | `find-file` |
 | <kbd>C-x C-s</kbd> | `save-buffer` |
+| <kbd>C-x C-w</kbd> | `write-file` (save as a new file and visit it) |
+| <kbd>C-x i</kbd> | `insert-file` |
+| <kbd>C-x C-q</kbd> | `read-only-mode` (toggle) |
 | <kbd>C-x b</kbd> | `switch-buffer` |
 | <kbd>C-x C-b</kbd> | `ibuffer` (the buffer manager) |
 | <kbd>C-x k</kbd> | `kill-buffer` |
 | <kbd>C-x 2</kbd> / <kbd>C-x 3</kbd> | `split-window-below` / `split-window-right` |
 | <kbd>C-x o</kbd> | `other-window` |
 | <kbd>C-x 0</kbd> / <kbd>C-x 1</kbd> | `delete-window` / `delete-other-windows` |
+| <kbd>C-x 4 f</kbd> | `find-file-other-window` |
+| <kbd>C-x 4 b</kbd> | `switch-to-buffer-other-window` |
+| <kbd>C-x 4 0</kbd> | `kill-buffer-and-window` |
+| <kbd>C-x 4 C-o</kbd> | `display-buffer` (show a buffer in another window, stay here) |
 | <kbd>C-x ^</kbd> / <kbd>C-x }</kbd> / <kbd>C-x {</kbd> | resize windows |
 | <kbd>C-x C-c</kbd> | `quit` |
+
+`M-x rename-buffer` renames the current buffer, and `M-x find-file-at-point` (alias `ffap`) opens the file or URL at point — see [Files and buffers](/docs/editing-commands#files-and-buffers).
 
 ## Search, command, eval
 

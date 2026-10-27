@@ -77,6 +77,37 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         "open-file-other-window",
         EditorCommand::OpenFileOtherWindow,
     );
+    // Backing primitives for the Emacs file/buffer commands in files.scm,
+    // which wrap them with their prompts: `(write-file-impl path)` saves the
+    // buffer as `path` and visits it; `(rename-buffer-impl name)`;
+    // `(insert-file-impl path)` inserts a file at point; and the `C-x 4`
+    // family shows a file or buffer in another window.
+    register_unary(reg, queue, "write-file-impl", EditorCommand::WriteFile);
+    register_unary(
+        reg,
+        queue,
+        "rename-buffer-impl",
+        EditorCommand::RenameBuffer,
+    );
+    register_unary(reg, queue, "insert-file-impl", EditorCommand::InsertFile);
+    register_unary(
+        reg,
+        queue,
+        "find-file-other-window-impl",
+        EditorCommand::FindFileOtherWindow,
+    );
+    register_unary(
+        reg,
+        queue,
+        "switch-to-buffer-other-window-impl",
+        EditorCommand::SwitchToBufferOtherWindow,
+    );
+    register_unary(
+        reg,
+        queue,
+        "display-buffer-impl",
+        EditorCommand::DisplayBuffer,
+    );
     register_unary(reg, queue, "select-window", EditorCommand::SelectWindow);
     // Any real number (an integer like `1` included); clamped when applied.
     register_unary(

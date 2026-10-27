@@ -266,7 +266,7 @@ mod engine_tests {
         let dir = std::env::temp_dir().join(format!("macros-del-{}", std::process::id()));
         let f = dir.join("x.txt");
         let p = f.display();
-        assert!(val(&format!(r#"(write-file "{p}" "hi")"#)).contains("#t"));
+        assert!(val(&format!(r#"(write-file-text "{p}" "hi")"#)).contains("#t"));
         assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
         assert!(val(&format!(r#"(file-exists? "{p}")"#)).contains("#f"));
         // Already-absent is #t (idempotent retract); a directory is #f.

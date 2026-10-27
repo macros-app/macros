@@ -151,7 +151,10 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             }
         },
     );
-    reg.register_fn("write-file", |path: String, text: String| -> bool {
+    // `(write-file-text path text)` → #t if `text` was written to `path`
+    // (`write-file` with two arguments calls this; with one or none it is
+    // Emacs's save-the-buffer-as command — see files.scm).
+    reg.register_fn("write-file-text", |path: String, text: String| -> bool {
         let path = crate::util::expand_tilde(&path);
         // Create parent directories first (Emacs's `make-directory ... t` before
         // writing). Without this, the very first write to a fresh config dir like

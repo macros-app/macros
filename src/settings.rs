@@ -214,6 +214,9 @@ const OPTIONS: &[OptionSpec] = &[
     flag("cursor-visible", true),
     flag("word-wrap", true),
     flag("auto-revert", false),
+    flag("make-backup-files", true),
+    text("backup-directory", ""),
+    flag("create-lockfiles", false),
     flag("electric-indent", true),
     flag("show-paren", true),
     flag("mcp-server", false),
@@ -741,6 +744,31 @@ impl Settings {
     /// always-on dired-sidebar/dired directory refresh, which watches dirs, not buffers.
     pub fn auto_revert(&self) -> bool {
         self.bool_of(const { spec("auto-revert") })
+    }
+
+    /// Emacs `make-backup-files`: the first save of a file in a session copies
+    /// the file as it was into [`Self::backup_directory`]. On by default.
+    pub fn make_backup_files(&self) -> bool {
+        self.bool_of(const { spec("make-backup-files") })
+    }
+
+    /// Where backups go (Emacs `backup-directory-alist` with one entry): the
+    /// `backup-directory` option, `~` expanded, or `backups/` in the
+    /// persistence directory when it's empty.
+    pub fn backup_directory(&self) -> std::path::PathBuf {
+        let dir = self.str_of(const { spec("backup-directory") });
+        if dir.trim().is_empty() {
+            crate::runtime::persistence_directory().join("backups")
+        } else {
+            std::path::PathBuf::from(crate::util::expand_tilde(dir.trim()))
+        }
+    }
+
+    /// Emacs `create-lockfiles`: hold a `.#name` lock while a buffer has
+    /// unsaved changes to `name`, and warn when another process holds one.
+    /// Off by default.
+    pub fn create_lockfiles(&self) -> bool {
+        self.bool_of(const { spec("create-lockfiles") })
     }
 
     /// The MCP server (src/mcp.rs) for debugging and package development: lets

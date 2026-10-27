@@ -15,6 +15,7 @@ mod color_compat;
 mod dap;
 mod editor;
 mod element;
+mod filelock;
 mod formula;
 mod grammar;
 mod grid;

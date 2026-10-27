@@ -145,6 +145,29 @@ Jump anywhere on screen in a couple of keystrokes (Emacs `avy` / `ace-jump`).
 
 In evil normal state this is <kbd>g s</kbd>. <kbd>C-g</kbd> cancels the jump.
 
+## Files and buffers
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-x C-w</kbd> | `write-file` | Save the buffer under a new path (with file-name completion, like <kbd>C-x C-f</kbd>). The buffer then visits that file and takes its name. Asks before overwriting an existing file. Give a directory to keep the file name. |
+| <kbd>C-x i</kbd> | `insert-file` | Insert a file's contents at point. Point stays before the inserted text. |
+| <kbd>C-x C-q</kbd> | `read-only-mode` | Toggle whether the buffer can be changed. The mode line shows `%%` while it's read-only (`%*` if it has unsaved changes). Files you can't write open read-only. |
+| — | `rename-buffer` | Give the current buffer a new name. |
+| — | `find-file-at-point` (`ffap`) | Open the file or URL at point. A relative path is relative to the buffer's directory. `path:LINE` (or `path:LINE:COL`, as compilers print it) lands on that line, and a URL opens in your browser. With nothing recognizable at point it prompts like <kbd>C-x C-f</kbd>. |
+
+The <kbd>C-x 4</kbd> prefix does the same things in another window, splitting the frame if there's only one window:
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-x 4 f</kbd> | `find-file-other-window` | Visit a file in the other window and select it |
+| <kbd>C-x 4 b</kbd> | `switch-to-buffer-other-window` | Show a buffer in the other window and select it |
+| <kbd>C-x 4 C-o</kbd> | `display-buffer` | Show a buffer in the other window, but stay where you are |
+| <kbd>C-x 4 0</kbd> | `kill-buffer-and-window` | Kill the current buffer and close its window |
+
+Saving keeps a backup of each file's original contents, and can hold Emacs-style lock files. See [Backups and lock files](/docs/configuration#backups-and-lock-files).
+
+In Scheme, each of these commands takes its argument directly instead of prompting: `(rename-buffer "notes")`, `(insert-file "~/header.txt")`, `(find-file-other-window path)`, `(display-buffer "*Messages*")`. `(write-file path)` saves the buffer as `path`, and `(write-file path text)` still writes `text` to a file as before. That two-argument form is also available as `write-file-text`.
+
 ## The buffer list
 
 <kbd>C-x C-b</kbd> (`ibuffer`) opens a buffer manager (Emacs `ibuffer`) listing every open buffer. <kbd>Enter</kbd> switches to the buffer on the line, <kbd>d</kbd> or <kbd>x</kbd> kills it, <kbd>g</kbd> refreshes. (To pick a buffer through Helm instead, use <kbd>C-x b</kbd>.)

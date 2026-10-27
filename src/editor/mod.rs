@@ -43,6 +43,9 @@ mod editing_extras;
 mod editing_tests;
 mod evil;
 mod ex;
+mod files;
+#[cfg(test)]
+mod files_tests;
 mod grammars;
 mod grid;
 mod grid_cursors;
@@ -156,6 +159,11 @@ enum PendingAction {
     OpenLargeGrid(String),
     /// Save this buffer although its file changed on disk since it was read.
     SaveOverChanged(String),
+    /// `write-file` buffer `buffer` over the existing file `path`.
+    WriteFile {
+        buffer: String,
+        path: String,
+    },
 }
 
 /// Which way a search or a selection cycle moves.
@@ -264,6 +272,9 @@ struct Document {
     highlighter: Option<Highlighter>,
     /// Unsaved changes since the last load/save.
     modified: bool,
+    /// `read-only-mode`: the text can't be changed (set on visiting a file we
+    /// can't write).
+    read_only: bool,
     /// Whether this buffer's mode hooks have run (Emacs: once per buffer).
     hooks_ran: bool,
     /// When `Some(mode)`, this is a read-only program-generated buffer (the
@@ -1682,6 +1693,7 @@ impl Editor {
         .detach();
         editor.parse_full();
         editor.sync_buffers();
+        editor.sync_file_options(cx);
         // Start the cursor-blink loop now, so the cursor blinks from the first
         // frame (not only after the first keystroke). No-op when blinking is off.
         editor.schedule_blink(cx);
@@ -2219,6 +2231,11 @@ impl Editor {
         // prefixes) refuse any edit touching them; point stays put.
         if self.edit_hits_read_only(range.start, range.end) {
             self.status = "Text is read-only".into();
+            return self.point();
+        }
+        // `read-only-mode` refuses every change.
+        if self.active.read_only {
+            self.status = format!("Buffer is read-only: {}", self.active.name).into();
             return self.point();
         }
         // A ghost suggestion never survives a buffer change — the text it was
@@ -4955,6 +4972,7 @@ fn blank_document(
         modes,
         highlighter: None,
         modified: false,
+        read_only: false,
         hooks_ran: false,
         special: None,
         line_faces: HashMap::new(),
