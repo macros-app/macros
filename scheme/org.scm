@@ -1,4 +1,4 @@
-;; requires: core folding bookmarks
+;; requires: core folding bookmarks narrow
 
 ;; org.scm — Org mode, implemented entirely in Scheme on the editor primitives.
 ;;
@@ -188,7 +188,10 @@
 ;; split — single lookups only).
 (define (org--line-start i) (lines-byte-offset (org--lines) i))
 
-(define (org--replace-all text) (replace-region 0 (point-max) text))
+;; Replace the whole buffer — `buffer-size`, not `point-max`, so a narrowed
+;; buffer is rewritten whole too (the editor keeps the narrowing around the
+;; part that really changed).
+(define (org--replace-all text) (replace-region 0 (buffer-size) text))
 
 ;; Byte length of the longest common prefix of strings `a` and `b` (compared by
 ;; character, so the count never splits a multibyte character).
@@ -869,6 +872,21 @@
          (stars (string-repeat "*" lvl)))
     (insert-at pos (string-append "\n" stars " "))
     (goto-char (+ pos 1 (string-length stars) 1))))
+
+;; C-x n s — narrow the buffer to the subtree at point, from its headline
+;; to the next headline of the same or a higher level (Emacs
+;; `org-narrow-to-subtree`). C-x n w widens again.
+(define-command (org-narrow-to-subtree)
+  (let ((H (org--heading-line-at-point)))
+    (if (not H)
+        (message "Before first headline")
+        (let* ((lines (org--lines)) (headings (org--headings)) (total (length lines))
+               (lvl (nth (org--find-heading headings H) 1))
+               (end (org--subtree-end H lvl headings total)))
+          (narrow-to-region (lines-byte-offset lines H)
+                            (if (< (+ end 1) total)
+                                (lines-byte-offset lines (+ end 1))
+                                (buffer-size)))))))
 
 ;; M-down — move the subtree at point below its next sibling.
 (define-command (org-move-subtree-down)
@@ -3355,6 +3373,7 @@
 (define-key "org-mode" "ctrl-c l" 'org-store-link)
 ;; Clocking / properties / archive / columns / footnote / inline images / latex
 ;; live under the C-c C-x prefix.
+(define-key "org-mode" "ctrl-x n s" 'org-narrow-to-subtree)
 (define-key "org-mode" "ctrl-c ctrl-x ctrl-i" 'org-clock-in)
 (define-key "org-mode" "ctrl-c ctrl-x ctrl-o" 'org-clock-out)
 (define-key "org-mode" "ctrl-c ctrl-x ctrl-x" 'org-clock-cancel)

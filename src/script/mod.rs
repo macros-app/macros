@@ -40,4 +40,6 @@ pub use state::*;
 #[cfg(test)]
 mod commands_tests;
 #[cfg(test)]
+mod shell_grep_tests;
+#[cfg(test)]
 mod tests;

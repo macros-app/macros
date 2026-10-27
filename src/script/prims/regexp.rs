@@ -115,14 +115,16 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // point, or `()` if none. Scheme drives point/edits from the result.
         let shared = snapshot.clone();
         reg.register_fn("re-search-forward", move |pattern: String| -> Vec<usize> {
-            let (rope, p) = {
+            let (rope, p, narrow) = {
                 let snap = shared.load();
-                (snap.text.clone(), snap.point)
+                (snap.text.clone(), snap.point, snap.narrow)
             };
             let from = snap_byte(&rope, p);
+            // A match must end by `point-max` (the narrowing's end).
+            let limit = narrow.map_or(usize::MAX, |(_, e)| e);
             match re_search_forward_rope(&rope, from, &pattern) {
-                Some((start, end)) => vec![start, end],
-                None => Vec::new(),
+                Some((start, end)) if end <= limit => vec![start, end],
+                _ => Vec::new(),
             }
         });
     }

@@ -197,6 +197,16 @@ pub enum EditorCommand {
     SetMark,
     ExchangePointAndMark,
     MarkWholeBuffer,
+    // Narrowing (Emacs `C-x n`)
+    /// `narrow-to-region`: restrict the buffer to bytes `[start, end)`.
+    NarrowToRegion {
+        start: usize,
+        end: usize,
+    },
+    /// `narrow-to-defun` (`C-x n d`): narrow to the tree-sitter defun at point.
+    NarrowToDefun,
+    /// `widen` (`C-x n w`): make the whole buffer accessible again.
+    Widen,
     ExtendBackwardChar,
     ExtendForwardChar,
     // Insertion
