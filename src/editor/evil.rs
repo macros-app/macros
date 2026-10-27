@@ -660,7 +660,13 @@ impl Editor {
         };
         let text = self.active.buffer.full_text();
         let point = self.point();
-        let starts: Vec<usize> = regex.find_iter(&text).map(|m| m.start()).collect();
+        // Narrowed: only matches wholly inside the accessible range count.
+        let acc = self.accessible();
+        let starts: Vec<usize> = regex
+            .find_iter(&text)
+            .filter(|m| acc.start <= m.start() && m.end() <= acc.end)
+            .map(|m| m.start())
+            .collect();
         if starts.is_empty() {
             self.echo(format!("No match for /{query}/"), cx);
             return;

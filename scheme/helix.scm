@@ -352,7 +352,7 @@
 
 ;; --- whole-buffer / case / anchor operations ---------------------------------
 ;; `%` — one selection spanning the whole buffer (Helix select-all).
-(define (helix-select-all) (helix-set! (list (cons 0 (point-max)))))
+(define (helix-select-all) (helix-set! (list (cons (point-min) (point-max)))))
 
 ;; `~` / `` ` `` / `M-` ` — case-fold every selection in place (a bare cursor
 ;; folds the single grapheme under it). Edits run high→low; the selections are

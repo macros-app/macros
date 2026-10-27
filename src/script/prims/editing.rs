@@ -42,6 +42,14 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             end: scheme_pos(end),
         },
     );
+    // `(buffer-narrow start end)`: restrict the buffer to `[start, end)` — the
+    // primitive behind `narrow-to-region` (scheme/narrow.scm). `widen` undoes it.
+    register_binary(reg, queue, "buffer-narrow", |start: isize, end: isize| {
+        EditorCommand::NarrowToRegion {
+            start: scheme_pos(start),
+            end: scheme_pos(end),
+        }
+    });
     register_binary(reg, queue, "set-region", |start: isize, end: isize| {
         EditorCommand::SetRegion {
             start: scheme_pos(start),

@@ -575,7 +575,7 @@
              (t2 (replace-regexp-in-string "(?im)^#\\+title:[ \t]*.*$"
                                            (replacement-literal (string-append "#+title: " nt))
                                            text)))
-        (replace-region 0 (point-max) (org-roam--rewrite-links t2 id nt)))
+        (replace-region 0 (buffer-size) (org-roam--rewrite-links t2 id nt)))
       ;; every other file: rewrite inbound link descriptions
       (let ((cur (let ((f (buffer-file-name)))
                    (if (equal? f "") (path-join (buffer-directory) (current-buffer)) f))))

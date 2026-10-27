@@ -20,7 +20,7 @@
       (string-append (sort-lines-text (substring text 0 (- (string-length text) 1))) "\n")
       (join-lines (sort-strings (split-many text "\n")))))
 (define (sort-lines)
-  (let* ((r (region-or 0 (point-max))) (s (car r)) (e (cadr r)))
+  (let* ((r (region-or (point-min) (point-max))) (s (car r)) (e (cadr r)))
     (replace-region s e (sort-lines-text (buffer-substring s e)))
     (message "Sorted lines")))
 

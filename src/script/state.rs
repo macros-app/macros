@@ -62,6 +62,9 @@ pub struct EditorSnapshot {
     /// `(guard-buffer-unchanged …)` so a decoration batch computed from this
     /// snapshot can be dropped if the buffer was edited before it applied.
     pub tick: u64,
+    /// The accessible byte range while the buffer is narrowed (`C-x n n`),
+    /// for `point-min` / `point-max` and the searches; `None` when widened.
+    pub narrow: Option<(usize, usize)>,
     /// The active region's byte range, if the mark is active.
     pub region: Option<(usize, usize)>,
     /// Every selection as an `(anchor, head)` pair — primary first, then any

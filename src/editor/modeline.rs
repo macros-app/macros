@@ -19,7 +19,8 @@ pub enum MlField {
     Modified,
     /// The active buffer's name.
     BufferName,
-    /// The active mode names, space-joined.
+    /// The active mode names, space-joined, then `Narrow` while the buffer
+    /// is narrowed (as Emacs shows it).
     Modes,
     /// The evil (modal) state name — "Normal"/"Insert"/…, "" when evil is off.
     EvilMode,
@@ -139,7 +140,13 @@ impl Editor {
                     MlField::Literal(s) => s.clone(),
                     MlField::Modified => if self.is_modified() { "**" } else { "--" }.to_string(),
                     MlField::BufferName => self.buffer_name().to_string(),
-                    MlField::Modes => self.active.modes.names().join(" "),
+                    MlField::Modes => {
+                        let mut modes = self.active.modes.names();
+                        if self.is_narrowed() {
+                            modes.push("Narrow");
+                        }
+                        modes.join(" ")
+                    }
                     MlField::EvilMode => self.evil_mode_name().unwrap_or("").to_string(),
                     MlField::Lsp => self.active_lsp_servers().join(" "),
                     MlField::Diagnostics => self.diagnostic_summary().unwrap_or_default(),

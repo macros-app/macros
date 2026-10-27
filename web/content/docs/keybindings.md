@@ -44,6 +44,9 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-t</kbd> | `transpose-chars` |
 | <kbd>C-o</kbd> | `open-line` |
 | <kbd>M-;</kbd> | `comment-dwim` |
+| <kbd>C-x n n</kbd> / <kbd>C-x n d</kbd> | `narrow-to-region` / `narrow-to-defun` |
+| <kbd>C-x n s</kbd> | `org-narrow-to-subtree` (Org) |
+| <kbd>C-x n w</kbd> | `widen` |
 
 The system clipboard always works, including inside modal states: <kbd>cmd-c</kbd> / <kbd>cmd-x</kbd> / <kbd>cmd-v</kbd> (`clipboard-copy` / `-cut` / `-paste`).
 
