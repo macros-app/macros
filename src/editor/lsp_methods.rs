@@ -51,6 +51,9 @@ impl Editor {
     /// Start a language server for the active buffer (if one is configured for
     /// its file type and isn't already running), and `didOpen` the buffer.
     pub(super) fn maybe_start_lsp(&mut self, cx: &mut Context<Self>) {
+        if self.active_is_remote() {
+            return; // a local server can't see a file on another host
+        }
         let Some(language) = self.active_language() else {
             return;
         };
@@ -153,6 +156,9 @@ impl Editor {
 
     /// `didOpen` the active buffer into its language's server, if ready & unseen.
     pub(super) fn lsp_open_active(&mut self, language: &str) {
+        if self.active_is_remote() {
+            return;
+        }
         let Some(uri) = self.active_uri() else {
             return;
         };
