@@ -78,6 +78,8 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("up-list", Structural(StructuralOp::UpList)),
         ("backward-up-list", Structural(StructuralOp::BackwardUpList)),
         ("down-list", Structural(StructuralOp::DownList)),
+        ("forward-list", Structural(StructuralOp::ForwardList)),
+        ("backward-list", Structural(StructuralOp::BackwardList)),
         ("kill-sexp", Structural(StructuralOp::KillSexp)),
         (
             "paredit-forward-slurp-sexp",

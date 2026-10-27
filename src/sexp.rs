@@ -379,6 +379,210 @@ pub struct StructEdit {
     pub point: usize,
 }
 
+// --- Language-neutral reading ---------------------------------------------
+
+/// Lisp languages and major modes, where the Lisp reader above applies. Every
+/// other buffer reads with [`parse_generic`].
+const LISP_LANGUAGES: &[&str] = &[
+    "scheme",
+    "racket",
+    "clojure",
+    "commonlisp",
+    "lisp",
+    "elisp",
+    "emacs-lisp",
+    "fennel",
+    "janet",
+];
+const LISP_MODES: &[&str] = &[
+    "steel",
+    "macros-steel",
+    "racket",
+    "clojure",
+    "lisp",
+    "commonlisp",
+    "elisp",
+    "fennel",
+    "janet",
+];
+
+/// Whether a buffer with this highlighting language and major mode reads as
+/// Lisp (`;` comments, `'` quote prefixes) rather than generic code.
+pub fn is_lisp(language: &str, major_mode: &str) -> bool {
+    LISP_LANGUAGES.contains(&language) || LISP_MODES.contains(&major_mode)
+}
+
+/// A span [`parse_generic`] reads as one unit: a string literal (one datum) or
+/// a comment (skipped). Taken from the buffer's syntax tree when it has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Literal {
+    pub start: usize,
+    pub end: usize,
+    pub comment: bool,
+}
+
+/// Read a buffer the way its language wants: the Lisp reader for Lisp, else
+/// [`parse_generic`] with the string and comment spans of `tree` (if any).
+pub fn parse_buffer(
+    text: &str,
+    language: &str,
+    major_mode: &str,
+    tree: Option<&tree_sitter::Tree>,
+) -> Parsed {
+    if is_lisp(language, major_mode) {
+        return parse(text);
+    }
+    let literals = tree.map(crate::highlight::tree_literal_spans);
+    parse_generic(text, literals.as_deref())
+}
+
+/// Identifier bytes for the generic reader. Every non-ASCII byte counts, so a
+/// run never splits a UTF-8 character.
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
+}
+
+/// A C-style char literal at `i` (`'a'`, `'\n'`, `'\u{1F600}'`): its end, or
+/// `None` when the quote is something else (a Rust lifetime, an apostrophe).
+fn char_literal_end(text: &str, i: usize) -> Option<usize> {
+    let rest = text.get(i + 1..)?;
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    if first == '\\' {
+        // An escape: up to the closing quote, on this line and nearby.
+        let close = rest
+            .char_indices()
+            .skip(2)
+            .take(12)
+            .find(|&(_, c)| c == '\'' || c == '\n')?;
+        (close.1 == '\'').then_some(i + 1 + close.0 + 1)
+    } else {
+        let (j, c) = chars.next()?;
+        (c == '\'' && first != '\'' && first != '\n').then_some(i + 1 + j + 1)
+    }
+}
+
+/// End of the double-quoted string starting at `i` (escapes honored), and
+/// whether it closed before the input ended.
+fn string_end(b: &[u8], i: usize) -> (usize, bool) {
+    let mut i = i + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return (i + 1, true),
+            _ => i += 1,
+        }
+    }
+    (b.len(), false)
+}
+
+/// Read non-Lisp text into bracket-balanced data, the Emacs `forward-sexp`
+/// units of any language: `(…)`, `[…]` and `{…}` groups, identifiers and
+/// numbers, and string literals. Operators and other punctuation are not data
+/// of their own (motion skips them, as Emacs does). With `literals` (the
+/// syntax tree's strings and comments) those spans are exact; without, `"…"`
+/// strings, `'c'` char literals and `//` / `/* */` comments are recognised.
+pub fn parse_generic(text: &str, literals: Option<&[Literal]>) -> Parsed {
+    let b = text.as_bytes();
+    let len = b.len();
+    let heuristic = literals.is_none();
+    let mut spans = literals.unwrap_or(&[]).iter().peekable();
+    let mut out = Parsed::default();
+    let mut stack = vec![Frame::new(0, 0)];
+    let mut i = 0;
+    while i < len {
+        // Drop spans already behind us (or that a stale tree misplaced).
+        while spans.peek().is_some_and(|s| s.start < i) {
+            spans.next();
+        }
+        if let Some(&&lit) = spans.peek().filter(|s| s.start == i) {
+            spans.next();
+            let end = lit.end.clamp(i + 1, len);
+            if !lit.comment {
+                stack.last_mut().unwrap().push(Node {
+                    start: i,
+                    end,
+                    kind: Kind::Str { closed: true },
+                    children: Vec::new(),
+                });
+            }
+            i = end;
+            continue;
+        }
+        let c = b[i];
+        match c {
+            _ if c.is_ascii_whitespace() => i += 1,
+            b'/' if heuristic && b.get(i + 1) == Some(&b'/') => {
+                while i < len && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if heuristic && b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < len && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(len);
+            }
+            b'"' if heuristic => {
+                let (end, closed) = string_end(b, i);
+                out.ends_in_literal = !closed;
+                stack.last_mut().unwrap().push(Node {
+                    start: i,
+                    end,
+                    kind: Kind::Str { closed },
+                    children: Vec::new(),
+                });
+                i = end;
+            }
+            b'\'' if heuristic && char_literal_end(text, i).is_some() => {
+                let end = char_literal_end(text, i).unwrap_or(i + 1);
+                stack.last_mut().unwrap().push(Node {
+                    start: i,
+                    end,
+                    kind: Kind::Str { closed: true },
+                    children: Vec::new(),
+                });
+                i = end;
+            }
+            b'(' | b'[' | b'{' => {
+                stack.push(Frame::new(i, i));
+                i += 1;
+            }
+            b')' | b']' | b'}' => {
+                let matches =
+                    stack.len() > 1 && closer_for(b[stack.last().unwrap().open]) == Some(c);
+                if matches {
+                    let f = stack.pop().unwrap();
+                    stack.last_mut().unwrap().push(close_frame(f, Some(i), len));
+                } else {
+                    out.stray_closers += 1;
+                }
+                i += 1;
+            }
+            _ if is_word_byte(c) => {
+                let start = i;
+                while i < len && is_word_byte(b[i]) {
+                    i += 1;
+                }
+                stack.last_mut().unwrap().push(Node {
+                    start,
+                    end: i,
+                    kind: Kind::Atom,
+                    children: Vec::new(),
+                });
+            }
+            _ => i += 1,
+        }
+    }
+    while stack.len() > 1 {
+        let f = stack.pop().unwrap();
+        stack.last_mut().unwrap().push(close_frame(f, None, len));
+    }
+    out.nodes = stack.pop().unwrap().children;
+    out
+}
+
 /// The innermost list whose brackets strictly enclose `pos`, and the data `pos`
 /// moves among: that list's children, or the top level.
 fn container(parsed: &Parsed, pos: usize) -> (Option<&Node>, &[Node]) {
@@ -407,15 +611,25 @@ fn sexp_at_or_after(kids: &[Node], pos: usize) -> Option<&Node> {
 
 /// Emacs `forward-sexp`: the end of the datum at or after `pos`. `None` at the
 /// end of the enclosing list.
+#[cfg(test)]
 pub fn forward_sexp(text: &str, pos: usize) -> Option<usize> {
-    let parsed = parse(text);
-    sexp_at_or_after(container(&parsed, pos).1, pos).map(|k| k.end)
+    forward_sexp_in(&parse(text), pos)
+}
+
+/// [`forward_sexp`] over an already-read text.
+pub fn forward_sexp_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    sexp_at_or_after(container(parsed, pos).1, pos).map(|k| k.end)
 }
 
 /// Emacs `backward-sexp`: the start of the datum before (or around) `pos`.
+#[cfg(test)]
 pub fn backward_sexp(text: &str, pos: usize) -> Option<usize> {
-    let parsed = parse(text);
-    container(&parsed, pos)
+    backward_sexp_in(&parse(text), pos)
+}
+
+/// [`backward_sexp`] over an already-read text.
+pub fn backward_sexp_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    container(parsed, pos)
         .1
         .iter()
         .rev()
@@ -424,24 +638,39 @@ pub fn backward_sexp(text: &str, pos: usize) -> Option<usize> {
 }
 
 /// Emacs `backward-up-list`: the start of the enclosing list.
+#[cfg(test)]
 pub fn backward_up_list(text: &str, pos: usize) -> Option<usize> {
-    let parsed = parse(text);
-    container(&parsed, pos).0.map(|l| l.start)
+    backward_up_list_in(&parse(text), pos)
+}
+
+/// [`backward_up_list`] over an already-read text.
+pub fn backward_up_list_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    container(parsed, pos).0.map(|l| l.start)
 }
 
 /// Emacs `up-list`: just past the enclosing list's closing bracket.
+#[cfg(test)]
 pub fn up_list(text: &str, pos: usize) -> Option<usize> {
-    let parsed = parse(text);
-    container(&parsed, pos)
+    up_list_in(&parse(text), pos)
+}
+
+/// [`up_list`] over an already-read text.
+pub fn up_list_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    container(parsed, pos)
         .0
         .filter(|l| l.is_complete())
         .map(|l| l.end)
 }
 
 /// Emacs `down-list`: just inside the next list at or after `pos`.
+#[cfg(test)]
 pub fn down_list(text: &str, pos: usize) -> Option<usize> {
-    let parsed = parse(text);
-    container(&parsed, pos)
+    down_list_in(&parse(text), pos)
+}
+
+/// [`down_list`] over an already-read text.
+pub fn down_list_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    container(parsed, pos)
         .1
         .iter()
         .filter(|k| k.end > pos)
@@ -449,6 +678,30 @@ pub fn down_list(text: &str, pos: usize) -> Option<usize> {
             Kind::List { open, .. } if open >= pos || k.start >= pos => Some(open + 1),
             _ => None,
         })
+}
+
+/// Emacs `forward-list`: past the next list at this level, skipping atoms.
+pub fn forward_list_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    container(parsed, pos)
+        .1
+        .iter()
+        .find(|k| k.start >= pos && matches!(k.kind, Kind::List { .. }))
+        .map(|k| k.end)
+}
+
+/// Emacs `backward-list`: to the start of the previous list at this level.
+pub fn backward_list_in(parsed: &Parsed, pos: usize) -> Option<usize> {
+    container(parsed, pos)
+        .1
+        .iter()
+        .rev()
+        .find(|k| k.end <= pos && matches!(k.kind, Kind::List { .. }))
+        .map(|k| k.start)
+}
+
+/// The `(start, end)` of every top-level datum — Lisp's defuns.
+pub fn top_level_ranges(parsed: &Parsed) -> Vec<(usize, usize)> {
+    parsed.nodes.iter().map(|n| (n.start, n.end)).collect()
 }
 
 /// The enclosing list of `pos` when it is properly closed: (list, open, close).
@@ -730,6 +983,57 @@ mod tests {
         let to = op(&text, pos)?;
         text.insert(to, '|');
         Some(text)
+    }
+
+    fn generic(op: fn(&Parsed, usize) -> Option<usize>) -> impl Fn(&str, usize) -> Option<usize> {
+        move |text, pos| op(&parse_generic(text, None), pos)
+    }
+
+    #[test]
+    fn generic_reader_motions() {
+        let fwd = generic(forward_sexp_in);
+        // Punctuation is skipped; `;` and `'` aren't Lisp syntax here.
+        assert_eq!(
+            motion("|x = f(a); y", &fwd).as_deref(),
+            Some("x| = f(a); y")
+        );
+        assert_eq!(
+            motion("x |= f(a); y", &fwd).as_deref(),
+            Some("x = f|(a); y")
+        );
+        assert_eq!(motion("f|(a); y", &fwd).as_deref(), Some("f(a)|; y"));
+        assert_eq!(motion("f(a)|; y", &fwd).as_deref(), Some("f(a); y|"));
+        // Strings, char literals and comments hide their brackets.
+        assert_eq!(
+            motion("|(\")\" ')' /* ) */ // )\n)", &fwd).as_deref(),
+            Some("(\")\" ')' /* ) */ // )\n)|")
+        );
+        // A lifetime is not a char literal.
+        assert_eq!(motion("|<'a>(x)", &fwd).as_deref(), Some("<'a|>(x)"));
+        assert_eq!(
+            motion("{ a |b }", generic(up_list_in)).as_deref(),
+            Some("{ a b }|")
+        );
+        assert_eq!(
+            motion("|x [a] y (b)", generic(forward_list_in)).as_deref(),
+            Some("x [a]| y (b)")
+        );
+        assert_eq!(
+            motion("x [a] y (b)|", generic(backward_list_in)).as_deref(),
+            Some("x [a] y |(b)")
+        );
+        // Literal spans from a syntax tree win over the heuristics.
+        let text = "f(# ) \n)";
+        let lits = [Literal {
+            start: 2,
+            end: 5,
+            comment: true,
+        }];
+        assert_eq!(
+            forward_sexp_in(&parse_generic(text, Some(&lits)), 1),
+            Some(8)
+        );
+        assert!(is_lisp("scheme", "") && is_lisp("", "steel") && !is_lisp("rust", "rust"));
     }
 
     #[test]

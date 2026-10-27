@@ -26,23 +26,15 @@
 (register-command 'steel-mode)
 
 ;; --- structural editing ------------------------------------------------------
-;; Sexp motion (Emacs) and the core paredit edits, on reader-aware boundaries:
-;; parens inside strings, comments and `#\(` char literals never count.
-;;   C-M-f / C-M-b  forward / backward over a sexp
-;;   C-M-u / C-M-n  out of the enclosing list, backward / forward
-;;   C-M-d          down into the next list
-;;   C-M-k          kill the sexp after point
+;; The core paredit edits, on reader-aware boundaries: parens inside strings,
+;; comments and `#\(` char literals never count. Sexp motion (C-M-f/b/u/d/n/p,
+;; C-M-k, C-M-a/e …) is global — see editing-extras.scm — and reads these
+;; buffers as Lisp.
 ;;   C-)  / C-}     slurp the next sexp in / barf the last one out
 ;;   M-(            wrap the sexp at point in parens
 ;;   M-r            raise the sexp at point over its enclosing list
 ;;   M-s s          splice: remove the enclosing list's parens
 (define (lisp-structural-keys mode)
-  (define-key mode "ctrl-alt-f" 'forward-sexp)
-  (define-key mode "ctrl-alt-b" 'backward-sexp)
-  (define-key mode "ctrl-alt-u" 'backward-up-list)
-  (define-key mode "ctrl-alt-n" 'up-list)
-  (define-key mode "ctrl-alt-d" 'down-list)
-  (define-key mode "ctrl-alt-k" 'kill-sexp)
   (define-key mode "ctrl-)" 'paredit-forward-slurp-sexp)
   (define-key mode "ctrl-}" 'paredit-forward-barf-sexp)
   (define-key mode "alt-(" 'paredit-wrap-round)
