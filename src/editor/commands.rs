@@ -894,6 +894,8 @@ impl Editor {
             TopLeftWindow => self.window_corner(false, cx),
             BottomRightWindow => self.window_corner(true, cx),
             BalanceWindows => self.balance_windows(cx),
+            WinnerUndo => self.winner_undo(cx),
+            WinnerRedo => self.winner_redo(cx),
             MaximizeWindowHeight => self.maximize_window(SplitAxis::Vertical, cx),
             MaximizeWindowWidth => self.maximize_window(SplitAxis::Horizontal, cx),
             MoveWindowFarLeft => self.move_window_far(panes::Dir::Left, cx),

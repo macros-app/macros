@@ -41,3 +41,5 @@ pub use state::*;
 mod commands_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wdired_tests;

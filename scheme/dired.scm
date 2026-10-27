@@ -9,6 +9,7 @@
 (define *dired-marks* '())    ; fullpaths marked for deletion
 (define *dired-n* 0)
 (define *dired-quiet* #f)     ; #t during an FS auto-refresh: render in place
+(define *dired-frozen* #f)    ; #t while wdired edits the listing: no auto-refresh
 
 (define (dired-emit text path)
   (set! *dired-lines* (cons text *dired-lines*))
@@ -141,6 +142,7 @@
 ;; changes on disk, and only while the dired buffer is still alive.
 (define (dired-on-fs-change dir)
   (when (and (buffer-live? "*dired*")
+             (not *dired-frozen*)
              (equal? (strip-trailing-slash dir) (strip-trailing-slash *dired-dir*)))
     (set! *dired-quiet* #t)
     (dired-render)
@@ -202,6 +204,16 @@
 (define (dired-mkdir) (read-string "Create directory: " 'dired-mkdir-finish))
 (define (dired-mkdir-finish name)
   (dired-make-directory *dired-dir* name (lambda (dest) (dired-render))))
+
+;; --- for wdired.scm -----------------------------------------------------------
+;; Accessors: a cross-file read or set! of the globals above would hit another
+;; binding than the one these functions use.
+(define (dired-current-dir) *dired-dir*)
+(define (dired-current-entries) *dired-entries*)
+(define (dired-freeze! on) (set! *dired-frozen* on))
+;; A mark on P (or on anything under it) follows it to DEST.
+(define (dired-retarget-marks! p dest)
+  (set! *dired-marks* (map (lambda (m) (dired-retarget m p dest)) *dired-marks*)))
 
 ;; --- keymap -----------------------------------------------------------------
 ;; The standard list keys (RET/n/p + no line numbers), then dired's own set.

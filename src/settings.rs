@@ -207,6 +207,7 @@ const OPTIONS: &[OptionSpec] = &[
     float("magit-gutter-width", 2.0, Some(1.0), Some(8.0)),
     flag("magit-gutter-deleted", true),
     flag("lsp-log-on-start", false),
+    flag("winner-mode", true),
     flag("auto-update", true),
     flag("helm-fuzzy", true),
     flag("line-numbers", true),
@@ -624,6 +625,12 @@ impl Settings {
     /// `(set-option "cursor-blink" #f)` for a steady cursor (no idle redraw).
     pub fn cursor_blink(&self) -> bool {
         self.bool_of(const { spec("cursor-blink") })
+    }
+
+    /// Whether winner-mode records window layouts for `C-c left` / `C-c right`
+    /// (on by default; `(set-option "winner-mode" #f)` turns it off).
+    pub fn winner_mode(&self) -> bool {
+        self.bool_of(const { spec("winner-mode") })
     }
 
     /// Cursor blink half-period in milliseconds (time the cursor stays shown,

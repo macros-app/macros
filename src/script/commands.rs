@@ -608,6 +608,9 @@ pub enum EditorCommand {
     BottomRightWindow,
     /// `C-w =` (Emacs `C-x +`).
     BalanceWindows,
+    /// `C-c left` / `C-c right`: step through the window-layout history.
+    WinnerUndo,
+    WinnerRedo,
     /// `C-w _` / `C-w |`.
     MaximizeWindowHeight,
     MaximizeWindowWidth,
