@@ -4618,8 +4618,16 @@ impl Editor {
             self.evil_clamp_cursor();
         } else {
             // Publish point so a command reading `(buffer-line)` /
-            // `(current-buffer)` sees it as of this invocation.
+            // `(current-buffer)` sees it as of this invocation. A pending
+            // `C-u` reaches the Scheme command as `(prefix-count)` (Emacs's
+            // `current-prefix-arg`: `C-u M-!` inserts the output) instead of
+            // leaking onto the first builtin the command queues.
+            let saved_count = self.prefix_count;
+            if let Some(n) = self.uarg.pending.take() {
+                self.prefix_count = usize::try_from(n).unwrap_or(0);
+            }
             self.publish_point();
+            self.prefix_count = saved_count;
             self.script.dispatch(source, false);
             self.vim.went_async = true;
         }
