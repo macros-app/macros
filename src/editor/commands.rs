@@ -51,6 +51,7 @@ impl Editor {
     const COMMAND_HANDLERS: &[CommandHandler] = &[
         Self::cmd_grid,
         Self::cmd_motion,
+        Self::cmd_narrow,
         Self::cmd_edit,
         Self::cmd_view,
         Self::cmd_buffer,
@@ -146,11 +147,8 @@ impl Editor {
                 let o = self.active.buffer.line_range_at(self.point()).end;
                 self.goto(o, cx);
             }
-            BeginningOfBuffer => self.goto(0, cx),
-            EndOfBuffer => {
-                let o = self.active.buffer.len();
-                self.goto(o, cx);
-            }
+            BeginningOfBuffer => self.goto(self.accessible().start, cx),
+            EndOfBuffer => self.goto(self.accessible().end, cx),
             ExtendBackwardChar => {
                 let o = self.active.buffer.prev_grapheme(self.point());
                 self.select_to(o, cx);
@@ -183,6 +181,7 @@ impl Editor {
             }
             SetRegion { start, end } => {
                 // Inverted ends are a backwards region: point at `end`.
+                let (start, end) = (self.clamp_accessible(start), self.clamp_accessible(end));
                 let range = self.active.buffer.clamp_range(start..end);
                 self.active.mark_active = true;
                 self.active.selected_range = range;

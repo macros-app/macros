@@ -335,7 +335,7 @@
          (code (car result))
          (out  (car (cdr result))))
     (when (and (equal? code "0") (> (string-length out) 0))
-      (replace-region 0 (point-max) out))))
+      (replace-region 0 (buffer-size) out))))
 (define (lsp-run-before-save-formatter)
   (let ((spec (alist-ref *lsp-formatters* (lsp--file-ext (lsp--buffer-path)))))
     (cond ((not spec) #f)

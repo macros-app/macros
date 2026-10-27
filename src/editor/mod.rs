@@ -72,6 +72,9 @@ mod lsp_methods;
 mod mcp;
 mod minibuffer;
 mod modeline;
+mod narrow;
+#[cfg(test)]
+mod narrow_tests;
 mod net;
 mod overlays;
 mod panes;
@@ -80,6 +83,9 @@ mod rectangle;
 #[cfg(test)]
 mod rectangle_tests;
 mod registers;
+mod remote;
+#[cfg(all(test, unix))]
+mod remote_tests;
 #[cfg(test)]
 mod save_tests;
 mod session;
@@ -304,6 +310,9 @@ struct Document {
     /// For the ANVIL REPL buffer: where its editable input region starts (see
     /// [`anvil_repl`]). Moves with edits like a marker.
     repl_input: Option<usize>,
+    /// The accessible portion while narrowed (Emacs `narrow-to-region`), as
+    /// byte offsets; `None` when the whole buffer is accessible. See [`narrow`].
+    narrow: Option<Range<usize>>,
 }
 
 impl Document {
@@ -1685,6 +1694,17 @@ impl Editor {
             }
         })
         .detach();
+        // Remote-file status ("Connecting to host…", a failed background
+        // listing) from whichever thread runs the ssh, into the echo area.
+        let mut remote_status = crate::remote::subscribe();
+        cx.spawn(async move |this, cx| {
+            while let Some(line) = remote_status.next().await {
+                if this.update(cx, |editor, cx| editor.echo(line, cx)).is_err() {
+                    break; // editor dropped
+                }
+            }
+        })
+        .detach();
         // Drain terminal events (redraw / title / exit) from the alacritty event
         // loops onto the foreground.
         editor.terminal_task = Some(cx.spawn(async move |this, cx| {
@@ -1904,6 +1924,7 @@ impl Editor {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.clamp_accessible(offset);
         self.active.selected_range = offset..offset;
         self.active.selection_reversed = false;
         self.reveal_point();
@@ -1916,6 +1937,7 @@ impl Editor {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = self.clamp_accessible(offset);
         if self.active.selection_reversed {
             self.active.selected_range.start = offset;
         } else {
@@ -1956,7 +1978,10 @@ impl Editor {
         let cursor = self.point();
         let line = self.active.buffer.line_index_at_byte(cursor);
         let target = if self.active.overlays.folds.is_empty() {
-            (line as isize + delta).clamp(0, self.active.buffer.line_count() as isize - 1) as usize
+            let (first, last) = self
+                .narrow_lines()
+                .unwrap_or((0, self.active.buffer.line_count().saturating_sub(1)));
+            (line as isize + delta).clamp(first as isize, last as isize) as usize
         } else {
             self.visible_line_offset(line, delta)
         };
@@ -2256,6 +2281,20 @@ impl Editor {
         // InputEdit, LSP sync, and overlay shifts all agree with what the rope
         // actually does (it repairs bad ranges itself — see `Buffer::replace`).
         let range = self.active.buffer.clamp_range(range);
+        // Narrowed: nothing outside the accessible range may change (see
+        // `narrow_edit`); a whole-buffer rewrite is cut to its real change.
+        let full_len = new_text.len();
+        let narrowed = match self.narrow_edit(range, new_text) {
+            Ok(edit) => edit,
+            Err(msg) => {
+                self.status = msg.into();
+                return self.point();
+            }
+        };
+        let range = narrowed.range;
+        // What a trimmed edit left off the end of `new_text`, for the return.
+        let trimmed_tail = full_len - narrowed.text.end;
+        let new_text = &new_text[narrowed.text];
         let range_start = range.start;
         self.record_undo(UndoRecord {
             at: range.start,
@@ -2274,6 +2313,9 @@ impl Editor {
         });
 
         let cursor = self.apply_tracked_replace(range, new_text);
+        if narrowed.bounds.is_some() {
+            self.active.narrow = narrowed.bounds;
+        }
         self.active.modified = true;
         if let Some((start_byte, old_end_byte, start_point, old_end_point)) = positions {
             let new_end_byte = start_byte + new_text.len();
@@ -2299,7 +2341,7 @@ impl Editor {
         // Emacs `after-change-functions`. Guarded, so it costs nothing unless a
         // hook is registered (then it opts into a dispatch per edit).
         self.run_hook("after-change-functions");
-        cursor
+        cursor + trimmed_tail
     }
 
     /// Replace the (already normalized) byte `range` with `new_text` and keep
@@ -2325,6 +2367,7 @@ impl Editor {
         // Move any markers tracking positions in this buffer, and the Vim
         // marks / jump list.
         self.script.adjust_markers(start, old_end, new_text.len());
+        self.shift_narrow(start, old_end, new_text.len());
         if let Some(input) = self.active.repl_input {
             self.active.repl_input = Some(anvil_repl::shift_repl_input(
                 input,
@@ -3337,7 +3380,7 @@ impl Editor {
     }
 
     fn mark_whole_buffer(&mut self, cx: &mut Context<Self>) {
-        self.active.selected_range = 0..self.active.buffer.len();
+        self.active.selected_range = self.accessible();
         self.active.selection_reversed = false;
         self.active.mark_active = true;
         self.ensure_cursor_visible();
@@ -3425,6 +3468,10 @@ impl Editor {
     }
 
     fn keyboard_quit(&mut self, cx: &mut Context<Self>) {
+        // C-g also abandons a remote-file operation stuck on the network.
+        if crate::remote::cancel_all() > 0 {
+            self.echo("Quit (cancelled the remote operation)", cx);
+        }
         if self.minibuffer.is_some() {
             self.mb_abort(cx);
             return;
@@ -3495,13 +3542,14 @@ impl Editor {
         let enabled = cx.global::<crate::settings::Settings>().magit_gutter();
         let new_marks: HashMap<usize, DiffMark> = if enabled {
             match self.active.path.clone() {
-                Some(path) => {
+                // A remote file's repository isn't on this machine.
+                Some(path) if !crate::remote::is_remote(&path) => {
                     let text = self.active.buffer.full_text();
                     crate::script::git_diff_marks(&path, &text)
                         .into_iter()
                         .collect()
                 }
-                None => HashMap::new(),
+                _ => HashMap::new(),
             }
         } else {
             HashMap::new()
@@ -3641,7 +3689,7 @@ impl Editor {
             .active
             .path
             .as_deref()
-            .and_then(|p| p.parent())
+            .and_then(crate::remote::parent_of)
             .map_or_else(
                 || self.process_cwd.clone(),
                 |d| d.to_string_lossy().into_owned(),
@@ -3688,6 +3736,7 @@ impl Editor {
             // only the slice they need, off the UI thread.
             text: self.active.buffer.rope().clone(),
             tick: self.active.buffer.tick(),
+            narrow: self.active.narrow.as_ref().map(|r| (r.start, r.end)),
             region,
             selections,
             props,
@@ -4253,6 +4302,16 @@ impl Editor {
     // --- LSP --------------------------------------------------------------
 
     /// The URI identifying the active buffer for LSP (see [`document_uri`]).
+    /// Whether the active buffer visits a file on another host (`/ssh:…`):
+    /// local-only machinery (language servers, the git gutter, file watches)
+    /// leaves it alone.
+    fn active_is_remote(&self) -> bool {
+        self.active
+            .path
+            .as_deref()
+            .is_some_and(crate::remote::is_remote)
+    }
+
     fn active_uri(&self) -> Option<String> {
         Some(document_uri(&self.active))
     }
@@ -4664,8 +4723,16 @@ impl Editor {
             self.evil_clamp_cursor();
         } else {
             // Publish point so a command reading `(buffer-line)` /
-            // `(current-buffer)` sees it as of this invocation.
+            // `(current-buffer)` sees it as of this invocation. A pending
+            // `C-u` reaches the Scheme command as `(prefix-count)` (Emacs's
+            // `current-prefix-arg`: `C-u M-!` inserts the output) instead of
+            // leaking onto the first builtin the command queues.
+            let saved_count = self.prefix_count;
+            if let Some(n) = self.uarg.pending.take() {
+                self.prefix_count = usize::try_from(n).unwrap_or(0);
+            }
             self.publish_point();
+            self.prefix_count = saved_count;
             self.script.dispatch(source, false);
             self.vim.went_async = true;
         }
@@ -5014,6 +5081,7 @@ fn blank_document(
         grid: None,
         grid_stash: None,
         repl_input: None,
+        narrow: None,
     }
 }
 

@@ -44,6 +44,23 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             crate::process::call_full(&program, &args, input, &env)
         },
     );
+    // `(shell-command-argv dir command merge-stderr)` → `(program arg …)` that
+    // runs `command` through the user's shell in `dir` (Emacs
+    // `shell-file-name` + `shell-command-switch`): `$SHELL -c`, or `cmd /C` on
+    // Windows. `merge-stderr` folds stderr into stdout (`2>&1`), for
+    // `make-process`, which streams stdout only. Feed the list to
+    // `call-process-full` / `make-process` (car = program, cdr = args).
+    reg.register_fn(
+        "shell-command-argv",
+        |dir: String, command: String, merge: bool| -> Vec<String> {
+            shell_argv(
+                &dir,
+                &command,
+                merge,
+                crate::process::getenv("SHELL").as_deref(),
+            )
+        },
+    );
     // `(call-process-env program args input env)` — `call-process-full` with
     // extra environment for the child only. `env` is a list of "KEY=VALUE"
     // strings layered over the inherited environment; a bare "KEY" removes
@@ -169,5 +186,93 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
                 id as usize
             },
         );
+    }
+}
+
+/// The argv that runs `command` through the user's shell in `dir` (see
+/// `shell-command-argv`). On Unix the user's `$SHELL` (else `/bin/sh`) gets
+/// the command verbatim via `-c`; a fixed `/bin/sh` wrapper does the `cd` and
+/// the stderr merge, taking `dir`, the shell and the command as positional
+/// parameters, so nothing is spliced into shell source and fish/nu users'
+/// syntax still works. An empty `dir` stays in the inherited cwd.
+fn shell_argv(dir: &str, command: &str, merge: bool, shell: Option<&str>) -> Vec<String> {
+    let redirect = if merge { " 2>&1" } else { "" };
+    if cfg!(windows) {
+        let cd = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("cd /d \"{dir}\" && ")
+        };
+        let comspec = crate::process::getenv("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+        return vec![
+            comspec,
+            "/D".into(),
+            "/C".into(),
+            format!("{cd}{command}{redirect}"),
+        ];
+    }
+    let shell = shell.filter(|s| !s.is_empty()).unwrap_or("/bin/sh");
+    vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        format!(
+            "if [ -n \"$1\" ]; then cd -- \"$1\" || exit 1; fi; exec \"$2\" -c \"$3\"{redirect}"
+        ),
+        "sh".into(),
+        dir.into(),
+        shell.into(),
+        command.into(),
+    ]
+}
+
+#[cfg(all(test, unix))]
+mod shell_argv_tests {
+    use super::shell_argv;
+
+    fn run(dir: &str, command: &str, merge: bool, shell: Option<&str>) -> Vec<String> {
+        let argv = shell_argv(dir, command, merge, shell);
+        crate::process::call_full(
+            &argv[0],
+            &argv[1..],
+            String::new(),
+            &crate::process::EnvOverrides::default(),
+        )
+    }
+
+    #[test]
+    fn runs_in_dir_through_the_given_shell() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let dir = dir.to_str().unwrap();
+        let r = run(dir, "pwd -P; echo \"$0\"", false, Some("/bin/sh"));
+        assert_eq!(r[0], "0");
+        assert_eq!(r[1], format!("{dir}\n/bin/sh\n"));
+    }
+
+    #[test]
+    fn quotes_in_dir_and_command_are_data() {
+        let base = std::env::temp_dir().join("macros shell'arg \"test\"");
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.canonicalize().unwrap();
+        let r = run(
+            dir.to_str().unwrap(),
+            "echo 'it''s' \"$(pwd -P)\"",
+            false,
+            None,
+        );
+        assert_eq!(r[1], format!("its {}\n", dir.display()));
+    }
+
+    #[test]
+    fn stderr_and_exit_status() {
+        let r = run("", "echo out; echo err >&2; exit 3", false, Some(""));
+        assert_eq!(
+            (r[0].as_str(), r[1].as_str(), r[2].as_str()),
+            ("3", "out\n", "err\n")
+        );
+        let r = run("", "echo out; echo err >&2", true, None);
+        assert_eq!((r[1].as_str(), r[2].as_str()), ("out\nerr\n", ""));
+        let r = run("/nonexistent-macros-dir", "echo hi", false, None);
+        assert_eq!(r[0], "1");
+        assert!(!r[2].is_empty());
     }
 }

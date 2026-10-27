@@ -378,7 +378,7 @@ impl Editor {
     /// The [`Document`] pane `id` displays: the live active buffer for the
     /// selected pane (and any pane showing the active buffer), else the pane's
     /// inactive document — falling back to the active one if it can't be found.
-    fn pane_doc(&self, id: usize) -> &Document {
+    pub(super) fn pane_doc(&self, id: usize) -> &Document {
         match self.pane(id) {
             Some(p) if p.buffer != self.active.name => {
                 self.inactive_doc(&p.buffer).unwrap_or(&self.active)

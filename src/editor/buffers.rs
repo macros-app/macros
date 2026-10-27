@@ -101,6 +101,11 @@ fn visits_identity(doc: &Document, identity: &Path) -> bool {
 /// that doesn't exist yet canonicalizes its directory and keeps its name; a
 /// relative path resolves against the process cwd (the editor never `chdir`s).
 pub(super) fn file_identity(path: &Path) -> PathBuf {
+    // A remote file's identity is its normalized spelling (never resolved
+    // against the local filesystem).
+    if let Some(remote) = crate::remote::canonical(path) {
+        return remote;
+    }
     if let Ok(canonical) = std::fs::canonicalize(path) {
         return canonical;
     }
@@ -124,7 +129,7 @@ impl Editor {
     pub(super) fn sync_buffers(&self) {
         self.script.set_buffer_names(self.buffer_names());
         let abs = |p: &Path| -> String {
-            if p.is_absolute() {
+            if p.is_absolute() || crate::remote::is_remote(p) {
                 p.to_string_lossy().into_owned()
             } else {
                 // Resolve against the startup cwd (the editor never `chdir`s),
@@ -325,6 +330,7 @@ impl Editor {
         if path.as_os_str().is_empty() {
             return;
         }
+        let path = crate::remote::canonical(&path).unwrap_or(path);
         let identity = file_identity(&path);
         if self.switch_to_visiting(&identity, cx) {
             return;
@@ -367,6 +373,9 @@ impl Editor {
         as_grid: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Some(remote) = crate::remote::parse_path(&path) {
+            return self.remote_read_and_open(name, path, identity, remote, as_grid, cx);
+        }
         // Read off the UI thread so opening a large file never freezes the
         // editor; install the buffer back on the foreground when it's ready.
         // Raw bytes: a grid parses them directly (it may not even be UTF-8);
@@ -665,6 +674,9 @@ impl Editor {
             self.echo("Buffer is not visiting a file", cx);
             return;
         };
+        if let Some(remote) = crate::remote::parse_path(&path) {
+            return self.remote_revert(path, remote, cx);
+        }
         let stamp = crate::save::stamp(&path);
         match std::fs::read_to_string(&path) {
             Ok(contents) => {
@@ -844,6 +856,9 @@ impl Editor {
         if cx.global::<crate::settings::Settings>().auto_revert() {
             desired.extend(self.docs().filter_map(|d| d.path.clone()));
         }
+        // Remote files and directories can't be watched (auto-revert and
+        // dired's live refresh are local-only): `g` / `revert-buffer` re-read.
+        desired.retain(|p| !crate::remote::is_remote(p));
         let debouncer = self.fs.debouncer.as_mut().unwrap();
         for path in &desired {
             if !self.fs.watched.contains(path)
@@ -919,6 +934,9 @@ impl Editor {
     /// [`save_buffer`](Self::save_buffer); with `check_disk`, first ask before
     /// overwriting a file something else changed since the buffer read it.
     pub(super) fn save_buffer_ex(&mut self, check_disk: bool, cx: &mut Context<Self>) {
+        if !check_disk && let Some(path) = self.active_save_target() {
+            crate::save::allow_overwrite(&path);
+        }
         if check_disk
             && let Some(path) = self.active_save_target()
             && crate::save::changed_on_disk(&path)
@@ -1113,12 +1131,22 @@ impl Editor {
         let mut failed: Vec<String> = Vec::new();
         let mut saved_uris = Vec::new();
         let mut written: Vec<PathBuf> = Vec::new();
+        // Remote buffers save asynchronously (network I/O stays off the UI
+        // thread), each reporting its own failure.
+        let mut remote = Vec::new();
         // Workbooks with several sheets save whole, once each.
         failed.extend(self.grid_save_modified_books(true));
         for doc in &mut self.inactive {
             if doc.modified
                 && let Some(path) = doc.path.clone()
             {
+                if crate::remote::is_remote(&path) && doc.grid.is_none() {
+                    doc.modified = false;
+                    saved += 1;
+                    let text = doc.buffer.full_text().into_bytes();
+                    remote.push((doc.name.clone(), path, text, document_uri(doc)));
+                    continue;
+                }
                 if crate::save::changed_on_disk(&path) {
                     failed.push(changed_on_disk_failure(&doc.name));
                     continue;
@@ -1142,6 +1170,9 @@ impl Editor {
         }
         for uri in saved_uris {
             self.lsp_did_save(&uri);
+        }
+        for (name, path, text, uri) in remote {
+            self.save_remote(name, path, text, uri, cx);
         }
         for path in written {
             self.rewatch_file(&path, cx);
@@ -1191,6 +1222,9 @@ impl Editor {
         let name = self.active.name.clone();
         let uri = document_uri(&self.active);
         self.active.modified = false;
+        if crate::remote::is_remote(&path) {
+            return self.save_remote(name, path, text.into_bytes(), uri, cx);
+        }
         let ticket = crate::save::ticket(&path);
         // Until the result is handled, a quit waits for this save.
         let pending = crate::save::begin_pending();
@@ -1503,6 +1537,9 @@ impl Editor {
     /// `check_disk`, refuses to overwrite a file changed on disk since it was
     /// read (`:wq`; `:wq!` overwrites).
     pub(super) fn save_active_sync(&mut self, check_disk: bool, cx: &mut Context<Self>) -> bool {
+        if !check_disk && let Some(path) = self.active_save_target() {
+            crate::save::allow_overwrite(&path);
+        }
         if check_disk
             && self
                 .active_save_target()

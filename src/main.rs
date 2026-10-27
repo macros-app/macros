@@ -29,6 +29,7 @@ mod mode;
 mod net;
 mod process;
 mod rect;
+mod remote;
 mod runtime;
 mod save;
 mod script;

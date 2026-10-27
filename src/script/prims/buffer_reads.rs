@@ -27,9 +27,22 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             rope.to_string()
         });
     }
-    // End of buffer as a byte offset (Emacs `(point-max)`). O(1) on the rope, no
+    // End of the accessible portion as a byte offset (Emacs `(point-max)`): the
+    // buffer's end, or the narrowing's end while narrowed. O(1) on the rope, no
     // text materialized.
-    register_snapshot_read(reg, snapshot, "point-max", |s| s.text.len_bytes());
+    register_snapshot_read(reg, snapshot, "point-max", |s| {
+        s.narrow.map_or(s.text.len_bytes(), |(_, e)| e)
+    });
+    // Start of the accessible portion (Emacs `(point-min)`): 0, or the
+    // narrowing's start while narrowed. Offsets stay absolute either way.
+    register_snapshot_read(reg, snapshot, "point-min", |s| {
+        s.narrow.map_or(0, |(b, _)| b)
+    });
+    // The whole buffer's length in bytes, narrowing or not (Emacs
+    // `(buffer-size)`) — the end for a whole-buffer `replace-region`.
+    register_snapshot_read(reg, snapshot, "buffer-size", |s| s.text.len_bytes());
+    // Whether the buffer is narrowed (Emacs `buffer-narrowed-p`).
+    register_snapshot_read(reg, snapshot, "buffer-narrowed?", |s| s.narrow.is_some());
     {
         // `(position->byte line character)` → byte offset of an LSP position
         // (0-based line, UTF-16 column) in the active buffer. Lets Scheme LSP
@@ -158,12 +171,15 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // Byte offset of the next occurrence of `needle` at/after point, or -1.
         let shared = snapshot.clone();
         reg.register_fn("search-forward", move |needle: String| -> isize {
-            let (rope, p) = {
+            let (rope, p, narrow) = {
                 let snap = shared.load();
-                (snap.text.clone(), snap.point)
+                (snap.text.clone(), snap.point, snap.narrow)
             };
-            let from = snap_byte(&rope, p);
-            let tail = rope.byte_slice(from..).to_string();
+            // Only up to `point-max`: a narrowed buffer's hidden tail is out
+            // of reach.
+            let end = narrow.map_or(rope.len_bytes(), |(_, e)| snap_byte(&rope, e));
+            let from = snap_byte(&rope, p).min(end);
+            let tail = rope.byte_slice(from..end).to_string();
             match tail.find(&needle) {
                 Some(off) => (from + off) as isize,
                 None => -1,
