@@ -79,6 +79,7 @@ mod process;
 mod registers;
 #[cfg(test)]
 mod save_tests;
+mod server;
 mod session;
 mod special_select;
 #[cfg(test)]

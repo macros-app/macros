@@ -142,6 +142,18 @@ impl Workspace {
             .update(cx, |editor, cx| editor.visit_files(paths, cx));
     }
 
+    /// Open the files an edit-server client sent (`macros --client`).
+    pub fn serve_client(&self, incoming: crate::server::Incoming, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.server_visit(incoming, cx));
+    }
+
+    /// Start the edit server if the `server` option (default on) asks for it.
+    pub fn start_edit_server(&self, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.reconcile_server(false, cx));
+    }
+
     /// Run `after-init-hook` once startup + user config have loaded — where
     /// session restore (desktop / savehist, scheme/session.scm) runs.
     pub fn run_after_init(&self, cx: &mut Context<Self>) {
