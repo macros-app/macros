@@ -431,3 +431,44 @@ fn evil_normal_keeps_its_own_bindings(cx: &mut TestAppContext) {
     assert_eq!(text(&ed, vcx), "abc\n");
     assert!(ed.read_with(vcx, |e, _| e.evil == EvilState::Normal));
 }
+
+// --- narrowing ---------------------------------------------------------------------
+
+#[gpui::test]
+fn narrowing_bounds_isearch_marks_and_overwrite(cx: &mut TestAppContext) {
+    let (ed, vcx) = setup(cx, "foo one\nfoo two\nfoo\n");
+    // A mark set before narrowing, outside the narrowed line.
+    press(&ed, vcx, "C-SPC C-g");
+    ed.update(vcx, |e, cx| e.narrow_to(8, 15, cx));
+    set_point(&ed, vcx, 8);
+    // Isearch only finds matches inside the narrowing, literal or regexp.
+    press(&ed, vcx, "C-s \"foo\"");
+    assert_eq!(matched(&ed, vcx), Some(8..11));
+    press(&ed, vcx, "C-s");
+    assert_eq!(matched(&ed, vcx), Some(8..11), "wraps inside the narrowing");
+    press(&ed, vcx, "RET");
+    set_point(&ed, vcx, 8);
+    press(&ed, vcx, "C-M-s \"o+\" C-s C-s");
+    assert!(matched(&ed, vcx).is_some_and(|m| 8 <= m.start && m.end <= 15));
+    press(&ed, vcx, "C-g");
+    // The symbol at the narrowing's edge ends there.
+    set_point(&ed, vcx, 14);
+    press(&ed, vcx, "M-s .");
+    assert_eq!(matched(&ed, vcx), Some(12..15));
+    press(&ed, vcx, "C-g");
+    // Popping to a mark outside the narrowing stops at its edge.
+    set_point(&ed, vcx, 12);
+    press(&ed, vcx, "C-u C-SPC");
+    assert!(
+        (8..=15).contains(&point(&ed, vcx)),
+        "point {}",
+        point(&ed, vcx)
+    );
+    // Overwriting stops at the narrowing's end.
+    ed.update(vcx, |e, cx| {
+        e.run_script_blocking("(overwrite-mode)", cx);
+        e.collapse_to(14);
+    });
+    press(&ed, vcx, "\"XY\"");
+    assert_eq!(text(&ed, vcx), "foo one\nfoo twXY\nfoo\n");
+}

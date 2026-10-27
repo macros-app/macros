@@ -256,14 +256,17 @@ impl Editor {
             }
         };
         let text = self.active.buffer.full_text();
+        // Narrowed: only matches wholly inside the accessible range count, and
+        // text outside it doesn't touch a symbol's ends.
+        let acc = self.accessible();
         let symbol_edge = |at: Option<char>| at.is_some_and(|c| self.is_symbol_char(c));
         let matches: Vec<Range<usize>> = regex
             .find_iter(&text)
-            .filter(|m| m.end() > m.start())
+            .filter(|m| m.end() > m.start() && acc.start <= m.start() && m.end() <= acc.end)
             .filter(|m| {
                 kind != IsearchKind::Symbol
-                    || !(symbol_edge(text[..m.start()].chars().next_back())
-                        || symbol_edge(text[m.end()..].chars().next()))
+                    || !(symbol_edge(text[acc.start..m.start()].chars().next_back())
+                        || symbol_edge(text[m.end()..acc.end].chars().next()))
             })
             .map(|m| m.start()..m.end())
             .collect();

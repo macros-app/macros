@@ -242,12 +242,30 @@ impl Editor {
 
     /// Whether any line is folded (the element's fast path skips fold handling).
     pub fn has_folds(&self) -> bool {
-        !self.active.overlays.folds.is_empty()
+        !self.active.overlays.folds.is_empty() || self.active.narrow.is_some()
     }
 
-    /// Whether buffer line `line` is hidden by a fold.
+    /// Whether buffer line `line` is hidden by a fold or lies outside the
+    /// narrowing.
     pub fn is_line_invisible(&self, line: usize) -> bool {
-        self.active.overlays.is_line_folded(line)
+        self.narrow_lines()
+            .is_some_and(|(first, last)| line < first || line > last)
+            || self.active.overlays.is_line_folded(line)
+    }
+
+    /// The visible text lines before `line` (all lines when `None`): those
+    /// inside the narrowing, less any folded.
+    fn visible_lines_before(&self, line: Option<usize>) -> usize {
+        let count = self.active.buffer.line_count();
+        let (first, last) = self.narrow_lines().unwrap_or((0, count.saturating_sub(1)));
+        let end = line.unwrap_or(count).min(last + 1).max(first);
+        if self.active.overlays.folds.is_empty() {
+            end - first
+        } else {
+            (first..end)
+                .filter(|&i| !self.active.overlays.is_line_folded(i))
+                .count()
+        }
     }
 
     /// Whether any gutter fold chevron is set (element's fast path skips them).
@@ -263,13 +281,7 @@ impl Editor {
 
     /// Number of visible (non-folded) lines — the element's screen-row count.
     pub fn display_line_count(&self) -> usize {
-        let text = if self.active.overlays.folds.is_empty() {
-            self.active.buffer.line_count()
-        } else {
-            (0..self.active.buffer.line_count())
-                .filter(|i| !self.is_line_invisible(*i))
-                .count()
-        };
+        let text = self.visible_lines_before(None);
         let ghost = self.ghost_rows().map_or(0, |(_, rows)| rows);
         text + self.image_rows_total() + self.scale_rows_total() + ghost
     }
@@ -277,11 +289,7 @@ impl Editor {
     /// Screen row a buffer line maps to once folds are collapsed and inline
     /// images on earlier lines have reserved their rows.
     pub fn display_row_of_line(&self, line: usize) -> usize {
-        let text = if self.active.overlays.folds.is_empty() {
-            line
-        } else {
-            (0..line).filter(|i| !self.is_line_invisible(*i)).count()
-        };
+        let text = self.visible_lines_before(Some(line));
         let ghost = match self.ghost_rows() {
             Some((g, rows)) if g < line => rows,
             _ => 0,

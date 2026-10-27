@@ -262,7 +262,7 @@ impl Editor {
         let target = ring.pop().unwrap_or(0);
         ring.insert(0, target);
         self.emacs.pop_event = Some(self.emacs.events);
-        let target = self.active.buffer.snap(target);
+        let target = self.active.buffer.snap(self.clamp_accessible(target));
         self.collapse_to(target);
         self.move_to(target, cx);
     }
@@ -279,7 +279,7 @@ impl Editor {
             if buffer != self.active.name {
                 self.switch_to_buffer(&buffer, cx);
             }
-            let pos = self.active.buffer.snap(pos);
+            let pos = self.active.buffer.snap(self.clamp_accessible(pos));
             self.collapse_to(pos);
             self.move_to(pos, cx);
             return;
@@ -398,10 +398,11 @@ impl Editor {
             return range;
         }
         let buffer = &self.active.buffer;
+        let limit = self.accessible().end;
         let mut end = range.start;
         for _ in 0..text.chars().count() {
             let next = buffer.next_grapheme(end);
-            if next == end || buffer.slice_to_string(end..next) == "\n" {
+            if next == end || next > limit || buffer.slice_to_string(end..next) == "\n" {
                 break;
             }
             end = next;
@@ -515,7 +516,9 @@ impl Editor {
     fn symbol_range_at_point(&self) -> Option<Range<usize>> {
         let buffer = &self.active.buffer;
         let p = self.point();
+        let acc = self.accessible();
         let line = buffer.line_range(buffer.line_index_at_byte(p));
+        let line = line.start.max(acc.start)..line.end.min(acc.end);
         let text = buffer.slice_to_string(line.clone());
         let at = p - line.start;
         let is_sym = |c: char| self.is_symbol_char(c);

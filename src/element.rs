@@ -493,6 +493,8 @@ struct FrameCtx<'a> {
     pane: usize,
     selected: bool,
     buffer: &'a crate::buffer::Buffer,
+    /// The pane buffer's narrowing (accessible byte range), if any.
+    narrow: Option<std::ops::Range<usize>>,
     theme: &'a Theme,
     colors: FrameColors,
     text_color: Hsla,
@@ -537,7 +539,18 @@ impl FrameCtx<'_> {
     /// its gutter, cursor, highlight and decoration output into `acc`.
     fn layout_line(&self, i: usize, y: &mut Pixels, acc: &mut Accum, window: &mut Window) {
         let lh = f32::from(self.line_height);
-        let (range, text) = self.buffer.line(i);
+        let (mut range, mut text) = self.buffer.line(i);
+        // A narrowing's boundary lines show only their accessible part.
+        // `clip` is how many bytes that cut off the line's start.
+        let (mut clipped, mut clip) = (false, 0);
+        if let Some(n) = &self.narrow {
+            let (s, e) = (range.start.max(n.start), range.end.min(n.end).max(n.start));
+            if (s..e) != range {
+                (clipped, clip) = (true, s - range.start);
+                text = text[clip..e - range.start].to_string();
+                range = s..e;
+            }
+        }
         let top = *y;
 
         // `overlay-hide` ranges intersecting this line, made line-relative and
@@ -558,6 +571,17 @@ impl FrameCtx<'_> {
         } else {
             Vec::new()
         };
+        if clipped {
+            holes = holes
+                .into_iter()
+                .map(|(s, e)| {
+                    (
+                        s.saturating_sub(clip),
+                        e.saturating_sub(clip).min(text.len()),
+                    )
+                })
+                .collect();
+        }
         holes.retain(|&(s, e)| s < e && text.is_char_boundary(s) && text.is_char_boundary(e));
         // The cursor's own line is revealed in full so hidden markup — e.g.
         // Org's leading stars — is visible and editable while point is there.
@@ -876,6 +900,9 @@ struct GutterCfg {
     gg_modified: Hsla,
     gg_removed: Hsla,
     number_color: Hsla,
+    /// Buffer line shown as line 1 — the narrowing's first line, so numbers
+    /// count from the accessible portion (Emacs's default).
+    line_base: usize,
     font: Font,
     font_size: Pixels,
     diag_colors: DiagnosticColors,
@@ -913,7 +940,7 @@ fn layout_gutter(
 
     // Line-number label, right-aligned in the gutter. Shares the line's
     // content offset, so on a scaled line it centers to the same midpoint.
-    let label = SharedString::from((i + 1).to_string());
+    let label = SharedString::from((i - cfg.line_base + 1).to_string());
     let n = label.len();
     let shaped_num = window.text_system().shape_line(
         label,
@@ -1264,6 +1291,15 @@ impl Element for EditorElement {
         let pane = self.pane;
         let selected = editor.pane_is_selected(pane);
         let buffer = editor.pane_buffer(pane);
+        // Narrowed (`C-x n n`): only the accessible lines are drawn, the
+        // boundary ones clipped (`layout_line`). Any pane showing the buffer.
+        let narrow = editor.pane_narrow(pane);
+        let narrow_lines = narrow.as_ref().map(|r| {
+            (
+                buffer.line_index_at_byte(r.start),
+                buffer.line_index_at_byte(r.end),
+            )
+        });
         let theme = cx.global::<Theme>();
         let settings = cx.global::<crate::settings::Settings>();
         let popup_max_rows = settings.completion_max_rows();
@@ -1396,11 +1432,11 @@ impl Element for EditorElement {
         let folds = selected && editor.has_folds();
         let images = selected && editor.has_line_images();
         let scales = selected && editor.has_line_scales();
-        let dynamic = folds || images || scales || ghost_rows.is_some();
-        let display_count = if dynamic {
-            editor.display_line_count()
-        } else {
-            total_lines
+        let dynamic = folds || images || scales || ghost_rows.is_some() || narrow.is_some();
+        let display_count = match narrow_lines {
+            _ if dynamic && selected => editor.display_line_count(),
+            Some((first, last)) => last - first + 1,
+            None => total_lines,
         };
         let first_row = (scroll / lh).floor().max(0.0) as usize;
         let visible = (viewport_h / lh).ceil() as usize + 1;
@@ -1412,7 +1448,8 @@ impl Element for EditorElement {
         let rows: Vec<usize> = if dynamic {
             let mut v = Vec::new();
             let mut r = 0usize;
-            for i in 0..total_lines {
+            let (lo, hi) = narrow_lines.unwrap_or((0, total_lines.saturating_sub(1)));
+            for i in lo..(hi + 1).min(total_lines) {
                 if folds && editor.is_line_invisible(i) {
                     continue;
                 }
@@ -1474,8 +1511,12 @@ impl Element for EditorElement {
         // frame so it can't go stale.
         let search = match (selected, rows.first(), rows.last()) {
             (true, Some(&top), Some(&bot)) => {
-                let vis_start = buffer.line_range(top).start;
-                let vis_end = buffer.line_range(bot).end;
+                let mut vis_start = buffer.line_range(top).start;
+                let mut vis_end = buffer.line_range(bot).end;
+                if let Some(n) = &narrow {
+                    vis_start = vis_start.max(n.start);
+                    vis_end = vis_end.min(n.end).max(vis_start);
+                }
                 editor.search_match_ranges_in(vis_start, vis_end)
             }
             _ => Vec::new(),
@@ -1529,6 +1570,7 @@ impl Element for EditorElement {
             gg_modified: colors.git_modified,
             gg_removed: colors.git_removed,
             number_color: colors.line_number,
+            line_base: narrow_lines.map_or(0, |(first, _)| first),
             font: editor_font.clone(),
             font_size,
             diag_colors,
@@ -1546,6 +1588,7 @@ impl Element for EditorElement {
             pane,
             selected,
             buffer,
+            narrow,
             theme,
             colors,
             text_color,

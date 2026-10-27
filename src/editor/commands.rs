@@ -56,6 +56,7 @@ impl Editor {
     const COMMAND_HANDLERS: &[CommandHandler] = &[
         Self::cmd_grid,
         Self::cmd_motion,
+        Self::cmd_narrow,
         Self::cmd_edit,
         Self::cmd_view,
         Self::cmd_buffer,
@@ -154,12 +155,11 @@ impl Editor {
             // Emacs leaves the mark where `M-<` / `M->` started.
             BeginningOfBuffer => {
                 self.push_mark_quietly(self.point());
-                self.goto(0, cx);
+                self.goto(self.accessible().start, cx);
             }
             EndOfBuffer => {
                 self.push_mark_quietly(self.point());
-                let o = self.active.buffer.len();
-                self.goto(o, cx);
+                self.goto(self.accessible().end, cx);
             }
             ExtendBackwardChar => {
                 let o = self.active.buffer.prev_grapheme(self.point());
@@ -192,6 +192,7 @@ impl Editor {
             }
             SetRegion { start, end } => {
                 // Inverted ends are a backwards region: point at `end`.
+                let (start, end) = (self.clamp_accessible(start), self.clamp_accessible(end));
                 let range = self.active.buffer.clamp_range(start..end);
                 self.active.mark_active = true;
                 self.active.selected_range = range;

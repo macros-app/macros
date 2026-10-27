@@ -234,6 +234,24 @@ fn universal_argument_survives_a_prefix_and_is_spent_by_a_meta_command(cx: &mut 
     assert_eq!(point(&ed, vcx), 1);
 }
 
+/// A Scheme command sees `C-u` as `(prefix-count)` (Emacs's
+/// `current-prefix-arg`): `C-u M-!` asks to insert the output.
+#[gpui::test]
+fn universal_argument_reaches_a_scheme_command(cx: &mut TestAppContext) {
+    let (ed, vcx) = setup(cx, ALPHABET);
+    let prompt = |ed: &Entity<Editor>, vcx: &mut VisualTestContext| {
+        ed.read_with(vcx, |e, _| e.minibuffer.as_ref().map(|m| m.prompt.clone()))
+    };
+    press(&ed, vcx, "M-!");
+    assert_eq!(prompt(&ed, vcx).as_deref(), Some("Shell command: "));
+    press(&ed, vcx, "C-g C-u M-!");
+    assert_eq!(
+        prompt(&ed, vcx).as_deref(),
+        Some("Shell command (insert output): ")
+    );
+    assert!(ed.read_with(vcx, |e, _| e.uarg.pending.is_none() && e.prefix_count == 0));
+}
+
 #[gpui::test]
 fn keyboard_quit_cancels_a_prefix(cx: &mut TestAppContext) {
     let (ed, vcx) = setup(cx, ALPHABET);

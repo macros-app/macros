@@ -52,6 +52,9 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-x z</kbd> | `repeat` (then <kbd>z</kbd> to repeat again) |
 | <kbd>C-x C-+</kbd> / <kbd>C-x C--</kbd> / <kbd>C-x C-0</kbd> | `text-scale-increase` / `-decrease` / `-reset` (then <kbd>+</kbd> / <kbd>-</kbd> / <kbd>0</kbd>) |
 | <kbd>cmd-=</kbd> / <kbd>cmd--</kbd> / <kbd>cmd-0</kbd> | `global-text-scale-increase` / `-decrease` / `-reset` |
+| <kbd>C-x n n</kbd> / <kbd>C-x n d</kbd> | `narrow-to-region` / `narrow-to-defun` |
+| <kbd>C-x n s</kbd> | `org-narrow-to-subtree` (Org) |
+| <kbd>C-x n w</kbd> | `widen` |
 
 The system clipboard always works, including inside modal states: <kbd>cmd-c</kbd> / <kbd>cmd-x</kbd> / <kbd>cmd-v</kbd> (`clipboard-copy` / `-cut` / `-paste`).
 
@@ -83,6 +86,12 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | <kbd>M-:</kbd> | `eval-expression` |
 | <kbd>M-i</kbd> | `completion-at-point` |
 | <kbd>C-g</kbd> | `keyboard-quit` |
+| <kbd>M-!</kbd> | `shell-command` (<kbd>C-u</kbd>: insert the output at point) |
+| <kbd>M-\|</kbd> | `shell-command-on-region` (<kbd>C-u</kbd>: replace the region with the output) |
+| <kbd>M-&</kbd> | `async-shell-command` |
+| <kbd>M-x</kbd> `grep` / `rgrep` / `lgrep` | search a directory, then walk the matches with <kbd>M-g n</kbd> / <kbd>M-g p</kbd> |
+
+See [Shell & compile](/docs/shell-and-compile) for the details.
 
 ## Keyboard macros
 
@@ -120,7 +129,7 @@ A numeric prefix repeats the next command, Emacs-style:
 | <kbd>C-u</kbd> <kbd>cmd</kbd> | <kbd>C-u</kbd> alone means 4; <kbd>C-u C-u</kbd> means 16, and so on |
 | <kbd>C-u 5 a</kbd> | self-insert works too — inserts `aaaaa` |
 
-The argument applies to motions and simple edits (move, kill, yank, delete, newline, undo/redo). Modal or one-shot commands (<kbd>M-x</kbd>, save, quit, toggles) ignore it and run once. Negative arguments aren't supported yet.
+The argument applies to motions and simple edits (move, kill, yank, delete, newline, undo/redo). Modal or one-shot commands (<kbd>M-x</kbd>, save, quit, toggles) ignore it and run once. A Scheme command reads the argument with `(prefix-count)` (Emacs's `current-prefix-arg`; 0 when none was given) and decides what it means. For example, <kbd>C-u M-!</kbd> inserts the command's output. Negative arguments aren't supported yet.
 
 ## Rebinding
 

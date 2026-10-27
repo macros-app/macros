@@ -25,7 +25,7 @@
 ;; `(match-count . records)` for every line of the active buffer holding a
 ;; non-empty match of `pat`, or the regexp error string.
 (define (occur-collect pat)
-  (let ((ms (buffer-search-all pat 0 (point-max)))
+  (let ((ms (buffer-search-all pat (point-min) (point-max)))
         (src (current-buffer))
         (path (buffer-file-name)))
     (if (string? ms)

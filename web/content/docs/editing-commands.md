@@ -105,6 +105,29 @@ In `*occur*` and in the project grep buffer (<kbd>C-c p G</kbd>), press <kbd>e</
 - <kbd>C-c C-c</kbd> applies every changed line. Sources open in a buffer are edited in that buffer and left modified for you to review and save; files that aren't open are patched directly on disk. A line that changed since the search is skipped and reported.
 - <kbd>C-c C-k</kbd> throws the edits away.
 
+## Narrowing
+
+Narrowing restricts a buffer to part of its text, so you can work on one function or one Org subtree without the rest in the way.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-x n n</kbd> | `narrow-to-region` | Narrow to the region |
+| <kbd>C-x n d</kbd> | `narrow-to-defun` | Narrow to the function, method or type around point (found with tree-sitter; in Lisps, the top-level form) |
+| <kbd>C-x n s</kbd> | `org-narrow-to-subtree` | In Org, narrow to the subtree at point |
+| <kbd>C-x n w</kbd> | `widen` | Show the whole buffer again |
+
+While a buffer is narrowed, the mode line shows `Narrow` after the mode names, and:
+
+- Only the accessible part is shown. Line numbers count from its first line.
+- Motion stops at its edges, including <kbd>M-&lt;</kbd> / <kbd>M-&gt;</kbd> (`beginning-of-buffer` / `end-of-buffer`).
+- Isearch, `/` search, query-replace and occur only find matches inside it.
+- Edits can't reach outside it. Deleting past either edge is refused with "Beginning of buffer" or "End of buffer". Text typed at the end extends the narrowing, and the edges move with your edits, including undo.
+- Saving still writes the whole file. A formatter that rewrites the whole buffer keeps the narrowing around the same text.
+
+From Scheme, `(narrow-to-region start end)` narrows to explicit byte offsets. `(point-min)` and `(point-max)` return the accessible range, `(buffer-narrowed?)` reports whether the buffer is narrowed, and `(buffer-size)` is always the whole buffer's length. As in Emacs, offsets stay absolute while narrowed. To rewrite a whole buffer, replace `0` to `(buffer-size)`, not `(point-max)`.
+
+In a grid buffer, <kbd>C-x n n</kbd> and <kbd>C-x n w</kbd> keep their grid meaning (`grid-narrow-to-selection` / `grid-widen`; see [Grid](grid.md)).
+
 ## Comment toggling
 
 <kbd>M-;</kbd> (`comment-dwim`) toggles a line comment on the current line (or region). The comment prefix is a buffer-local string set per mode (`comment-string`), defaulting to `// `; modes like `steel-mode` set their own.

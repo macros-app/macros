@@ -44,6 +44,8 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("set-mark", SetMark),
         ("exchange-point-and-mark", ExchangePointAndMark),
         ("mark-whole-buffer", MarkWholeBuffer),
+        ("narrow-to-defun", NarrowToDefun),
+        ("widen", Widen),
         ("newline", Newline),
         ("open-line", OpenLine),
         ("indent-for-tab-command", IndentForTab),
