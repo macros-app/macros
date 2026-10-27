@@ -88,6 +88,7 @@ mod remote;
 mod remote_tests;
 #[cfg(test)]
 mod save_tests;
+mod server;
 mod session;
 mod special_select;
 #[cfg(test)]

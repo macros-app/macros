@@ -220,6 +220,7 @@ const OPTIONS: &[OptionSpec] = &[
     flag("mcp-server", false),
     int("mcp-server-port", 7811, Some(1.0), Some(65535.0)),
     text("mcp-server-token", ""),
+    flag("server", true),
 ];
 
 /// `a == b`, usable in a `const` context.
@@ -769,6 +770,13 @@ impl Settings {
         Some(self.str_of(const { spec("mcp-server-token") }).trim()).filter(|t| !t.is_empty())
     }
 
+    /// The edit server (src/server.rs) that `macros --client` hands files to.
+    /// ON by default: it only listens on a socket private to the user, and
+    /// without it every `macros --client` would start a second editor.
+    pub fn server(&self) -> bool {
+        self.bool_of(const { spec("server") })
+    }
+
     /// Bevel edge widths (px) per side, default 1 (minimum 0 enforced on set).
     pub fn helm_bevel_top(&self) -> f32 {
         self.f32_of(const { spec("helm-bevel-top") })
@@ -832,6 +840,7 @@ mod tests {
         assert!(!s.mcp_server());
         assert_eq!(s.mcp_server_port(), 7811);
         assert_eq!(s.mcp_server_token(), None);
+        assert!(s.server());
         assert_eq!(s.helm_bevel_top(), 1.0);
         assert_eq!(s.helm_bevel_right(), 1.0);
         assert_eq!(s.helm_bevel_bottom(), 1.0);

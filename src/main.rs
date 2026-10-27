@@ -33,6 +33,7 @@ mod runtime;
 mod save;
 mod script;
 mod secure_input;
+mod server;
 mod settings;
 mod sexp;
 mod spell;
@@ -230,6 +231,12 @@ fn open_workspace_window(cx: &mut App, run_update_check: bool) -> WindowHandle<W
                 // the very first key the user can press is already modal.
                 workspace.update(cx, |w, cx| w.mark_config_loaded(cx)).ok();
 
+                // The edit server (`macros --client`), once per process: the
+                // user's init.scm has had its say on the `server` option.
+                if run_update_check {
+                    workspace.update(cx, |w, cx| w.start_edit_server(cx)).ok();
+                }
+
                 // Surface the dyld-hijack tripwire in the echo area too —
                 // stderr is invisible for Finder/dock launches, and this
                 // failure mode otherwise presents as a random paint crash.
@@ -314,6 +321,12 @@ fn main() {
         }
     }
 
+    // `macros --client FILE…` (emacsclient): hand the files to the running
+    // editor's edit server and exit, before any of the GUI startup below.
+    if std::env::args().nth(1).as_deref() == Some("--client") {
+        std::process::exit(server::run_client(std::env::args().skip(2).collect()));
+    }
+
     // Recover the login shell's PATH before anything else — GUI launches on
     // macOS/Linux don't inherit it, which otherwise hides LSP servers and other
     // tools from every subprocess we spawn. Must run before any threads start.
@@ -339,6 +352,11 @@ fn main() {
     // they're forwarded into the app through a channel (see src/launch.rs).
     launch::queue(launch::args());
     let (open_tx, mut open_rx) = futures::channel::mpsc::unbounded::<Vec<PathBuf>>();
+    // Edit-server requests (`macros --client`), from the server's threads.
+    let (client_tx, mut client_rx) = futures::channel::mpsc::unbounded::<server::Incoming>();
+    server::set_dispatch(Arc::new(move |incoming| {
+        client_tx.unbounded_send(incoming).ok();
+    }));
 
     // gpui-ce splits platform construction into gpui_platform (Application::new
     // no longer exists); `application()` picks the OS backend, and the
@@ -441,9 +459,35 @@ fn main() {
             }
         })
         .detach();
+        let client_anchor = cx.new(|_| OpenFilesAnchor).downgrade();
+        cx.spawn(async move |cx| {
+            while let Some(incoming) = client_rx.next().await {
+                client_anchor
+                    .update(cx, |_, cx| serve_client(incoming, cx))
+                    .ok();
+            }
+        })
+        .detach();
 
         cx.activate(true);
     });
+}
+
+/// Hand an edit-server request to the active Macros window (as for
+/// [`open_paths`]) and bring it forward.
+fn serve_client(incoming: server::Incoming, cx: &mut App) {
+    let window = cx
+        .active_window()
+        .and_then(|w| w.downcast::<Workspace>())
+        .or_else(|| cx.windows().iter().find_map(|w| w.downcast::<Workspace>()))
+        .unwrap_or_else(|| open_workspace_window(cx, false));
+    window
+        .update(cx, |workspace, window, cx| {
+            workspace.serve_client(incoming, cx);
+            window.activate_window();
+        })
+        .ok();
+    cx.activate(true);
 }
 
 /// Open `paths` in the active Macros window — the first one when none is

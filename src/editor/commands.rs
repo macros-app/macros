@@ -558,6 +558,7 @@ impl Editor {
             OpenFileOtherWindow(path) => self.open_file_other_window(path, cx),
             KillBuffer => self.kill_buffer(cx),
             McpServerInfo => self.show_mcp_server_info(cx),
+            ServerEdit => self.server_edit(cx),
             KillBufferAndWindow => self.kill_buffer_and_window(cx),
             Quit => self.quit(cx),
             SetExtension(ext, language) => {
@@ -1294,6 +1295,8 @@ impl Editor {
                 let touched_auto_revert = key == "auto-revert";
                 // The mcp-server* options start/stop/restart the MCP server.
                 let touched_mcp = key.starts_with("mcp-server");
+                // `server` starts/stops the edit server (src/server.rs).
+                let touched_server = key == "server";
                 cx.update_global::<crate::settings::Settings, _>(|settings, _| {
                     settings.set(key, value);
                 });
@@ -1304,6 +1307,9 @@ impl Editor {
                 }
                 if touched_mcp {
                     self.reconcile_mcp_server(cx);
+                }
+                if touched_server {
+                    self.reconcile_server(true, cx);
                 }
                 cx.notify();
             }

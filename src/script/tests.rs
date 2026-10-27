@@ -1442,6 +1442,162 @@ mod engine_tests {
         );
     }
 
+    /// editing-extras.scm / help-extras.scm: sexp and defun motion outside
+    /// Lisp, the whitespace and line utilities, counts, dabbrev, insert-char
+    /// and the describe-variable / describe-mode help buffers.
+    #[test]
+    fn emacs_editing_extras_commands() {
+        let (engine, _rx) = ScriptEngine::new();
+        load_with_deps(&engine, "editing-extras");
+        load_with_deps(&engine, "help-extras");
+        let set_in = |text: &str, point: usize, language: &str| {
+            engine.set_snapshot(EditorSnapshot {
+                text: Rope::from_str(text),
+                point,
+                language: language.into(),
+                ..Default::default()
+            });
+        };
+        let set = |text: &str, point: usize| set_in(text, point, "");
+        let num = |src: &str| {
+            let v = engine.eval(src).unwrap().value;
+            v.as_deref()
+                .and_then(|v| v.parse::<isize>().ok())
+                .unwrap_or_else(|| panic!("{src} → {v:?}"))
+        };
+        let run = |src: &str| format!("{:?}", engine.eval(src).unwrap().commands);
+        let replaced = |cmds: &str, text: &str| {
+            assert!(
+                cmds.contains(&format!("text: {text:?}")),
+                "expected a replacement with {text:?}: {cmds}"
+            )
+        };
+
+        // Sexps outside Lisp: `;` is not a comment, `'c'` is a char literal,
+        // punctuation is skipped, brackets balance.
+        set("foo(a, \")\"); bar 'x' baz", 0);
+        assert_eq!(num("(sexp-forward-pos 0)"), 3);
+        assert_eq!(num("(sexp-forward-pos 3)"), 11);
+        assert_eq!(num("(sexp-forward-pos 11)"), 16);
+        assert_eq!(num("(sexp-forward-pos 16)"), 20);
+        assert_eq!(num("(sexp-backward-pos 11)"), 3);
+        // In Lisp `;` starts a comment.
+        set_in("(a ;)\n b) c", 0, "scheme");
+        assert_eq!(num("(sexp-forward-pos 0)"), 9);
+
+        // C-M-t swaps the sexps around point.
+        set("a [b c] d", 7);
+        replaced(&run("(transpose-sexps)"), "d [b c]");
+        // C-M-SPC marks the next sexp, point staying put.
+        set("(a b) c", 0);
+        assert!(run("(mark-sexp)").contains("SetRegion { start: 5, end: 0 }"));
+
+        // C-M-a / C-M-e: Lisp defuns are the top-level forms…
+        set_in("(define x 1)\n\n(define (f) 2)\n", 20, "scheme");
+        assert!(run("(beginning-of-defun)").contains("GotoChar(14)"));
+        assert!(run("(end-of-defun)").contains("GotoChar(29)"));
+        // …and without a syntax tree, top-level `{…}` blocks from their line.
+        set("fn a() {\n}\nfn b() {\n  x\n}\n", 22);
+        assert!(run("(beginning-of-defun)").contains("GotoChar(11)"));
+        assert!(run("(mark-defun)").contains("SetRegion { start: 26, end: 11 }"));
+
+        // With a syntax tree: function nodes are the defuns, and the tree's
+        // strings and comments hide their brackets from sexp motion.
+        let src = "fn a() {}\n\nfn b() {\n    let s = \"}\"; // {\n}\n";
+        let rope = Rope::from_str(src);
+        let mut hl = crate::highlight::Highlighter::for_language("rust").expect("rust grammar");
+        hl.set_text(&rope);
+        let body = src.find("() {\n").unwrap() + 3;
+        engine.set_snapshot(EditorSnapshot {
+            text: rope,
+            point: body + 4,
+            language: "rust".into(),
+            tree: hl.tree().cloned(),
+            ..Default::default()
+        });
+        assert_eq!(
+            num(&format!("(sexp-forward-pos {body})")),
+            src.len() as isize - 1
+        );
+        assert!(run("(beginning-of-defun)").contains("GotoChar(11)"));
+        assert!(run("(end-of-defun)").contains(&format!("GotoChar({})", src.len())));
+
+        // M-\ deletes the blanks around point.
+        set("a  \t b", 3);
+        assert!(run("(delete-horizontal-space)").contains("start: 1, end: 5"));
+        // C-S-backspace kills the line and its newline.
+        set("aa\nbb\ncc", 4);
+        assert!(run("(kill-whole-line)").contains("KillRegionBetween { start: 3, end: 6 }"));
+
+        // C-x TAB with a count shifts the region's non-blank lines at once.
+        engine.set_snapshot(EditorSnapshot {
+            text: Rope::from_str("a\n\n  b\nc\n"),
+            region: Some((0, 7)),
+            prefix_count: 2,
+            ..Default::default()
+        });
+        replaced(&run("(indent-rigidly)"), "  a\n\n    b");
+
+        // M-= / count-words.
+        set("hello world\nfoo\n", 0);
+        assert!(
+            run("(count-words-region)").contains("Buffer has 2 lines, 3 words, and 16 characters.")
+        );
+        // C-x =.
+        set("abc", 1);
+        assert!(
+            run("(what-cursor-position)")
+                .contains("Char: b (98, #o142, #x62, U+0062) point=2 of 4 (33%) column=1"),
+        );
+
+        // Trailing whitespace, and the blank lines at the end of the buffer.
+        set("a  \nb\t\n\n\n", 0);
+        replaced(&run("(delete-trailing-whitespace)"), "a\nb\n");
+        // flush-lines / keep-lines from point; delete-duplicate-lines.
+        set("apple\nbanana\ncherry\n", 0);
+        replaced(&run("(flush-lines-finish \"an\")"), "apple\ncherry\n");
+        replaced(&run("(keep-lines-finish \"AN\")"), ""); // upper case: case-sensitive
+        replaced(&run("(keep-lines-finish \"an\")"), "banana\n");
+        set("a\nb\na\nc\nb\n", 0);
+        replaced(&run("(delete-duplicate-lines)"), "a\nb\nc\n");
+        // align-regexp pads before the first match on each line.
+        set("a = 1\nbbb = 2\nnone\n", 0);
+        replaced(
+            &run("(align-regexp-finish \"=\")"),
+            "a   = 1\nbbb = 2\nnone",
+        );
+
+        // M-/ expands to the nearest match, and cycles on repeat.
+        set("foobar fooqux\nfo", 16);
+        let cmds = run("(dabbrev-expand)");
+        assert!(cmds.contains("start: 14, end: 16"), "{cmds}");
+        replaced(&cmds, "fooqux");
+        set("foobar fooqux\nfooqux", 20);
+        replaced(&run("(dabbrev-expand)"), "foobar");
+        set("foobar fooqux\nfoobar", 20);
+        replaced(&run("(dabbrev-expand)"), "fo");
+
+        // C-x 8 RET: by hex code point or by name.
+        assert!(run("(insert-char-by-name \"U+00E9\")").contains("Insert(\"é\")"));
+        assert!(run("(insert-char-by-name \"EM DASH\")").contains("Insert(\"—\")"));
+        let cands = engine
+            .eval("(insert-char-candidates \"1f600\")")
+            .unwrap()
+            .value;
+        assert!(cands.is_some_and(|c| c.contains("U+1F600")));
+
+        // C-h v / C-h m render help buffers.
+        let cmds = run("(describe-variable-show \"*fill-column*\")");
+        assert!(cmds.contains("Value: 80"), "{cmds}");
+        set_in("x", 0, "rust");
+        let cmds = run("(describe-mode)");
+        assert!(
+            cmds.contains("Major mode: fundamental  (language: rust)"),
+            "{cmds}"
+        );
+        assert!(cmds.contains("Enabled minor modes:"), "{cmds}");
+    }
+
     /// f/t char find and * word search: the scanner runs on the snapshot; the
     /// arming side goes through the `read-char` capture command.
     #[test]

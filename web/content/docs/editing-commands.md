@@ -1,6 +1,6 @@
 ---
 title: Editing commands
-description: Region and kill-ring editing, search and replace, occur, sorting, and case commands.
+description: Region and kill-ring editing, sexp and defun motion, whitespace and line utilities, search and replace, occur, sorting, dabbrev, and case commands.
 ---
 
 # Editing commands
@@ -43,12 +43,72 @@ The same keys paste into a **minibuffer** prompt: <kbd>cmd-v</kbd> inserts the c
 | Key | Command |
 | --- | --- |
 | <kbd>C-k</kbd> | `kill-line` |
+| <kbd>C-S-Backspace</kbd> | `kill-whole-line` — the whole line and its newline, wherever point is |
 | <kbd>M-d</kbd> / <kbd>M-Backspace</kbd> | `kill-word` / `backward-kill-word` |
 | <kbd>M-z</kbd> | `zap-to-char` |
 | <kbd>C-t</kbd> | `transpose-chars` |
 | <kbd>C-x C-t</kbd> | `transpose-lines` |
 | <kbd>M-^</kbd> | `join-line` |
 | <kbd>C-o</kbd> | `open-line` |
+
+## Sexps and defuns
+
+Emacs's balanced-expression motion works in every buffer, not just Lisp. Lisp buffers read as Lisp (`;` comments, `'` quote prefixes, `#\(` char literals). Every other language reads as bracket-balanced code: a sexp is a `(…)`, `[…]` or `{…}` group, an identifier or number, or a string literal, and operators and other punctuation are skipped. Strings and comments come from the buffer's tree-sitter tree, so a bracket inside `"…"` or `// …` never unbalances anything. Without a tree, `"…"`, `'c'`, `//` and `/* */` are recognised.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-M-f</kbd> / <kbd>C-M-b</kbd> | `forward-sexp` / `backward-sexp` | Move over a sexp |
+| <kbd>C-M-n</kbd> / <kbd>C-M-p</kbd> | `forward-list` / `backward-list` | Move over the next / previous bracketed group, skipping atoms |
+| <kbd>C-M-u</kbd> | `backward-up-list` | Move out to the start of the enclosing group |
+| <kbd>C-M-d</kbd> | `down-list` | Move into the next group |
+| <kbd>C-M-k</kbd> | `kill-sexp` | Kill the sexp after point |
+| <kbd>C-M-t</kbd> | `transpose-sexps` | Swap the sexps before and after point |
+| <kbd>C-M-SPC</kbd> / <kbd>C-M-@</kbd> | `mark-sexp` | Mark the next sexp; repeat to extend the region by another |
+| <kbd>C-M-a</kbd> / <kbd>C-M-e</kbd> | `beginning-of-defun` / `end-of-defun` | To the start of this (or the previous) defun / the end of this (or the next) one |
+| <kbd>C-M-h</kbd> | `mark-defun` | Mark the defun around point |
+
+`up-list` (out past the closing bracket) is on <kbd>M-x</kbd>.
+
+A **defun** is a top-level form in Lisp. In other languages it is a named function or method node from the tree-sitter tree. Lambdas and closures don't count, so <kbd>C-M-a</kbd> finds the enclosing named function. In a buffer with no tree, a defun is a top-level `{…}` block, starting at the line that opens it. To add node kinds for a language, extend the list in your `init.scm`:
+
+```scheme
+(set! *defun-node-kinds* (cons "rule_definition" *defun-node-kinds*))
+```
+
+The paredit edits (slurp, barf, wrap, raise, splice) remain Lisp-only. See [Structural editing](/docs/scripting#structural-editing).
+
+## Whitespace, lines and alignment
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>M-SPC</kbd> | `just-one-space` | Collapse the spaces around point to one |
+| <kbd>M-\\</kbd> | `delete-horizontal-space` | Delete all spaces and tabs around point |
+| <kbd>C-x C-o</kbd> | `delete-blank-lines` | Collapse blank lines around point |
+| <kbd>C-x TAB</kbd> | `indent-rigidly` | Shift the region's lines (or the current line) left or right |
+| <kbd>M-x</kbd> | `delete-trailing-whitespace` | Strip trailing blanks in the region, or in the whole buffer along with blank lines at its end |
+| <kbd>M-x</kbd> | `align-regexp` | Line up the first match of a regexp on each line of the region (or paragraph) |
+| <kbd>M-x</kbd> | `keep-lines` / `flush-lines` | Keep / delete the lines matching a regexp |
+| <kbd>M-x</kbd> | `delete-duplicate-lines` | Delete every repeat of an earlier line, keeping the first |
+
+After <kbd>C-x TAB</kbd>, <kbd>←</kbd> / <kbd>→</kbd> move the lines one column left or right, and <kbd>S-←</kbd> / <kbd>S-→</kbd> move them four. Any other key stops. With a prefix count it shifts by that many columns at once (<kbd>C-u 8 C-x TAB</kbd>). Blank lines are left alone.
+
+`keep-lines` and `flush-lines` act on the region, or on the lines from point to the end of the buffer. As with search, an all-lower-case regexp ignores case. `delete-duplicate-lines` acts on the region, or on the whole buffer. `align-regexp` adds spaces before each match so all the matches start one column past the longest text before them. For example, aligning `=` turns `a = 1` / `bbb = 2` into `a   = 1` / `bbb = 2`.
+
+## Counting and position
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>M-=</kbd> | `count-words-region` | Lines, words and characters in the region (the buffer without one) |
+| <kbd>M-x</kbd> | `count-words` | The same for the whole buffer |
+| <kbd>C-x =</kbd> | `what-cursor-position` | The character after point (decimal, octal, hex, `U+`), point, percentage, and column |
+
+## Dynamic abbreviations
+
+<kbd>M-/</kbd> (`dabbrev-expand`) completes the word before point from words already in your buffers. Candidates come from this buffer first, nearest match before point first and then after it, and then from the other open file buffers (their saved text). Press <kbd>M-/</kbd> again straight away to replace the expansion with the next candidate. After the last one, the text you typed comes back.
+
+## Inserting characters
+
+<kbd>C-x 8 RET</kbd> (`insert-char`) inserts any character. Type a hex code point (`e9`, `U+1F600`, `#x2014`) and press <kbd>RET</kbd>, or search a built-in list of common characters by name: dashes, quotes, arrows, math symbols, Greek letters, currency signs. The build has no full Unicode name table, so names outside that list need their code point.
 
 ## Search
 
@@ -192,7 +252,7 @@ Grow the region outward along tree-sitter syntax boundaries — word, then expre
 | Key | Command | Action |
 | --- | --- | --- |
 | <kbd>C-=</kbd> | `er/expand` | Widen the selection to the enclosing node |
-| <kbd>M-=</kbd> | `er/contract` | Step back to the previous, narrower selection |
+| <kbd>C--</kbd> | `er/contract` | Step back to the previous, narrower selection |
 
 In evil visual state, <kbd>+</kbd> and <kbd>-</kbd> do the same.
 

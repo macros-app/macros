@@ -29,6 +29,12 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-M-v</kbd> / <kbd>C-M-S-v</kbd> | `scroll-other-window` / `scroll-other-window-down` |
 | <kbd>C-l</kbd> | `recenter` |
 | <kbd>M-g g</kbd> | `goto-line-cmd` |
+| <kbd>C-M-f</kbd> / <kbd>C-M-b</kbd> | `forward-sexp` / `backward-sexp` |
+| <kbd>C-M-n</kbd> / <kbd>C-M-p</kbd> | `forward-list` / `backward-list` |
+| <kbd>C-M-u</kbd> / <kbd>C-M-d</kbd> | `backward-up-list` / `down-list` |
+| <kbd>C-M-a</kbd> / <kbd>C-M-e</kbd> | `beginning-of-defun` / `end-of-defun` |
+
+Sexp and defun motion works in every language, not just Lisp; see [Sexps and defuns](/docs/editing-commands#sexps-and-defuns).
 
 ## Editing, kill & yank
 
@@ -36,6 +42,8 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | --- | --- |
 | <kbd>C-d</kbd> | `delete-char` |
 | <kbd>C-k</kbd> | `kill-line` |
+| <kbd>C-S-Backspace</kbd> | `kill-whole-line` |
+| <kbd>C-M-k</kbd> | `kill-sexp` |
 | <kbd>M-d</kbd> / <kbd>M-Backspace</kbd> | `kill-word` / `backward-kill-word` |
 | <kbd>C-Space</kbd> | `set-mark` (also pushes the mark ring) |
 | <kbd>C-u C-Space</kbd> | `pop-to-mark-command` (further <kbd>C-Space</kbd> keeps popping) |
@@ -52,9 +60,20 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-x z</kbd> | `repeat` (then <kbd>z</kbd> to repeat again) |
 | <kbd>C-x C-+</kbd> / <kbd>C-x C--</kbd> / <kbd>C-x C-0</kbd> | `text-scale-increase` / `-decrease` / `-reset` (then <kbd>+</kbd> / <kbd>-</kbd> / <kbd>0</kbd>) |
 | <kbd>cmd-=</kbd> / <kbd>cmd--</kbd> / <kbd>cmd-0</kbd> | `global-text-scale-increase` / `-decrease` / `-reset` |
+| <kbd>C-M-t</kbd> | `transpose-sexps` |
+| <kbd>C-M-SPC</kbd> / <kbd>C-M-@</kbd> | `mark-sexp` |
+| <kbd>C-M-h</kbd> | `mark-defun` |
+| <kbd>M-\\</kbd> | `delete-horizontal-space` |
+| <kbd>C-x TAB</kbd> | `indent-rigidly` (then <kbd>←</kbd> / <kbd>→</kbd>) |
+| <kbd>M-/</kbd> | `dabbrev-expand` (repeat to cycle) |
+| <kbd>C-x 8 RET</kbd> | `insert-char` (by name or hex code point) |
+| <kbd>M-=</kbd> | `count-words-region` |
+| <kbd>C-x =</kbd> | `what-cursor-position` |
 | <kbd>C-x n n</kbd> / <kbd>C-x n d</kbd> | `narrow-to-region` / `narrow-to-defun` |
 | <kbd>C-x n s</kbd> | `org-narrow-to-subtree` (Org) |
 | <kbd>C-x n w</kbd> | `widen` |
+
+More editing commands without a key (`delete-trailing-whitespace`, `align-regexp`, `keep-lines`, `flush-lines`, `delete-duplicate-lines`) are on <kbd>M-x</kbd>; see [Editing commands](/docs/editing-commands).
 
 The system clipboard always works, including inside modal states: <kbd>cmd-c</kbd> / <kbd>cmd-x</kbd> / <kbd>cmd-v</kbd> (`clipboard-copy` / `-cut` / `-paste`).
 
