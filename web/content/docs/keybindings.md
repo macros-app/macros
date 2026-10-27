@@ -71,7 +71,12 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | <kbd>C-x o</kbd> | `other-window` |
 | <kbd>C-x 0</kbd> / <kbd>C-x 1</kbd> | `delete-window` / `delete-other-windows` |
 | <kbd>C-x ^</kbd> / <kbd>C-x }</kbd> / <kbd>C-x {</kbd> | resize windows |
+| <kbd>C-c left</kbd> / <kbd>C-c right</kbd> | `winner-undo` / `winner-redo` (window layout history; evil: <kbd>C-w u</kbd> / <kbd>C-w U</kbd>) |
 | <kbd>C-x C-c</kbd> | `quit` |
+
+**winner-mode** records every change to the window layout — splits, sizes and which buffer each window shows. <kbd>C-c left</kbd> goes back to the previous layout and keeps going back on repeat; <kbd>C-c right</kbd> goes forward again. It's on by default; `(winner-mode #f)` in `init.scm` (the same as `(set-option "winner-mode" #f)`) turns it off.
+
+In a [Dired](/docs/dired) listing, <kbd>C-x C-q</kbd> makes the file names editable (wdired); <kbd>C-c C-c</kbd> renames, <kbd>C-c C-k</kbd> aborts.
 
 ## Search, command, eval
 

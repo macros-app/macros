@@ -196,6 +196,8 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
         ("evil-window-top-left", TopLeftWindow),
         ("evil-window-bottom-right", BottomRightWindow),
         ("balance-windows", BalanceWindows),
+        ("winner-undo", WinnerUndo),
+        ("winner-redo", WinnerRedo),
         ("evil-window-set-height", MaximizeWindowHeight),
         ("evil-window-set-width", MaximizeWindowWidth),
         ("evil-window-move-far-left", MoveWindowFarLeft),

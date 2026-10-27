@@ -180,7 +180,7 @@ impl Editor {
     }
 
     /// The live window tree as a [`LayoutSpec`].
-    fn session_layout(&self, layout: &WindowLayout) -> LayoutSpec {
+    pub(super) fn session_layout(&self, layout: &WindowLayout) -> LayoutSpec {
         match layout {
             WindowLayout::Leaf(id) => {
                 let buffer = if *id == self.selected_pane {
@@ -407,7 +407,7 @@ impl Editor {
     /// then by name, else show the current buffer. The selected leaf's buffer
     /// is activated INCIDENTALLY (buffer-switch-hook only): a restore must not
     /// re-point the perspectives title bar on its own.
-    fn set_window_layout(&mut self, spec: LayoutSpec, cx: &mut Context<Self>) {
+    pub(super) fn set_window_layout(&mut self, spec: LayoutSpec, cx: &mut Context<Self>) {
         self.save_selected_pane();
         let mut panes = Vec::new();
         let mut selected = None;
