@@ -20,6 +20,9 @@ Under the hood `M-x` is `helm-execute-command`, routed through the [Helm](/docs/
 | <kbd>C-h t</kbd> | `help-with-tutorial` | The interactive [tutorial](/docs/tutorial) |
 | <kbd>C-h k</kbd> | `describe-key` | What a key is bound to — press the key after |
 | <kbd>C-h f</kbd> | `describe-function` | A command's documentation |
+| <kbd>C-h v</kbd> | `describe-variable` | A variable's value and documentation |
+| <kbd>C-h m</kbd> | `describe-mode` | The buffer's major mode, enabled minor modes, and their bindings |
+| <kbd>C-h B</kbd> | `describe-bindings` | Every binding in effect, keymap by keymap |
 | <kbd>C-h a</kbd> | `apropos` | Commands whose name or docs match a query (into a buffer) |
 | <kbd>C-h C-a</kbd> | `helm-apropos` | Live search over docs; jump to the implementation |
 | <kbd>C-h b</kbd> | `which-key-top` | All active top-level keybindings |
@@ -33,6 +36,25 @@ Press <kbd>C-h k</kbd>, then the chord you're curious about. Macros tells you wh
 ### describe-function & apropos
 
 <kbd>C-h f</kbd> prompts for a command name and shows its documentation — the first lines of the source comment above its definition. <kbd>C-h a</kbd> searches **across** those docs, so you can find a command even when you don't remember its exact name. Try `C-h a` and type `region`, or `buffer`, or `git`. It dumps the matches into a read-only `*apropos*` buffer.
+
+### describe-variable
+
+<kbd>C-h v</kbd> completes over the Scheme globals written `*like-this*`, which is the convention every bundled file follows, plus the editor [options](/docs/configuration). You can also type any other global by name. It shows the variable's current value, its documentation, and how to set it. For an option it shows the current value and the `set-option` call that changes it.
+
+### describe-mode
+
+<kbd>C-h m</kbd> opens a `*help*` buffer showing:
+
+- the buffer's major mode and highlighting language
+- the bindings the major mode's own keymap adds
+- the minor modes that are on: `abbrev-mode`, `spell-mode`, and `evil-mode` or `helix-mode`
+- the modal keymap's bindings, when evil or helix is on
+
+Packages and your config can add their own minor modes to the list with a predicate:
+
+```scheme
+(register-minor-mode "my-mode" (lambda () *my-mode-on*))
+```
 
 ### helm-apropos — search and jump
 

@@ -463,6 +463,7 @@ impl Editor {
         contents: String,
         cx: &mut Context<Self>,
     ) {
+        let goto = super::server::take_server_goto(&path);
         if self.switch_to_visiting(&file_identity(&path), cx) {
             return;
         }
@@ -473,6 +474,9 @@ impl Editor {
         self.active.read_only = read_only;
         self.parse_full();
         self.move_to(0, cx);
+        if let Some(goto) = goto {
+            self.goto_line_column(goto, cx); // `macros --client +LINE:COL`
+        }
         self.run_mode_hooks_once(cx);
         self.echo(format!("Visiting {name}"), cx);
         self.warn_if_locked(&path, cx);
@@ -1650,6 +1654,7 @@ impl Editor {
         // path swaps buffers without `snapshot_active`'s flush).
         let killed_uri = document_uri(&self.active);
         self.lsp_close_document(&killed_uri);
+        super::server::server_buffer_killed(self.active.path.as_deref());
         let replacement = self
             .inactive
             .pop()
@@ -1708,6 +1713,7 @@ impl Editor {
             self.kill_active_buffer(cx);
         } else if let Some(idx) = self.inactive_index(name) {
             let doc = self.inactive.remove(idx);
+            super::server::server_buffer_killed(doc.path.as_deref());
             self.end_redirect_to(name);
             self.lsp_close_document(&document_uri(&doc));
             // Non-selected windows that showed it switch to the most recent

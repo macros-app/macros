@@ -79,6 +79,9 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 ;; MCP server for AI-assisted debugging — off by default; see MCP server
 (set-option "mcp-server"      #f)
 (set-option "mcp-server-port" 7811)
+
+;; Edit server for `macros --client` / $EDITOR — on by default; see Edit server
+(set-option "server" #t)
 ```
 
 ### Reading an option

@@ -40,6 +40,23 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             }
         },
     );
+    // `(regexp-all-matches regex s)` → every non-empty match of `regex` in the
+    // string `s`, in order (`()` for an invalid regex). dabbrev's word scan
+    // over other buffers' text.
+    reg.register_fn(
+        "regexp-all-matches",
+        move |pattern: String, s: String| -> Vec<String> {
+            regex(&pattern)
+                .ok()
+                .map(|re| {
+                    re.find_iter(&s)
+                        .filter(|m| !m.as_str().is_empty())
+                        .map(|m| m.as_str().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
+    );
     {
         // `(buffer-search-all regex start end)` → every match of `regex` in the
         // active buffer whose bytes lie within `[start, end)`, as a list of

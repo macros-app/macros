@@ -1252,6 +1252,51 @@ pub fn tree_ranges_of_kinds(tree: &Tree, kinds: &[String]) -> Vec<(usize, usize)
     out
 }
 
+/// Every string literal and comment in the tree, outermost only and in
+/// document order — the spans the generic sexp reader treats as one unit, so
+/// a bracket inside `"(…"` or `// )` never unbalances `forward-sexp`.
+pub fn tree_literal_spans(tree: &Tree) -> Vec<crate::sexp::Literal> {
+    fn literal(kind: &str) -> Option<bool> {
+        if kind.contains("comment") {
+            Some(true)
+        } else if kind.contains("string")
+            || kind.ends_with("char_literal")
+            || kind.ends_with("character_literal")
+            || kind == "rune_literal"
+            || kind == "regex"
+            || kind == "regex_literal"
+        {
+            Some(false)
+        } else {
+            None
+        }
+    }
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    'walk: loop {
+        let n = cursor.node();
+        let lit = literal(n.kind()).filter(|_| n.start_byte() < n.end_byte());
+        if let Some(comment) = lit {
+            out.push(crate::sexp::Literal {
+                start: n.start_byte(),
+                end: n.end_byte(),
+                comment,
+            });
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                continue 'walk;
+            }
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    out
+}
+
 fn parse(parser: &mut Parser, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tree> {
     let mut callback = |byte: usize, _: Point| -> &[u8] {
         if byte >= rope.len_bytes() {
