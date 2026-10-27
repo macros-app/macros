@@ -132,6 +132,13 @@ pub fn write_sequenced(
     if *last > ticket.generation {
         return Ok(SaveOutcome::Superseded);
     }
+    // A remote file is checked for external changes on its host, in the same
+    // script that writes it (see `crate::remote`), and keeps its own baseline.
+    if let Some(remote) = crate::remote::parse_path(path) {
+        crate::remote::write_file(&remote, contents, true)?;
+        *last = ticket.generation;
+        return Ok(SaveOutcome::Written);
+    }
     backup_once(&ticket.key, ticket.backup_dir.as_deref());
     atomic_write(path, contents)?;
     *last = ticket.generation;
@@ -147,6 +154,9 @@ pub fn write_now(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// Replace `path`'s contents atomically (temp file + fsync + rename), writing
 /// through symlinks and keeping the original's permissions.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if let Some(remote) = crate::remote::parse_path(path) {
+        return crate::remote::write_file(&remote, contents, false);
+    }
     let target = write_target(path);
     let existing = fs::metadata(&target).ok();
     if let Some(meta) = &existing {
@@ -348,6 +358,13 @@ pub fn note_synced(path: &Path, stamp: Option<DiskStamp>, contents: &[u8]) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(write_target(path), entry);
+}
+
+/// The user chose to save over an external change to `path`: its next buffer
+/// save must not be refused for it. (Local saves are checked up front with
+/// [`changed_on_disk`]; a remote save checks on the host as it writes.)
+pub fn allow_overwrite(path: &Path) {
+    crate::remote::forget_baseline(path);
 }
 
 /// Whether `path` was changed by something else since a buffer last read or

@@ -34,6 +34,14 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             .unwrap_or_default()
     });
     reg.register_fn("list-directory", |path: String| -> Vec<String> {
+        // `/ssh:host:/dir` lists over ssh (cached briefly, so completion
+        // doesn't relist on every keystroke); a failure is echoed.
+        if let Some(remote) = crate::remote::parse(&path) {
+            return crate::remote::list_dir(&remote).unwrap_or_else(|err| {
+                report_remote(&err);
+                Vec::new()
+            });
+        }
         let path = crate::util::expand_tilde(&path);
         let mut entries = Vec::new();
         if let Ok(read) = std::fs::read_dir(&path) {
@@ -77,10 +85,16 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // process primitives do: a config path like "~/org/inbox.org" otherwise
     // read as empty or got written to a literal `./~/org/` directory.
     reg.register_fn("file-exists?", |path: String| -> bool {
+        if let Some(remote) = crate::remote::parse(&path) {
+            return remote_kind(&remote).is_some_and(|k| k != crate::remote::Kind::Missing);
+        }
         let path = crate::util::expand_tilde(&path);
         std::path::Path::new(&path).exists()
     });
     reg.register_fn("file-directory?", |path: String| -> bool {
+        if let Some(remote) = crate::remote::parse(&path) {
+            return remote_kind(&remote) == Some(crate::remote::Kind::Dir);
+        }
         let path = crate::util::expand_tilde(&path);
         std::path::Path::new(&path).is_dir()
     });
@@ -89,6 +103,9 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // doesn't exist. Lets dap.scm match an adapter's frame paths (e.g. macOS
     // `/private/tmp/…`) against the buffer that visits `/tmp/…`.
     reg.register_fn("file-truename", |path: String| -> String {
+        if let Some(remote) = crate::remote::parse(&path) {
+            return remote.to_string();
+        }
         let path = crate::util::expand_tilde(&path);
         std::fs::canonicalize(&path)
             .map(|p| p.to_string_lossy().into_owned())
@@ -124,8 +141,8 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // Parent of a path, trailing slash trimmed first so a directory's own
         // parent is returned (Emacs `(file-name-directory (directory-file-name …))`).
         let trimmed = path.trim_end_matches('/');
-        std::path::Path::new(trimmed)
-            .parent()
+        // A remote path keeps its `/ssh:host:` prefix; its root has no parent.
+        crate::remote::parent_of(std::path::Path::new(trimmed))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
@@ -134,6 +151,12 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // wrong for read-modify-write, which would then write "" + its addition
     // over the original — use `read-file-strict` there.
     reg.register_fn("read-file", |path: String| -> String {
+        if let Some(remote) = crate::remote::parse(&path) {
+            return crate::remote::read_file(&remote)
+                .ok()
+                .and_then(|r| String::from_utf8(r.bytes).ok())
+                .unwrap_or_default();
+        }
         let path = crate::util::expand_tilde(&path);
         std::fs::read_to_string(&path).unwrap_or_default()
     });
@@ -143,6 +166,13 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     reg.register_fn(
         "read-file-strict",
         |path: String| -> Result<String, String> {
+            if let Some(remote) = crate::remote::parse(&path) {
+                return match crate::remote::read_file(&remote) {
+                    Ok(read) => String::from_utf8(read.bytes).map_err(|e| format!("{path}: {e}")),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                    Err(e) => Err(e.to_string()),
+                };
+            }
             let path = crate::util::expand_tilde(&path);
             match std::fs::read_to_string(&path) {
                 Ok(text) => Ok(text),
@@ -162,10 +192,11 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         // recentf, saveplace) never takes hold.
         if let Some(parent) = std::path::Path::new(&path).parent()
             && !parent.as_os_str().is_empty()
+            && !crate::remote::is_remote(parent)
         {
             let _ = std::fs::create_dir_all(parent);
         }
-        // Atomic (temp file + rename), so a crash or full disk mid-write
+        // Atomic (remote paths too, over ssh) (temp file + rename), so a crash or full disk mid-write
         // leaves the old file rather than a truncated one — these are the
         // user's org files, bookmarks and desktop state.
         crate::save::atomic_write(std::path::Path::new(&path), text.as_bytes()).is_ok()
@@ -175,6 +206,10 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // `delete-file`; a package managing its own on-disk queue (an outbox, a
     // cache) needs to retract entries, not just append.
     reg.register_fn("delete-file", |path: String| -> bool {
+        if crate::remote::parse(&path).is_some() {
+            return crate::remote::run_program("rm", &["-f".into(), path])
+                .is_ok_and(|(code, ..)| code == 0);
+        }
         let path = crate::util::expand_tilde(&path);
         match std::fs::remove_file(&path) {
             Ok(()) => true,
@@ -201,4 +236,39 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         }
         crate::save::atomic_write(std::path::Path::new(&path), &bytes).is_ok()
     });
+    // `(file-remote? path)` → whether `path` is a `/ssh:host:/…` path (see
+    // src/remote.rs). Lets a package skip local-only work for remote files.
+    reg.register_fn("file-remote?", |path: String| -> bool {
+        crate::remote::parse(&path).is_some()
+    });
+    // `(remote-call-process program args)` → `(exit-code stdout stderr)`, like
+    // `call-process-full`, but run over ssh on the host the `/ssh:` arguments
+    // name (prefixes stripped, every argument quoted). dired's copy / rename /
+    // delete / mkdir use it for remote files. Fails (exit "-1", the reason in
+    // stderr) when the remote arguments span hosts or mix in a local path.
+    reg.register_fn(
+        "remote-call-process",
+        |program: String, StringList(args): StringList| -> Vec<String> {
+            match crate::remote::run_program(&program, &args) {
+                Ok((code, out, err)) => vec![code.to_string(), out, err],
+                Err(err) => vec!["-1".into(), String::new(), err.to_string()],
+            }
+        },
+    );
+}
+
+/// A remote path's kind, `None` (and the reason echoed) when it couldn't be
+/// determined.
+fn remote_kind(remote: &crate::remote::RemotePath) -> Option<crate::remote::Kind> {
+    crate::remote::kind(remote)
+        .map_err(|err| report_remote(&err))
+        .ok()
+}
+
+/// Echo why a remote operation a Scheme primitive ran failed (unless the user
+/// cancelled it with C-g, which says so itself).
+fn report_remote(err: &std::io::Error) {
+    if err.kind() != std::io::ErrorKind::Interrupted {
+        crate::remote::report(err.to_string());
+    }
 }

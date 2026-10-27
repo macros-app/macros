@@ -301,8 +301,15 @@ impl Editor {
     // --- Lock files --------------------------------------------------------
 
     /// This window's id as a lock holder (several windows share a process).
+    /// Entity ids are only unique within one app, and each test builds its
+    /// own app on its own thread, so the UI thread is part of the id: two
+    /// tests' editors must never release each other's locks.
     fn lock_holder(cx: &Context<Self>) -> u64 {
-        cx.entity_id().as_u64()
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current().id().hash(&mut h);
+        cx.entity_id().hash(&mut h);
+        h.finish()
     }
 
     /// Hold a lock on exactly the files this window has unsaved changes to
@@ -320,6 +327,8 @@ impl Editor {
             self.docs()
                 .filter(|d| d.modified)
                 .filter_map(|d| d.path.as_deref())
+                // A remote file's lock would belong on its host.
+                .filter(|p| crate::remote::parse_path(p).is_none())
                 .map(crate::save::write_target)
                 .collect()
         } else {
@@ -343,7 +352,7 @@ impl Editor {
 
     /// On visiting `path`: warn if another live process is editing it.
     pub(super) fn warn_if_locked(&mut self, path: &Path, cx: &mut Context<Self>) {
-        if !crate::filelock::enabled() {
+        if !crate::filelock::enabled() || crate::remote::parse_path(path).is_some() {
             return;
         }
         let path = crate::save::write_target(path);

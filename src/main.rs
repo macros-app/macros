@@ -29,6 +29,7 @@ mod mcp;
 mod mode;
 mod net;
 mod process;
+mod remote;
 mod runtime;
 mod save;
 mod script;

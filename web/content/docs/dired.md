@@ -15,6 +15,8 @@ Dired is a **directory editor**: a buffer that lists a directory's contents and 
 
 You're prompted for a directory; Dired opens a listing where directories keep a trailing `/`.
 
+Dired works on other machines too. Open a `/ssh:host:/dir` path, or press <kbd>C-x d</kbd> in a remote buffer, and the listing, copy, rename, mkdir and delete all run on that host. See [Remote files](/docs/remote-files).
+
 ## Keys
 
 | Key | Command | Action |

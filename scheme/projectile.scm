@@ -206,9 +206,9 @@
 (define-key "fundamental" "ctrl-c p G" 'projectile-grep-buffer)
 
 ;; grep results buffer: occur's view keys (RET/mouse visit, n/p, e / C-c C-p
-;; to edit, q to close) plus g to grep again.
+;; to edit, q to close). Its `g` (grep again) is grep.scm's `grep-again`,
+;; which reruns M-x grep's search or falls back to projectile-grep-buffer.
 (results-bind-view-keys "grep-mode")
-(define-key "grep-mode" "g" 'projectile-grep-buffer)
 
 ;; M-x discoverability for the projectile entry points.
 (register-command 'projectile-find-file)

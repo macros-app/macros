@@ -67,8 +67,11 @@
       target))
 
 ;; Run PROGRAM with ARGS. #t on success; otherwise echo its error and return #f.
+;; With a remote (/ssh:host:…) path among ARGS it runs on that host instead.
 (define (dired-run program args)
-  (let ((r (call-process-full program args "")))
+  (let ((r (if (not (null? (filter file-remote? args)))
+               (remote-call-process program args)
+               (call-process-full program args ""))))
     (if (equal? (car r) "0")
         #t
         (let ((err (trim-end (nth r 2))))
@@ -128,10 +131,11 @@
 (define (dired-visit)
   (let ((p (dired-at-point)))
     (when p (if (ends-with? p "/") (dired-in p) (open-file p)))))
-;; At "/" there is no parent (parent-directory returns ""): stay put.
+;; At a root ("/" or a remote "/ssh:host:/") there is no parent
+;; (parent-directory returns ""): stay put.
 (define (dired-up)
   (let ((parent (parent-directory *dired-dir*)))
-    (dired-in (if (equal? parent "") "/" parent))))
+    (when (not (equal? parent "")) (dired-in parent))))
 (define (dired-refresh) (dired-render))
 
 ;; basename/parent helpers keep a trailing "/", but the editor reports changed

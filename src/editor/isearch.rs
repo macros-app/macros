@@ -166,9 +166,11 @@ impl Editor {
             }
         };
         let text = self.active.buffer.full_text();
+        // Narrowed: only matches wholly inside the accessible range count.
+        let acc = self.accessible();
         let matches: Vec<Range<usize>> = regex
             .find_iter(&text)
-            .filter(|m| m.end() > m.start())
+            .filter(|m| m.end() > m.start() && acc.start <= m.start() && m.end() <= acc.end)
             .map(|m| m.start()..m.end())
             .collect();
         let found = match dir {
