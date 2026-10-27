@@ -41,6 +41,9 @@ mod e2e_tests;
 mod editing_extras;
 #[cfg(test)]
 mod editing_tests;
+mod emacs_input;
+#[cfg(test)]
+mod emacs_input_tests;
 mod evil;
 mod ex;
 mod grammars;
@@ -88,6 +91,7 @@ mod terminal;
 mod undo;
 mod vim;
 
+pub use emacs_input::{EMACS_INPUT_COMMANDS, EmacsInputCmd};
 pub use helm::HelmView;
 use helm::{HelmAction, HelmSession, HelmSource, helm_sources_from_specs, wrap_index};
 use input::UargState;
@@ -621,6 +625,9 @@ pub struct Editor {
     pending_keys: Vec<String>,
     /// Emacs universal-argument (`C-u` / `M-<digit>`) state — see [`UargState`].
     uarg: UargState,
+    /// Mark rings, text scale, overwrite-mode, `C-q`, `C-x z` — see
+    /// [`emacs_input`].
+    emacs: emacs_input::EmacsInputState,
     /// Vim/Helix count prefix being typed in Normal/Visual state (`3` in `3dd`).
     /// Accumulates digits until a binding resolves, which then runs that many
     /// times. Distinct from [`UargState`]: the evil layer swallows plain keys
@@ -1482,6 +1489,7 @@ impl Editor {
             minibuffer_history: MinibufferHistory::default(),
             mb_dynamic: None,
             uarg: UargState::default(),
+            emacs: Default::default(),
             modal_count: None,
             autoscroll: AutoscrollState {
                 active: false,
@@ -2307,6 +2315,7 @@ impl Editor {
             ));
         }
         self.shift_vim_positions(start, old_end, new_text.len());
+        self.emacs_shift_positions(start, old_end, new_text.len());
         // Shift byte-range overlays the same way so they stay aligned until the
         // debounced re-fontify runs — otherwise hidden ranges / faces below the
         // edit point at stale bytes for a frame and visibly flicker (e.g. an Org
@@ -5326,8 +5335,8 @@ impl Render for Editor {
         // Font size / line height are Scheme-configurable via `(set-option ...)`;
         // the custom element inherits them from `window.text_style()`.
         let settings = cx.global::<crate::settings::Settings>();
-        let font_size = settings.font_size();
-        let line_height = settings.line_height();
+        let font_size = settings.font_size() * self.global_text_scale_factor();
+        let line_height = settings.line_height() * self.global_text_scale_factor();
         let font_family = settings.font_family().to_string();
         div()
             .key_context("Editor")
@@ -5442,8 +5451,15 @@ impl Editor {
             return;
         }
 
+        // overwrite-mode: typed text replaces what follows point (and skips
+        // electric-pair, which would insert rather than overwrite).
+        let overwritten = self.overwrite_range(range.clone(), new_text);
+        let overwriting = overwritten != range;
+        let range = overwritten;
+
         // electric-pair-mode: handle a single typed delimiter specially.
         if self.electric_pair
+            && !overwriting
             && new_text.chars().count() == 1
             && self.electric_pair_insert(&range, new_text, cx)
         {

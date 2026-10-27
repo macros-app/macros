@@ -159,6 +159,7 @@ impl Editor {
             Self::key_evil_replace,
             Self::key_read_char,
             Self::key_read_key,
+            Self::key_emacs_input,
             Self::key_evil_capture,
             Self::key_evil_modal,
             Self::key_grid,
@@ -168,6 +169,7 @@ impl Editor {
             Self::key_special_chord_overlay,
             Self::key_special_buffer,
             Self::key_universal_argument,
+            Self::key_named_binding,
         ];
         for layer in layers {
             if layer(self, ks, cx) == Handled::Yes {
@@ -305,6 +307,10 @@ impl Editor {
         } else if self.is_isearch() && ks.modifiers.control && ks.key == "r" {
             // C-r within isearch: repeat backward.
             self.isearch_repeat(Direction::Backward, cx);
+            cx.stop_propagation();
+        } else if self.is_isearch() && ks.modifiers.alt && !ks.modifiers.control && ks.key == "r" {
+            // M-r within isearch: toggle regexp matching.
+            self.isearch_toggle_regexp(cx);
             cx.stop_propagation();
         } else if ks.modifiers.platform
             && ks.key == "v"
@@ -476,6 +482,9 @@ impl Editor {
             || self.titlebar_dropdown_open()
         {
             return false;
+        }
+        if self.emacs_input_action_key(key, cx) {
+            return true; // C-q TAB / C-q RET
         }
         let Some(callback) = self.read_key_pending.clone() else {
             return false;

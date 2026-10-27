@@ -14,12 +14,58 @@ use super::*;
 /// direction (toggled by C-r/C-s), `origin` is where point was when the search
 /// began (restored on C-g), `from` is the offset the current attempt searches
 /// from, and `matched` is the range of the current hit (the base for the next
-/// repeat).
+/// repeat). `kind` is how the query matches (`M-r` toggles regexp).
 pub(super) struct IsearchState {
     pub(super) dir: Direction,
     pub(super) origin: usize,
     pub(super) from: usize,
     pub(super) matched: Option<Range<usize>>,
+    pub(super) kind: IsearchKind,
+}
+
+/// How an isearch query matches, as in Emacs: `C-s` is literal, `C-M-s` a
+/// regexp, and `M-s .` a whole symbol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum IsearchKind {
+    Literal,
+    Regexp,
+    Symbol,
+}
+
+impl IsearchKind {
+    /// The regex source matching `query` (a symbol's ends are checked
+    /// separately; `\b` here only keeps the highlight close).
+    fn pattern(self, query: &str) -> String {
+        match self {
+            Self::Regexp => query.to_string(),
+            Self::Literal => regex::escape(query),
+            Self::Symbol => {
+                let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                let open = if word(query.chars().next()) {
+                    r"\b"
+                } else {
+                    ""
+                };
+                let close = if word(query.chars().next_back()) {
+                    r"\b"
+                } else {
+                    ""
+                };
+                format!("{open}{}{close}", regex::escape(query))
+            }
+        }
+    }
+
+    fn prompt(self, dir: Direction) -> &'static str {
+        match (self, dir) {
+            (Self::Literal, Direction::Forward) => "I-search: ",
+            (Self::Literal, Direction::Backward) => "I-search backward: ",
+            (Self::Regexp, Direction::Forward) => "Regexp I-search: ",
+            (Self::Regexp, Direction::Backward) => "Regexp I-search backward: ",
+            (Self::Symbol, Direction::Forward) => "Symbol I-search: ",
+            (Self::Symbol, Direction::Backward) => "Symbol I-search backward: ",
+        }
+    }
 }
 
 impl Editor {
@@ -64,23 +110,62 @@ impl Editor {
 
     // --- Incremental search (Emacs `C-s` / `C-r`) -------------------------
 
-    /// Start an incremental search. Reads a query in the minibuffer and matches
-    /// it live (see `isearch_update`); `C-s`/`C-r` repeat, `RET` finishes leaving
-    /// point on the match, and `C-g` aborts back to where the search began.
+    /// Start an incremental search for a literal string. Reads a query in the
+    /// minibuffer and matches it live (see `isearch_update`); `C-s`/`C-r`
+    /// repeat, `RET` finishes leaving point on the match, and `C-g` aborts back
+    /// to where the search began.
     pub(super) fn isearch_start(&mut self, dir: Direction, cx: &mut Context<Self>) {
+        self.isearch_start_with(dir, IsearchKind::Literal, "", cx);
+    }
+
+    /// [`isearch_start`](Self::isearch_start) matching as `kind`, with the
+    /// query pre-filled with `initial` (searched at once when non-empty).
+    pub(super) fn isearch_start_with(
+        &mut self,
+        dir: Direction,
+        kind: IsearchKind,
+        initial: &str,
+        cx: &mut Context<Self>,
+    ) {
         let point = self.point();
         self.isearch = Some(IsearchState {
             dir,
             origin: point,
             from: point,
             matched: None,
+            kind,
         });
         self.search_query = None;
-        let prompt = match dir {
-            Direction::Forward => "I-search: ",
-            Direction::Backward => "I-search backward: ",
+        self.open_minibuffer(kind.prompt(dir), MinibufferPurpose::Isearch, initial, cx);
+        if !initial.is_empty() {
+            self.isearch_update(cx);
+        }
+    }
+
+    /// `M-r` while searching: toggle between a literal and a regexp search,
+    /// re-matching the query from where this attempt started.
+    pub(super) fn isearch_toggle_regexp(&mut self, cx: &mut Context<Self>) {
+        let Some(st) = self.isearch.as_mut() else {
+            return;
         };
-        self.open_minibuffer(prompt, MinibufferPurpose::Isearch, "", cx);
+        st.kind = match st.kind {
+            IsearchKind::Regexp => IsearchKind::Literal,
+            _ => IsearchKind::Regexp,
+        };
+        let prompt = st.kind.prompt(st.dir);
+        if let Some(mb) = self.minibuffer.as_mut() {
+            mb.prompt = prompt.into();
+        }
+        self.isearch_update(cx);
+    }
+
+    /// The highlight / `n` pattern for a finished isearch query.
+    pub(super) fn isearch_pattern(&self, query: &str) -> String {
+        let kind = self
+            .isearch
+            .as_ref()
+            .map_or(IsearchKind::Literal, |st| st.kind);
+        kind.pattern(query)
     }
 
     /// Re-run the search for the current minibuffer string from `isearch_from`.
@@ -154,8 +239,13 @@ impl Editor {
             cx.notify();
             return;
         }
-        self.search_query = Some(query.to_string());
-        let regex = match Regex::new(query) {
+        let kind = self
+            .isearch
+            .as_ref()
+            .map_or(IsearchKind::Regexp, |st| st.kind);
+        let pattern = kind.pattern(query);
+        self.search_query = Some(pattern.clone());
+        let regex = match Regex::new(&pattern) {
             Ok(r) => r,
             Err(_) => {
                 if let Some(mb) = self.minibuffer.as_mut() {
@@ -166,9 +256,15 @@ impl Editor {
             }
         };
         let text = self.active.buffer.full_text();
+        let symbol_edge = |at: Option<char>| at.is_some_and(|c| self.is_symbol_char(c));
         let matches: Vec<Range<usize>> = regex
             .find_iter(&text)
             .filter(|m| m.end() > m.start())
+            .filter(|m| {
+                kind != IsearchKind::Symbol
+                    || !(symbol_edge(text[..m.start()].chars().next_back())
+                        || symbol_edge(text[m.end()..].chars().next()))
+            })
             .map(|m| m.start()..m.end())
             .collect();
         let found = match dir {

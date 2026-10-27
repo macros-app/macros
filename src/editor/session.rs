@@ -141,6 +141,7 @@ impl Editor {
     /// Record a command run via `M-x` (minibuffer or Helm).
     pub(super) fn note_command(&mut self, name: &str) {
         self.session.command_history.push_dedup(name);
+        self.emacs_note_mx(name);
     }
 
     /// `candidates` reordered so recently run commands come first (newest

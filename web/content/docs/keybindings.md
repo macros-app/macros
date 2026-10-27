@@ -26,6 +26,7 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>M-f</kbd> / <kbd>M-b</kbd> | `forward-word` / `backward-word` |
 | <kbd>M-&lt;</kbd> / <kbd>M-&gt;</kbd> | `beginning-of-buffer` / `end-of-buffer` |
 | <kbd>C-v</kbd> / <kbd>M-v</kbd> | `scroll-up` / `scroll-down` |
+| <kbd>C-M-v</kbd> / <kbd>C-M-S-v</kbd> | `scroll-other-window` / `scroll-other-window-down` |
 | <kbd>C-l</kbd> | `recenter` |
 | <kbd>M-g g</kbd> | `goto-line-cmd` |
 
@@ -36,7 +37,9 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-d</kbd> | `delete-char` |
 | <kbd>C-k</kbd> | `kill-line` |
 | <kbd>M-d</kbd> / <kbd>M-Backspace</kbd> | `kill-word` / `backward-kill-word` |
-| <kbd>C-Space</kbd> | `set-mark` |
+| <kbd>C-Space</kbd> | `set-mark` (also pushes the mark ring) |
+| <kbd>C-u C-Space</kbd> | `pop-to-mark-command` (further <kbd>C-Space</kbd> keeps popping) |
+| <kbd>C-x C-Space</kbd> | `pop-global-mark` |
 | <kbd>C-w</kbd> / <kbd>M-w</kbd> | `kill-region` / `kill-ring-save` |
 | <kbd>C-y</kbd> / <kbd>M-y</kbd> | `yank` / `yank-pop` |
 | <kbd>C-/</kbd> | `undo` |
@@ -44,6 +47,11 @@ In a binding these are spelled `ctrl-`, `alt-`, `cmd-`, `shift-`, e.g. `"ctrl-x 
 | <kbd>C-t</kbd> | `transpose-chars` |
 | <kbd>C-o</kbd> | `open-line` |
 | <kbd>M-;</kbd> | `comment-dwim` |
+| <kbd>C-q</kbd> | `quoted-insert` |
+| <kbd>Insert</kbd> | `overwrite-mode` |
+| <kbd>C-x z</kbd> | `repeat` (then <kbd>z</kbd> to repeat again) |
+| <kbd>C-x C-+</kbd> / <kbd>C-x C--</kbd> / <kbd>C-x C-0</kbd> | `text-scale-increase` / `-decrease` / `-reset` (then <kbd>+</kbd> / <kbd>-</kbd> / <kbd>0</kbd>) |
+| <kbd>cmd-=</kbd> / <kbd>cmd--</kbd> / <kbd>cmd-0</kbd> | `global-text-scale-increase` / `-decrease` / `-reset` |
 
 The system clipboard always works, including inside modal states: <kbd>cmd-c</kbd> / <kbd>cmd-x</kbd> / <kbd>cmd-v</kbd> (`clipboard-copy` / `-cut` / `-paste`).
 
@@ -66,7 +74,9 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 
 | Key | Command |
 | --- | --- |
-| <kbd>C-s</kbd> / <kbd>C-r</kbd> | `isearch-forward` / `isearch-backward` |
+| <kbd>C-s</kbd> / <kbd>C-r</kbd> | `isearch-forward` / `isearch-backward` (literal; <kbd>M-r</kbd> toggles regexp) |
+| <kbd>C-M-s</kbd> / <kbd>C-M-r</kbd> | `isearch-forward-regexp` / `isearch-backward-regexp` |
+| <kbd>M-s .</kbd> | `isearch-forward-symbol-at-point` |
 | <kbd>M-%</kbd> / <kbd>C-M-%</kbd> | `query-replace` / `query-replace-regexp` |
 | <kbd>C-c o</kbd> | `occur` |
 | <kbd>M-x</kbd> | `execute-extended-command` (command palette) |

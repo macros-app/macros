@@ -642,10 +642,14 @@ impl Editor {
                     self.last_isearch = Some(input);
                 } else if let Some(prev) = self.last_isearch.clone() {
                     // RET on an empty isearch with a prior string: adopt it.
-                    self.search_query = Some(prev);
+                    self.search_query = Some(self.isearch_pattern(&prev));
                 }
-                // The read is over; the transient state goes with it.
-                self.isearch = None;
+                // Emacs leaves the mark where the search began.
+                if let Some(origin) = self.isearch.take().map(|st| st.origin)
+                    && origin != self.point()
+                {
+                    self.push_mark_quietly(origin);
+                }
             }
             MinibufferPurpose::OperatorSearch(dir) => {
                 self.evil_operator_search_submit(dir.is_forward(), &input, cx)

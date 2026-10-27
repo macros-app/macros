@@ -433,6 +433,7 @@ impl Editor {
         if self.vim.replay.is_some() {
             return;
         }
+        self.emacs_note_event(&ev);
         let macro_ctl = matches!(&ev, MacroEvent::Command(e) | MacroEvent::Counted(e, _)
             if e.contains("kbd-macro"));
         if !macro_ctl && let Some(events) = self.macro_recording.as_mut() {

@@ -360,6 +360,20 @@ fn isearch(e: &mut Editor, from: usize, dir: Direction, query: &str, cx: &mut Co
     e.isearch_update(cx);
 }
 
+/// [`isearch`] for a regexp (`C-M-s`).
+fn isearch_regexp(
+    e: &mut Editor,
+    from: usize,
+    dir: Direction,
+    query: &str,
+    cx: &mut Context<Editor>,
+) {
+    e.collapse_to(from);
+    e.isearch_start_with(dir, super::isearch::IsearchKind::Regexp, "", cx);
+    e.minibuffer.as_mut().unwrap().input = query.into();
+    e.isearch_update(cx);
+}
+
 fn isearch_message(e: &Editor) -> String {
     e.minibuffer.as_ref().unwrap().message.clone()
 }
@@ -396,26 +410,26 @@ fn isearch_backward_lands_on_match_starts(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn isearch_query_is_a_case_sensitive_regex(cx: &mut TestAppContext) {
+fn isearch_regexp_query_is_a_case_sensitive_regex(cx: &mut TestAppContext) {
     let (ed, vcx) = setup(cx, "Foo a.c abc foo\n");
     ed.update(vcx, |e, cx| {
         // `.` is a regex wildcard: the first hit is the literal `a.c`, the next
         // `abc`. Escaping it searches for the dot only.
-        isearch(e, 0, Direction::Forward, "a.c", cx);
+        isearch_regexp(e, 0, Direction::Forward, "a.c", cx);
         assert_eq!(e.isearch.as_ref().unwrap().matched, Some(4..7));
         e.isearch_repeat(Direction::Forward, cx);
         assert_eq!(e.isearch.as_ref().unwrap().matched, Some(8..11));
         e.mb_abort(cx);
-        isearch(e, 0, Direction::Forward, r"a\.c", cx);
+        isearch_regexp(e, 0, Direction::Forward, r"a\.c", cx);
         assert_eq!(e.isearch.as_ref().unwrap().matched, Some(4..7));
         e.isearch_repeat(Direction::Forward, cx);
         assert_eq!(e.isearch.as_ref().unwrap().matched, Some(4..7));
         e.mb_abort(cx);
         // Case matters unless the query asks for folding with `(?i)`.
-        isearch(e, 0, Direction::Forward, "foo", cx);
+        isearch_regexp(e, 0, Direction::Forward, "foo", cx);
         assert_eq!(e.isearch.as_ref().unwrap().matched, Some(12..15));
         e.mb_abort(cx);
-        isearch(e, 0, Direction::Forward, "(?i)foo", cx);
+        isearch_regexp(e, 0, Direction::Forward, "(?i)foo", cx);
         assert_eq!(e.isearch.as_ref().unwrap().matched, Some(0..3));
     });
 }
@@ -424,7 +438,7 @@ fn isearch_query_is_a_case_sensitive_regex(cx: &mut TestAppContext) {
 fn isearch_reports_invalid_and_failing_queries(cx: &mut TestAppContext) {
     let (ed, vcx) = setup(cx, "foo bar\n");
     ed.update(vcx, |e, cx| {
-        isearch(e, 2, Direction::Forward, "(", cx);
+        isearch_regexp(e, 2, Direction::Forward, "(", cx);
         assert_eq!(isearch_message(e), " [invalid regex]");
         assert_eq!(e.point(), 2, "an invalid query doesn't move point");
         // Fixing the query clears the hint.

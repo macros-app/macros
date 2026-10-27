@@ -32,7 +32,12 @@ impl Editor {
                 }
                 self.end_undo_group();
             }
-            _ => self.apply_command_once(command, cx),
+            // Commands that read the argument (`C-u C-SPC`) find it here.
+            arg => {
+                self.emacs.prefix_arg = arg;
+                self.apply_command_once(command, cx);
+                self.emacs.prefix_arg = None;
+            }
         }
     }
 
@@ -146,8 +151,13 @@ impl Editor {
                 let o = self.active.buffer.line_range_at(self.point()).end;
                 self.goto(o, cx);
             }
-            BeginningOfBuffer => self.goto(0, cx),
+            // Emacs leaves the mark where `M-<` / `M->` started.
+            BeginningOfBuffer => {
+                self.push_mark_quietly(self.point());
+                self.goto(0, cx);
+            }
             EndOfBuffer => {
+                self.push_mark_quietly(self.point());
                 let o = self.active.buffer.len();
                 self.goto(o, cx);
             }
@@ -159,7 +169,8 @@ impl Editor {
                 let o = self.active.buffer.next_grapheme(self.point());
                 self.select_to(o, cx);
             }
-            SetMark => self.set_mark(cx),
+            SetMark => self.set_mark_command(cx),
+            EmacsInput(cmd) => self.emacs_input_command(cmd, cx),
             ExchangePointAndMark => self.exchange_point_and_mark(cx),
             MarkWholeBuffer => self.mark_whole_buffer(cx),
             GotoLine(n) => {

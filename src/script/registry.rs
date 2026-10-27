@@ -229,6 +229,11 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
             .iter()
             .map(|&(name, cmd)| (name, Grid(cmd.into()))),
     );
+    out.extend(
+        crate::editor::EMACS_INPUT_COMMANDS
+            .iter()
+            .map(|&(name, cmd)| (name, EmacsInput(cmd))),
+    );
     out
 }
 

@@ -139,7 +139,13 @@ impl Editor {
                     MlField::Literal(s) => s.clone(),
                     MlField::Modified => if self.is_modified() { "**" } else { "--" }.to_string(),
                     MlField::BufferName => self.buffer_name().to_string(),
-                    MlField::Modes => self.active.modes.names().join(" "),
+                    MlField::Modes => {
+                        let mut modes = self.active.modes.names().join(" ");
+                        if self.overwrite_mode_active() {
+                            modes.push_str(" Ovwrt");
+                        }
+                        modes
+                    }
                     MlField::EvilMode => self.evil_mode_name().unwrap_or("").to_string(),
                     MlField::Lsp => self.active_lsp_servers().join(" "),
                     MlField::Diagnostics => self.diagnostic_summary().unwrap_or_default(),

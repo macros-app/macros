@@ -21,6 +21,19 @@ Set the mark with <kbd>C-Space</kbd>, then move point; the text between mark and
 | <kbd>C-x C-x</kbd> | `exchange-point-and-mark` | Swap point and mark |
 | <kbd>C-x C-h</kbd> / <kbd>cmd-a</kbd> | `mark-whole-buffer` | Select all |
 
+### The mark ring
+
+Every <kbd>C-Space</kbd> also pushes the mark onto the buffer's **mark ring** (the last 16 marks), so you can jump back to places you've been. <kbd>M-&lt;</kbd>, <kbd>M-&gt;</kbd> and finishing an isearch push the mark too, without starting a selection.
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-u C-Space</kbd> | `pop-to-mark-command` | Jump to the mark, then to each older one |
+| <kbd>C-x C-Space</kbd> | `pop-global-mark` | Jump to the last mark set in another buffer |
+
+After <kbd>C-u C-Space</kbd>, each further plain <kbd>C-Space</kbd> pops again, so <kbd>C-u C-Space C-Space C-Space</kbd> walks three marks back. The ring rotates: past the oldest mark you come back to the newest. Marks move with the text when you edit around them.
+
+The **global mark ring** keeps one entry per buffer change: setting a mark in a different buffer from the last one adds an entry. <kbd>C-x C-Space</kbd> switches to that buffer and position, and repeating it walks further back across buffers.
+
 The kill ring and the system clipboard are kept in sync by the clipboard commands (<kbd>cmd-c</kbd>/<kbd>x</kbd>/<kbd>v</kbd>), so copying in Macros and pasting in another app just works.
 
 The same keys paste into a **minibuffer** prompt: <kbd>cmd-v</kbd> inserts the clipboard, and <kbd>C-y</kbd> inserts the latest kill (taking in anything copied elsewhere first). A prompt is one line, so a trailing newline is dropped and only the first line of a multi-line paste goes in. In a password prompt both read the clipboard directly and never put the secret on the kill ring; see [Passwords & secrets](/docs/secrets#what-you-see).
@@ -43,10 +56,13 @@ Incremental search, Emacs-style:
 
 | Key | Command |
 | --- | --- |
-| <kbd>C-s</kbd> | `isearch-forward` |
-| <kbd>C-r</kbd> | `isearch-backward` |
+| <kbd>C-s</kbd> / <kbd>C-r</kbd> | `isearch-forward` / `isearch-backward` — a literal string |
+| <kbd>C-M-s</kbd> / <kbd>C-M-r</kbd> | `isearch-forward-regexp` / `isearch-backward-regexp` — a regexp |
+| <kbd>M-s .</kbd> | `isearch-forward-symbol-at-point` — the symbol under point, whole symbols only |
 
-Type to extend the match; <kbd>C-s</kbd> / <kbd>C-r</kbd> again to jump to the next/previous hit; <kbd>C-g</kbd> to cancel and return to where you started.
+Type to extend the match; <kbd>C-s</kbd> / <kbd>C-r</kbd> again to jump to the next/previous hit; <kbd>RET</kbd> to stop on the match (the mark is left where you started, so <kbd>C-u C-Space</kbd> takes you back); <kbd>C-g</kbd> to cancel and return to where you started. <kbd>M-r</kbd> while searching toggles between a literal and a regexp search. <kbd>C-s C-s</kbd> on an empty search reuses the previous string.
+
+Regexps use Rust [regex](https://docs.rs/regex/latest/regex/#syntax) syntax and are case-sensitive; start one with `(?i)` to ignore case. A symbol search treats letters, digits and `_` as symbol characters, plus `-`, `?`, `!` and friends in Lisp buffers, so `M-s .` on `foo` skips `foobar` and `foo-bar`.
 
 ## Replace
 
@@ -101,6 +117,41 @@ These act on the region, or the whole buffer when there's no region:
 - `upcase-region` / `downcase-region` / `capitalize-region` — case conversion.
 
 Run them by name with <kbd>M-x</kbd>, or bind them in your `init.scm`.
+
+## Typing
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>Insert</kbd> | `overwrite-mode` | Toggle typing over the text after point |
+| <kbd>C-q</kbd> | `quoted-insert` | Insert the next key literally |
+
+In **overwrite mode** each typed character replaces the one after point, but never the end of the line: past it, typing inserts again. It's per buffer, and the mode line shows `Ovwrt` while it's on. <kbd>C-q</kbd> still inserts.
+
+**Quoted insert** inserts whatever key comes next instead of running it: <kbd>C-q C-l</kbd> inserts a form feed (`^L`), <kbd>C-q TAB</kbd> a real tab whatever the indent settings, <kbd>C-q C-j</kbd> a newline, <kbd>C-q RET</kbd> a carriage return (`^M`). Octal digits give a character code: <kbd>C-q 0 1 4</kbd> is also a form feed. Three digits insert at once; a shorter code ends at the next key, which is dropped if it's <kbd>RET</kbd> and runs normally otherwise (<kbd>C-q 7 a</kbd> inserts a bell, then `a`). <kbd>C-u 3 C-q x</kbd> inserts `xxx`.
+
+## Text size
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-x C-+</kbd> / <kbd>C-x C-=</kbd> | `text-scale-increase` | Larger text in this buffer |
+| <kbd>C-x C--</kbd> | `text-scale-decrease` | Smaller text in this buffer |
+| <kbd>C-x C-0</kbd> | `text-scale-reset` | Back to the default size |
+| <kbd>cmd-=</kbd> / <kbd>cmd--</kbd> / <kbd>cmd-0</kbd> | `global-text-scale-increase` / `-decrease` / `-reset` | Zoom everything (every buffer and the UI) |
+
+After any <kbd>C-x C-+</kbd> / <kbd>C-x C--</kbd> / <kbd>C-x C-0</kbd>, the plain keys <kbd>+</kbd> (or <kbd>=</kbd>), <kbd>-</kbd> and <kbd>0</kbd> keep adjusting until you press anything else, as in Emacs. Each step is a factor of 1.2, and <kbd>C-u</kbd> *N* takes *N* steps. The buffer scale belongs to the buffer, so every window showing it changes together. The global zoom (also <kbd>C-x C-M-+</kbd> / <kbd>C-x C-M--</kbd> / <kbd>C-x C-M-0</kbd>) moves in steps of 1.1. In a [grid](/docs/grid) buffer <kbd>cmd-=</kbd> and <kbd>C-=</kbd> zoom the grid instead, and outside one <kbd>C-=</kbd> stays `er/expand`.
+
+## Repeating a command
+
+<kbd>C-x z</kbd> (`repeat`) runs the last command again, with the same prefix argument; keep pressing <kbd>z</kbd> to repeat it more. Typed text counts as a command, and so does a command run from <kbd>M-x</kbd>. <kbd>C-u</kbd> *N* <kbd>C-x z</kbd> repeats it with *N* as its argument instead.
+
+## The other window
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-M-v</kbd> | `scroll-other-window` | Scroll the next window down a page |
+| <kbd>C-M-S-v</kbd> | `scroll-other-window-down` | Scroll it back up |
+
+Point stays in the window you're in, so you can page through a reference beside the code you're editing.
 
 ## Undo & redo
 

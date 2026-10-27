@@ -145,6 +145,9 @@ pub enum EditorCommand {
     /// A grid-buffer command (scheme/grid.scm), with the count or `C-u`
     /// flag its key carried; see [`crate::grid::cmd`].
     Grid(crate::grid::cmd::GridInvocation),
+    /// Mark ring, text scale, overwrite-mode, `C-q`, `C-x z`, …; see
+    /// `crate::editor::emacs_input`.
+    EmacsInput(crate::editor::EmacsInputCmd),
     /// `(grid-extensions '("csv" …))`: extensions that open as a grid.
     GridExtensions(Vec<String>),
     /// `(grid-goto-address "C7")`: move the grid cursor (or select a range).

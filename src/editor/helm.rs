@@ -724,6 +724,10 @@ impl Editor {
         match action {
             HelmAction::Scheme(_) => {
                 for (function, target) in &targets {
+                    // helm M-x (help.scm): note the command for `C-x z`.
+                    if function == "execute-command" {
+                        self.emacs_note_mx(target);
+                    }
                     self.script.dispatch_action(function, Some(target));
                 }
             }

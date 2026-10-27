@@ -836,7 +836,13 @@ impl Editor {
                     }
                     .into_any_element()
                 };
-                div().size_full().child(content).into_any_element()
+                // `C-x C-+` scales this pane's buffer text (Emacs text-scale).
+                let cell = div().size_full();
+                let cell = match self.buffer_text_style(&self.pane_doc(*id).name, cx) {
+                    Some((size, height)) => cell.text_size(px(size)).line_height(px(height)),
+                    None => cell,
+                };
+                cell.child(content).into_any_element()
             }
             WindowLayout::Split { axis, ratio, a, b } => {
                 let axis = *axis;
