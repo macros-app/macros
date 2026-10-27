@@ -11,7 +11,7 @@ use gpui::{
 
 use crate::color_compat::{rgb, rgba};
 
-use crate::editor::{CompletionView, Editor};
+use crate::editor::{BlockSel, CompletionView, Editor};
 use crate::highlight::{HlSpan, face_name};
 use crate::lsp::Severity;
 use crate::theme::{Theme, Underline};
@@ -514,7 +514,12 @@ struct FrameCtx<'a> {
     hl_line: bool,
     cursor: usize,
     selection: Range<usize>,
-    block_sel: Option<(usize, usize, usize, usize)>,
+    /// `(top_row, bottom_row, left, right_exclusive, display)`: a column-block
+    /// highlight; `display` means the columns are display columns (tabs, wide
+    /// chars) rather than character columns.
+    block_sel: Option<(usize, usize, usize, usize, bool)>,
+    /// Tab width for display-column `block_sel`s.
+    tab_width: usize,
     extra_selections: Vec<(usize, usize)>,
     extra_cursor_positions: Vec<usize>,
     search: Vec<Range<usize>>,
@@ -768,13 +773,23 @@ impl FrameCtx<'_> {
         }
 
         // Range highlights, all through the same per-row quad helper.
-        if let Some((top_row, bottom_row, left_col, right_col)) = self.block_sel {
-            // Block-wise Visual: highlight only the `[left_col, right_col]`
-            // column strip on each row within the rectangle (rows shorter
-            // than the strip contribute nothing).
+        if let Some((top_row, bottom_row, left_col, right_col, display)) = self.block_sel {
+            // Block-wise Visual / rectangle: highlight only the
+            // `[left_col, right_col)` column strip on each row within the
+            // rectangle (rows shorter than the strip contribute nothing).
             if i >= top_row && i <= bottom_row {
-                let s = char_col_byte_in(&text, left_col);
-                let e = char_col_byte_in(&text, right_col + 1);
+                let (s, e) = if display {
+                    let tab = self.tab_width;
+                    (
+                        crate::rect::byte_at_col_floor(&text, left_col, tab),
+                        crate::rect::byte_at_col_ceil(&text, right_col, tab),
+                    )
+                } else {
+                    (
+                        char_col_byte_in(&text, left_col),
+                        char_col_byte_in(&text, right_col),
+                    )
+                };
                 if e > s {
                     lc.push_range(
                         &mut acc.selections,
@@ -1499,10 +1514,31 @@ impl Element for EditorElement {
 
         let cursor = editor.pane_point(pane);
         let selection = editor.pane_selection(pane);
-        // Block-wise Visual (`C-v`): a rectangle (top_row, bottom_row, left_col,
-        // right_col) highlighted per line as a column strip rather than the
-        // contiguous `selection` range. `None` unless in block-wise Visual.
-        let block_sel = editor.pane_visual_block(pane);
+        // Block-wise Visual (`C-v`) or rectangle-mark-mode (`C-x SPC`): a
+        // rectangle highlighted per line as a column strip rather than the
+        // contiguous `selection` range. Rectangle corners resolve to display
+        // columns here, with the tab width the text is laid out with.
+        let tab = settings.tab_width();
+        let block_sel = editor.pane_visual_block(pane).map(|b| match b {
+            BlockSel::Chars {
+                top,
+                bottom,
+                left,
+                right,
+            } => (top, bottom, left, right + 1, false),
+            BlockSel::Display {
+                top,
+                bottom,
+                corners: (a, b),
+            } => {
+                let col = |off: usize| {
+                    let start = buffer.line_range_at(off).start;
+                    crate::rect::display_width(&buffer.slice_to_string(start..off), tab)
+                };
+                let (ca, cb) = (col(a), col(b));
+                (top, bottom, ca.min(cb), ca.max(cb), true)
+            }
+        });
         let diagnostics = editor.pane_diagnostics(pane);
         let diff_marks = editor.pane_diff_marks(pane);
         let gutter_dots = editor.pane_gutter_dots(pane);
@@ -1607,6 +1643,7 @@ impl Element for EditorElement {
             cursor,
             selection,
             block_sel,
+            tab_width: tab,
             extra_selections,
             extra_cursor_positions,
             search,

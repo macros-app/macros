@@ -15,7 +15,8 @@ use super::*;
 pub enum MlField {
     /// Inert text (separators, parens, labels Scheme bakes into the format).
     Literal(String),
-    /// `**` when the buffer is modified, `--` when saved.
+    /// `**` when the buffer is modified, `--` when saved; `%%` (`%*` if
+    /// modified) while it's read-only.
     Modified,
     /// The active buffer's name.
     BufferName,
@@ -138,7 +139,14 @@ impl Editor {
             .filter_map(|seg| {
                 let value = match &seg.field {
                     MlField::Literal(s) => s.clone(),
-                    MlField::Modified => if self.is_modified() { "**" } else { "--" }.to_string(),
+                    // Emacs's `%%` / `%*` for a read-only buffer.
+                    MlField::Modified => match (self.active.read_only, self.is_modified()) {
+                        (true, false) => "%%",
+                        (true, true) => "%*",
+                        (false, true) => "**",
+                        (false, false) => "--",
+                    }
+                    .to_string(),
                     MlField::BufferName => self.buffer_name().to_string(),
                     MlField::Modes => {
                         let mut modes = self.active.modes.names();

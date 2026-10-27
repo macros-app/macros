@@ -745,6 +745,13 @@ impl Editor {
                     self.read_and_open(name, path, identity, true, cx);
                 }
             }
+            PendingAction::WriteFile { buffer, path } => {
+                if buffer == self.active.name {
+                    self.write_file(&path, true, cx);
+                } else {
+                    self.echo(format!("Not written: {buffer} is no longer current"), cx);
+                }
+            }
             PendingAction::SaveOverChanged(name) => {
                 if name == self.active.name {
                     self.save_buffer_ex(false, cx);

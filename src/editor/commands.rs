@@ -39,6 +39,7 @@ impl Editor {
                 self.emacs.prefix_arg = None;
             }
         }
+        self.reconcile_locks(cx);
     }
 
     /// Apply a single command exactly once.
@@ -171,6 +172,8 @@ impl Editor {
             }
             SetMark => self.set_mark_command(cx),
             EmacsInput(cmd) => self.emacs_input_command(cmd, cx),
+            DeactivateMark => self.deactivate_mark(cx),
+            RectangleMarkMode => self.rectangle_mark_mode(cx),
             ExchangePointAndMark => self.exchange_point_and_mark(cx),
             MarkWholeBuffer => self.mark_whole_buffer(cx),
             GotoLine(n) => {
@@ -230,6 +233,9 @@ impl Editor {
             && command.is_interactive_edit()
         {
             self.echo("Buffer is read-only", cx);
+            return Ok(());
+        }
+        if self.rect_mark_redirect(&command, cx) {
             return Ok(());
         }
         match command {
@@ -556,6 +562,13 @@ impl Editor {
             SaveSomeBuffers => self.save_some_buffers(cx),
             RevertBuffer => self.revert_buffer(cx),
             OpenFileOtherWindow(path) => self.open_file_other_window(path, cx),
+            WriteFile(path) => self.write_file(&path, false, cx),
+            RenameBuffer(name) => self.rename_buffer(&name, cx),
+            InsertFile(path) => self.insert_file(&path, cx),
+            FindFileOtherWindow(path) => self.find_file_other_window(&path, cx),
+            SwitchToBufferOtherWindow(name) => self.switch_to_buffer_other_window(&name, cx),
+            DisplayBuffer(name) => self.display_buffer(&name, cx),
+            ToggleReadOnly => self.toggle_read_only(cx),
             KillBuffer => self.kill_buffer(cx),
             McpServerInfo => self.show_mcp_server_info(cx),
             ServerEdit => self.server_edit(cx),
@@ -1308,6 +1321,7 @@ impl Editor {
                 if touched_mcp {
                     self.reconcile_mcp_server(cx);
                 }
+                self.sync_file_options(cx);
                 if touched_server {
                     self.reconcile_server(true, cx);
                 }

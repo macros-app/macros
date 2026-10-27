@@ -68,6 +68,9 @@ Set options with `(set-option "name" value)`. Values are **typed** — pass a nu
 
 ;; Files on disk
 (set-option "auto-revert"   #f)     ; re-read a buffer when its file changes on disk
+(set-option "make-backup-files" #t) ; copy a file aside before its first save
+(set-option "backup-directory" "")  ; "" = backups/ in ~/.config/macros
+(set-option "create-lockfiles" #f)  ; .#file locks while a buffer has unsaved changes
 
 ;; Helm selection UI — see Helm
 (set-option "helm-fuzzy"  #t)       ; fuzzy (nucleo) vs substring matching
@@ -138,6 +141,17 @@ Macros watches the filesystem so the editor stays in sync with changes made outs
 When a file you're visiting changes on disk and the buffer has **no unsaved edits**, Macros re-reads it automatically, keeping point where it was. A buffer with unsaved changes is **never** clobbered — instead you get a one-line warning, and you can reconcile with `M-x revert-buffer` (`:e!`) when ready. Macros' own saves don't trigger a spurious revert (the on-disk text already matches the buffer).
 
 **Live sidebar/dired refresh** is always on — no option needed. While the file tree or a dired buffer is open, creating, renaming, or deleting files in the directories it shows refreshes the view automatically. The refresh never steals focus: if the sidebar is in another pane while you edit, it updates in place and your cursor stays put.
+
+## Backups and lock files
+
+**Backups** are on by default (Emacs `make-backup-files`). The first time you save a file in a session, Macros first copies the file as it was on disk into the backup directory, so a bad save can be undone. Later saves in the same session don't touch the backup. The backups all live in one directory (Emacs `backup-directory-alist`), `backups/` in `~/.config/macros` by default, so your repositories don't fill up with `file~` copies. Each backup is named after the file's whole path with `!` for every `/`. For example, `/home/me/notes.txt` is backed up as `!home!me!notes.txt~`.
+
+```scheme
+(set-option "backup-directory" "~/.cache/macros-backups") ; somewhere else
+(set-option "make-backup-files" #f)                       ; no backups at all
+```
+
+**Lock files** are off by default (Emacs `create-lockfiles`). Turn them on with `(set-option "create-lockfiles" #t)`. Then, while a buffer has unsaved changes to `dir/name`, Macros holds a lock `dir/.#name` (a symlink to `user@host.pid`, the same format Emacs uses), and removes it when you save, revert or kill the buffer. When you visit or start editing a file that another running editor has locked, Macros warns you in the echo area. The other editor can be Emacs or another Macros window. Macros takes over a lock whose process is no longer running.
 
 ## Session state
 

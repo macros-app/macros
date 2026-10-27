@@ -198,6 +198,11 @@ pub enum EditorCommand {
     EndOfBuffer,
     // Region / mark
     SetMark,
+    /// Emacs `deactivate-mark`: drop the region, leaving point in place.
+    DeactivateMark,
+    /// Emacs `rectangle-mark-mode` (`C-x SPC`): toggle treating the region as
+    /// a rectangle (highlighted as a column block; `C-w`/`M-w`/`C-t` act on it).
+    RectangleMarkMode,
     ExchangePointAndMark,
     MarkWholeBuffer,
     // Narrowing (Emacs `C-x n`)
@@ -314,6 +319,20 @@ pub enum EditorCommand {
     ToggleElectricPair,
     SelectWindow(usize),
     OpenFileOtherWindow(String),
+    /// Emacs `write-file`: save the active buffer as this path and visit it.
+    WriteFile(String),
+    /// Emacs `rename-buffer`: rename the active buffer.
+    RenameBuffer(String),
+    /// Emacs `insert-file`: insert a file's contents at point.
+    InsertFile(String),
+    /// `C-x 4 f`: visit a file in another window.
+    FindFileOtherWindow(String),
+    /// `C-x 4 b`: switch to a buffer in another window.
+    SwitchToBufferOtherWindow(String),
+    /// `C-x 4 C-o`: show a buffer in another window, keeping the selection.
+    DisplayBuffer(String),
+    /// `C-x C-q`: toggle the active buffer read-only.
+    ToggleReadOnly,
     SetLineIcon(usize, usize, String),
     /// `(add-line-icon line col name face)`: like `SetLineIcon` but appends
     /// (several icons per row) and tints by theme face `face` ("" = the

@@ -83,15 +83,24 @@ The system clipboard always works, including inside modal states: <kbd>cmd-c</kb
 | --- | --- |
 | <kbd>C-x C-f</kbd> | `find-file` |
 | <kbd>C-x C-s</kbd> | `save-buffer` |
+| <kbd>C-x C-w</kbd> | `write-file` (save as a new file and visit it) |
+| <kbd>C-x i</kbd> | `insert-file` |
+| <kbd>C-x C-q</kbd> | `read-only-mode` (toggle) |
 | <kbd>C-x b</kbd> | `switch-buffer` |
 | <kbd>C-x C-b</kbd> | `ibuffer` (the buffer manager) |
 | <kbd>C-x k</kbd> | `kill-buffer` |
 | <kbd>C-x 2</kbd> / <kbd>C-x 3</kbd> | `split-window-below` / `split-window-right` |
 | <kbd>C-x o</kbd> | `other-window` |
 | <kbd>C-x 0</kbd> / <kbd>C-x 1</kbd> | `delete-window` / `delete-other-windows` |
+| <kbd>C-x 4 f</kbd> | `find-file-other-window` |
+| <kbd>C-x 4 b</kbd> | `switch-to-buffer-other-window` |
+| <kbd>C-x 4 0</kbd> | `kill-buffer-and-window` |
+| <kbd>C-x 4 C-o</kbd> | `display-buffer` (show a buffer in another window, stay here) |
 | <kbd>C-x ^</kbd> / <kbd>C-x }</kbd> / <kbd>C-x {</kbd> | resize windows |
 | <kbd>C-c left</kbd> / <kbd>C-c right</kbd> | `winner-undo` / `winner-redo` (window layout history; evil: <kbd>C-w u</kbd> / <kbd>C-w U</kbd>) |
 | <kbd>C-x C-c</kbd> | `quit` |
+
+`M-x rename-buffer` renames the current buffer, and `M-x find-file-at-point` (alias `ffap`) opens the file or URL at point — see [Files and buffers](/docs/editing-commands#files-and-buffers).
 
 **winner-mode** records every change to the window layout — splits, sizes and which buffer each window shows. <kbd>C-c left</kbd> goes back to the previous layout and keeps going back on repeat; <kbd>C-c right</kbd> goes forward again. It's on by default; `(winner-mode #f)` in `init.scm` (the same as `(set-option "winner-mode" #f)`) turns it off.
 
@@ -139,6 +148,25 @@ Named positions in files that survive a restart (Emacs `bookmark.el`):
 Bookmarks are stored as an s-expression file at `~/.config/macros/bookmarks` (see [configuration](/docs/configuration#what-persists)), rewritten on every change. `org-capture` maintains an `org-capture-last-stored` bookmark on the headline it just inserted.
 
 Like `bookmark.el`, a bookmark can carry a free-text annotation — `bookmark-edit-annotation` prompts for it (the current text is prefilled; empty input clears it), and annotated bookmarks show it dimmed next to their line in <kbd>C-x r b</kbd> / <kbd>C-x r l</kbd>. Programs can use `bookmark-annotation` / `bookmark-set-annotation!` directly. Hooks (`add-hook`): `bookmark-save-hook` fires after every rewrite of the file, `bookmark-load-hook` after the file loads at startup, and `bookmark-after-jump-hook` once a jump's point has landed.
+
+## Rectangles & registers
+
+The rest of the <kbd>C-x r</kbd> prefix is Emacs's rectangle and register commands. [Editing commands](/docs/editing-commands#rectangles) covers them in detail.
+
+| Key | Command |
+| --- | --- |
+| <kbd>C-x r k</kbd> / <kbd>C-x r M-w</kbd> / <kbd>C-x r d</kbd> | `kill-rectangle` / `copy-rectangle-as-kill` / `delete-rectangle` |
+| <kbd>C-x r y</kbd> | `yank-rectangle` |
+| <kbd>C-x r o</kbd> / <kbd>C-x r c</kbd> | `open-rectangle` / `clear-rectangle` |
+| <kbd>C-x r t</kbd> | `string-rectangle` |
+| <kbd>C-x r N</kbd> | `rectangle-number-lines` |
+| <kbd>C-x SPC</kbd> | `rectangle-mark-mode`. While it's on, <kbd>C-w</kbd>, <kbd>M-w</kbd> and <kbd>C-t</kbd> act on the rectangle |
+| <kbd>C-x r s</kbd> / <kbd>C-x r i</kbd> | `copy-to-register` / `insert-register` (also <kbd>C-x r x</kbd> / <kbd>C-x r g</kbd>) |
+| <kbd>C-x r r</kbd> | `copy-rectangle-to-register` |
+| <kbd>C-x r SPC</kbd> / <kbd>C-x r j</kbd> | `point-to-register` / `jump-to-register` |
+| <kbd>C-x r n</kbd> / <kbd>C-x r +</kbd> | `number-to-register` / `increment-register` |
+| <kbd>C-x r w</kbd> | `window-configuration-to-register` |
+| <kbd>M-x</kbd> `view-register` / `list-registers` | inspect registers |
 
 Feature-specific prefixes live in their own pages: <kbd>C-c C-l …</kbd> for [LSP](/docs/lsp), <kbd>C-c p …</kbd> for [projects](/docs/projects), and <kbd>C-h …</kbd> for [help](/docs/getting-help). Modal editing is available too, but off by default — in either a Vim-style ([evil](/docs/modal-editing)) or selection-first ([helix](/docs/helix)) flavor.
 

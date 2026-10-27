@@ -285,10 +285,11 @@ impl ScriptEngine {
         }
     }
 
-    /// Drop all markers (e.g. on a buffer switch — markers are buffer-positions).
-    pub fn clear_markers(&self) {
-        let mut store = self.shared.markers.lock().unwrap();
-        store.positions.clear();
+    /// The active buffer changed from `left` to `entered`: drop the plain
+    /// markers (they are positions in `left`) and swap the buffer-bound ones
+    /// (see [`MarkerStore::switch`](super::state::MarkerStore::switch)).
+    pub fn switch_markers(&self, left: &str, entered: &str) {
+        self.shared.markers.lock().unwrap().switch(left, entered);
     }
 
     /// Create a marker at `pos`, returning its id. The snippet session uses these
@@ -310,7 +311,7 @@ impl ScriptEngine {
 
     /// Remove marker `id` (snippet field cleanup).
     pub fn remove_marker(&self, id: u64) {
-        self.shared.markers.lock().unwrap().positions.remove(&id);
+        self.shared.markers.lock().unwrap().remove(id);
     }
 
     /// The nullary command names, for `M-x` completion.

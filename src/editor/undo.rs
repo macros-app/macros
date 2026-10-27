@@ -272,6 +272,9 @@ impl Editor {
     }
 
     pub(super) fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_read_only(cx) {
+            return;
+        }
         let Some((parent, group)) = self.active.undo.undo_group() else {
             self.echo("No further undo information", cx);
             return;
@@ -301,6 +304,9 @@ impl Editor {
     /// Redo: re-apply the most recently created child branch of the current node
     /// (undo-tree semantics — the last branch you came from / created).
     pub(super) fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_read_only(cx) {
+            return;
+        }
         let Some((child, group)) = self.active.undo.redo_child() else {
             self.echo("No further redo information", cx);
             return;

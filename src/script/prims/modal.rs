@@ -2,6 +2,7 @@
 //! jumps and the search query.
 
 use super::*;
+use steel::rvals::SteelVal;
 
 pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     let EngineShared {
@@ -107,6 +108,17 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // `(prefix-count)` → the count typed before a count-aware modal command, 0
     // when none (so a command can tell `G` from `1G`).
     register_snapshot_read(reg, snapshot, "prefix-count", |s| s.prefix_count);
+    // `(current-prefix-arg)` → the universal argument the command was invoked
+    // with (Emacs's numeric value: `C-u` → 4, `C-u C-u` → 16, `C-u 7` → 7), or
+    // #f without one. The argument is spent on the Scheme command itself
+    // (`(prefix-count)` holds it too), never repeating its queued effects.
+    register_snapshot_read(reg, snapshot, "current-prefix-arg", |s| {
+        s.prefix_arg
+            .map_or(SteelVal::BoolV(false), |n| SteelVal::IntV(n as isize))
+    });
+    // `(rectangle-mark-mode?)` → #t while `rectangle-mark-mode` (`C-x SPC`) is
+    // on: the region is a rectangle.
+    register_snapshot_read(reg, snapshot, "rectangle-mark-mode?", |s| s.rect_mark);
     // `(kbd-macro-recording?)` → #t while a keyboard macro is being recorded.
     register_snapshot_read(reg, snapshot, "kbd-macro-recording?", |s| {
         s.kbd_macro_recording

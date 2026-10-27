@@ -14,12 +14,16 @@
 //!   is dropped as [`SaveOutcome::Superseded`] — so a slow earlier async save
 //!   can never land on top of a newer one.
 //!
+//! - **Backed up**: with `make-backup-files` on, the first save of a file in a
+//!   session copies what was on disk to `file~` under the backup directory
+//!   first (see [`set_backup_directory`]).
+//!
 //! Where an atomic replace would change more than the file's bytes, the write
 //! falls back to rewriting in place (as Emacs does): a hard-linked file (rename
 //! would split the links), a file owned by another user (rename would steal
 //! ownership), or a directory we can't create the temp file in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +35,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct SaveTicket {
     key: PathBuf,
     generation: u64,
+    /// Where to back the file up before overwriting it (see [`backup_once`]).
+    backup_dir: Option<PathBuf>,
 }
 
 /// What [`write_sequenced`] did.
@@ -91,7 +97,11 @@ pub fn ticket(path: &Path) -> SaveTicket {
         .entry(key.clone())
         .or_default()
         .issued = generation;
-    SaveTicket { key, generation }
+    SaveTicket {
+        key,
+        generation,
+        backup_dir: BACKUP_DIR.with(|d| d.borrow().clone()),
+    }
 }
 
 /// Whether `ticket` is still the newest save requested for its file — i.e.
@@ -129,6 +139,7 @@ pub fn write_sequenced(
         *last = ticket.generation;
         return Ok(SaveOutcome::Written);
     }
+    backup_once(&ticket.key, ticket.backup_dir.as_deref());
     atomic_write(path, contents)?;
     *last = ticket.generation;
     note_synced(&ticket.key, stamp(&ticket.key), contents);
@@ -199,6 +210,83 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+// --- Backup files ------------------------------------------------------------
+//
+// Emacs's `make-backup-files`: the first time a session overwrites a file, the
+// file as it was is copied aside, so a bad save (or a bad session) can be
+// undone. Like `backup-directory-alist` pointed at one directory, the copies
+// live together under the backup directory — named after the file's whole
+// path, `!` for each `/` — rather than as `file~` littering every repo.
+
+thread_local! {
+    /// Where backups go, `None` while `make-backup-files` is off. Set on the UI
+    /// thread by the editor from its options ([`set_backup_directory`]) and
+    /// captured into each [`SaveTicket`] there, so the background write uses
+    /// the policy in force when the save was asked for. Off until set, so plain
+    /// library use (and these tests) never writes backups.
+    static BACKUP_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Files already backed up this session (by [`write_target`]).
+fn backed_up() -> &'static Mutex<HashSet<PathBuf>> {
+    static DONE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    DONE.get_or_init(Default::default)
+}
+
+/// Turn backups on (into `dir`) or off (`None`) for saves ticketed on this
+/// thread from now on.
+pub fn set_backup_directory(dir: Option<PathBuf>) {
+    BACKUP_DIR.with(|d| *d.borrow_mut() = dir);
+}
+
+/// The backup of `target` (an absolute path) inside `dir`: the whole path with
+/// `!` doubled and each separator turned into `!`, plus `~` — Emacs's naming
+/// for `backup-directory-alist`, so two `mod.rs` never share a backup.
+pub fn backup_path(dir: &Path, target: &Path) -> PathBuf {
+    let mut name = String::new();
+    for c in target.to_string_lossy().chars() {
+        match c {
+            '!' => name.push_str("!!"),
+            // `:` is a Windows drive letter's.
+            '/' | '\\' | ':' => name.push('!'),
+            c => name.push(c),
+        }
+    }
+    name.push('~');
+    dir.join(name)
+}
+
+/// Copy `target` to its backup if backups are on, it exists, and it hasn't
+/// been backed up yet this session. Best effort: a backup that can't be made
+/// never blocks the save itself (losing the edit would be worse), and is
+/// retried on the next save.
+fn backup_once(target: &Path, dir: Option<&Path>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    if backed_up()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(target)
+    {
+        return;
+    }
+    let done = match fs::metadata(target) {
+        Ok(meta) if meta.is_file() => fs::create_dir_all(dir)
+            .and_then(|()| fs::copy(target, backup_path(dir, target)))
+            .is_ok(),
+        // Nothing on disk yet (a new file): nothing to back up.
+        Err(err) => err.kind() == io::ErrorKind::NotFound,
+        Ok(_) => true,
+    };
+    if done {
+        backed_up()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(target.to_path_buf());
+    }
+}
+
 // --- External changes ------------------------------------------------------
 //
 // A buffer's text is based on the file as it was when the buffer last read or
@@ -208,7 +296,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 //
 // Every buffer save goes through `write_sequenced`, which records what it
 // wrote; visits and reverts record what they read via `note_synced`. Plain
-// `atomic_write` (Scheme's `write-file`) records nothing on purpose: a script
+// `atomic_write` (Scheme's `write-file-text`) records nothing on purpose: a script
 // rewriting a file that a buffer has open is exactly the change a later save
 // of that buffer must not clobber unasked.
 
@@ -403,7 +491,7 @@ fn must_write_in_place(_meta: &fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn writable(path: &Path) -> bool {
+pub fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return false;
@@ -413,7 +501,7 @@ fn writable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn writable(path: &Path) -> bool {
+pub fn writable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| !m.permissions().readonly())
 }
 
@@ -574,6 +662,45 @@ mod tests {
         assert!(in_flight() >= 1);
         b.failed();
         assert!(failures() > before);
+    }
+
+    #[test]
+    fn the_first_save_of_a_session_backs_the_file_up_once() {
+        let dir = scratch_dir("backup");
+        let backups = dir.join("backups");
+        let file = dir.join("f.txt");
+        fs::write(&file, "original").unwrap();
+        // Off by default: no backup.
+        write_now(&file, b"one").unwrap();
+        assert!(!backups.exists());
+        set_backup_directory(Some(backups.clone()));
+        let other = dir.join("g.txt");
+        fs::write(&other, "g").unwrap();
+        write_now(&other, b"g2").unwrap();
+        write_now(&other, b"g3").unwrap();
+        // The copy is what was on disk before the first backed-up save, not
+        // any later one.
+        let backup = backup_path(&backups, &write_target(&other));
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "g");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("!g.txt~")
+        );
+        // A new file has nothing to back up.
+        let new = dir.join("new.txt");
+        write_now(&new, b"n").unwrap();
+        assert!(!backup_path(&backups, &write_target(&new)).exists());
+        set_backup_directory(None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backup_names_encode_the_whole_path() {
+        let name = backup_path(Path::new("/b"), Path::new("/home/a!b/x.rs"));
+        assert_eq!(name, Path::new("/b").join("!home!a!!b!x.rs~"));
     }
 
     #[test]

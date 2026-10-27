@@ -185,14 +185,15 @@ impl Editor {
     }
 
     pub(super) fn install_active(&mut self, doc: Document) {
-        self.active = doc;
+        let left = std::mem::replace(&mut self.active, doc).name;
         // A keyboard selection belongs to the buffer just left.
         self.special_select_drop();
         if self.render_redirect.as_deref() == Some(self.active.name.as_str()) {
             self.render_redirect = None; // see `end_redirect_to`
         }
-        // Markers are positions in the previous buffer; drop them on a switch.
-        self.script.clear_markers();
+        // Markers are positions in the previous buffer; drop them on a switch
+        // (buffer-bound ones — point registers — park until it is back).
+        self.script.switch_markers(&left, &self.active.name);
         // Secondary selections / snippet fields are marker-backed, so they're
         // gone with the markers — forget their (now dangling) head+anchor pairs
         // and any avy hints.
@@ -468,7 +469,10 @@ impl Editor {
             return;
         }
         let name = self.unique_buffer_name(&name, &path);
-        self.switch_to_doc(make_document(name.clone(), Some(path), &contents));
+        // A file we can't write opens read-only, as in Emacs.
+        let read_only = path.exists() && !crate::save::writable(&path);
+        self.switch_to_doc(make_document(name.clone(), Some(path.clone()), &contents));
+        self.active.read_only = read_only;
         self.parse_full();
         self.move_to(0, cx);
         if let Some(goto) = goto {
@@ -476,6 +480,7 @@ impl Editor {
         }
         self.run_mode_hooks_once(cx);
         self.echo(format!("Visiting {name}"), cx);
+        self.warn_if_locked(&path, cx);
         self.run_hook("find-file-hook"); // Emacs find-file-hook
         self.reconcile_watches(cx); // watch the newly-visited file (auto-revert)
     }
@@ -1449,6 +1454,7 @@ impl Editor {
     /// that reopens the staged update is spawned there, at the very end; if
     /// that fails the app stays running and says so.
     pub(super) fn finish_quit(&mut self, relaunch: bool, cx: &mut Context<Self>) {
+        self.release_locks(cx);
         let id = cx.entity_id();
         cx.defer(move |cx| crate::workspace::quit_confirmed(id, relaunch, cx));
     }
