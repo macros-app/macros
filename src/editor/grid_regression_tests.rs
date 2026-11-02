@@ -733,6 +733,38 @@ fn regression_point_mode_lands_on_hidden_column(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn regression_arrowing_back_through_a_formula_moves_the_caret(cx: &mut TestAppContext) {
+    let (ed, _) = setup(cx, "a,b,c\n1,2,3\n4,5,6\n", false);
+    scheme(&ed, cx, "(grid-move-to 1 0)");
+    // Typed fresh: right after `(` the arrows point.
+    keys(&ed, cx, "= 1 * ( down");
+    assert_eq!(edit_text(&ed, cx).as_deref(), Some("=1*(A3"));
+    keys(&ed, cx, "ctrl-g");
+    // Moving the caret back onto `*(` keeps the arrows on the text.
+    keys(&ed, cx, "= 1 * ( 2 left left left right right");
+    assert_eq!(edit_text(&ed, cx).as_deref(), Some("=1*(2"));
+    // Typing an operator lets them point again.
+    keys(&ed, cx, "ctrl-g = 1 * 2 left + down");
+    assert_eq!(edit_text(&ed, cx).as_deref(), Some("=1*+A32"));
+    keys(&ed, cx, "ctrl-g");
+    // Opening a cell's existing formula starts in Edit mode.
+    scheme(&ed, cx, "(grid-set-cell 1 2 \"=1-((1-0.1)*(\")");
+    scheme(&ed, cx, "(grid-move-to 1 2)");
+    scheme(&ed, cx, "(grid-edit-end)");
+    keys(&ed, cx, "left left");
+    assert_eq!(edit_text(&ed, cx).as_deref(), Some("=1-((1-0.1)*("));
+    // A click on a cell still points it in.
+    ed.update(cx, |e, _| {
+        let g = e.active.grid.as_deref_mut().unwrap();
+        let ed = g.view.edit.as_mut().unwrap();
+        ed.end();
+        assert!(!ed.arrows_point() && ed.point_eligible());
+        ed.set_point((0, 0), (0, 0));
+        assert!(ed.arrows_point(), "the arrows steer what a click pointed");
+    });
+}
+
 #[test]
 fn regression_unclosed_parens_quoted_sheet() {
     use crate::formula::engine::store_formula;

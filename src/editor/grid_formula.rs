@@ -878,7 +878,7 @@ impl Editor {
         let Some(e) = g.view.edit.as_ref() else {
             return false;
         };
-        if !e.point_eligible() {
+        if !e.arrows_point() {
             return false;
         }
         let (anchor, at) = match &e.point {
@@ -1039,6 +1039,7 @@ impl Editor {
         e.text.replace_range(c.start..e.caret, &format!("{name}("));
         e.caret = c.start + name.len() + 1;
         e.point = None;
+        e.arrows_point = true;
         self.grid_after(cx);
         true
     }

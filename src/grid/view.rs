@@ -389,6 +389,10 @@ pub struct CellEdit {
     /// Point mode: the reference the arrow keys are steering, inserted at
     /// `span` in `text` (see [`CellEdit::point_eligible`]).
     pub point: Option<PointRef>,
+    /// Whether the arrow keys may point (Excel's Enter mode): set by typing
+    /// or deleting, cleared by moving the caret (Edit mode), so arrowing
+    /// back through `=1*(2` moves the caret rather than inserting `C3`.
+    pub arrows_point: bool,
 }
 
 /// The LSP-style dropdown of function names for the partial name before the
@@ -414,9 +418,10 @@ pub struct PointRef {
 }
 
 impl CellEdit {
-    /// Whether the arrows should point at cells rather than move the caret:
-    /// a formula whose caret sits right after an operator, `(`, `,`, or `=`
-    /// — or at the end of a reference pointing just inserted.
+    /// Whether a reference may be pointed in at the caret (a click on a
+    /// cell inserts one): a formula whose caret sits right after an
+    /// operator, `(`, `,`, or `=` — or at the end of a reference pointing
+    /// just inserted. The arrows also need [`Self::arrows_point`].
     pub fn point_eligible(&self) -> bool {
         if !self.text.starts_with('=') {
             return false;
@@ -431,6 +436,12 @@ impl CellEdit {
             .chars()
             .next_back()
             .is_some_and(|c| "=(,+-*/^&<>:;".contains(c))
+    }
+
+    /// Whether the arrow keys should point at cells rather than move the
+    /// caret: [`Self::point_eligible`], unless the caret was moved there.
+    pub fn arrows_point(&self) -> bool {
+        self.arrows_point && self.point_eligible()
     }
 
     /// Insert (or replace the pointed) reference text for `anchor`..`at`.
@@ -455,13 +466,13 @@ impl CellEdit {
             anchor,
             at,
         });
+        self.arrows_point = true;
     }
     pub fn new(row: usize, col: usize, original: &str, text: String, caret_at_end: bool) -> Self {
         let caret = if caret_at_end { text.len() } else { 0 };
         Self {
             row,
             col,
-            text,
             caret,
             sel_anchor: None,
             original: original.to_string(),
@@ -469,10 +480,15 @@ impl CellEdit {
             completion: None,
             completion_dismissed: None,
             point: None,
+            // Typing a fresh entry can point straight away; opening a
+            // cell's existing text starts in Edit mode.
+            arrows_point: text != original,
+            text,
         }
     }
 
     pub fn insert(&mut self, s: &str) {
+        self.arrows_point = true;
         self.delete_selection();
         self.text.insert_str(self.caret, s);
         self.caret += s.len();
@@ -507,12 +523,14 @@ impl CellEdit {
 
     /// Select the whole text, caret at the end.
     pub fn select_all(&mut self) {
+        self.arrows_point = false;
         self.sel_anchor = Some(0);
         self.caret = self.text.len();
     }
 
     /// Select the word (or run of non-word chars) around char index `chars`.
     pub fn select_word_at(&mut self, chars: usize) {
+        self.arrows_point = false;
         let at = self
             .text
             .char_indices()
@@ -602,6 +620,7 @@ impl CellEdit {
     }
 
     pub fn backspace(&mut self) {
+        self.arrows_point = true;
         if self.delete_selection() {
             return;
         }
@@ -611,6 +630,7 @@ impl CellEdit {
     }
 
     pub fn delete(&mut self) {
+        self.arrows_point = true;
         if self.delete_selection() {
             return;
         }
@@ -620,36 +640,43 @@ impl CellEdit {
 
     pub fn left(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = self.prev_boundary();
     }
 
     pub fn right(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = self.next_boundary();
     }
 
     pub fn home(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = 0;
     }
 
     pub fn end(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = self.text.len();
     }
 
     pub fn word_left(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = self.word_back();
     }
 
     pub fn word_right(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = self.word_forward();
     }
 
     /// `C-w`: delete the word before the caret.
     pub fn kill_word_back(&mut self) {
+        self.arrows_point = true;
         if self.delete_selection() {
             return;
         }
@@ -661,6 +688,7 @@ impl CellEdit {
     /// `C-u`: delete everything before the caret.
     pub fn kill_to_start(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = true;
         self.text.replace_range(..self.caret, "");
         self.caret = 0;
     }
@@ -668,12 +696,14 @@ impl CellEdit {
     /// `C-k`: delete everything after the caret.
     pub fn kill_to_end(&mut self) {
         self.sel_anchor = None;
+        self.arrows_point = true;
         self.text.truncate(self.caret);
     }
 
     /// Place the caret at char index `chars` (clamped), for clicks.
     pub fn set_caret_chars(&mut self, chars: usize) {
         self.sel_anchor = None;
+        self.arrows_point = false;
         self.caret = self
             .text
             .char_indices()
