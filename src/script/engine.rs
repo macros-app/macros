@@ -813,6 +813,9 @@ pub(crate) fn engine_thread(
         // `with-process-env` extents never span jobs (one an error escaped
         // without popping would otherwise leak into every later spawn).
         crate::process::reset_dynamic();
+        // Nor do in-script minor-mode toggles: each job reads its snapshot
+        // plus only the toggles it queued itself.
+        queue.reset_minor_overlay();
         // A panicking primitive must not kill the engine thread: without this
         // every later eval would fail with "script engine stopped" until the
         // editor restarts. The job reports the panic as its error instead.

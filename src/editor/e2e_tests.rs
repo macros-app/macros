@@ -2057,6 +2057,53 @@ fn bundled_language_mode_hook_alias(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn minor_mode_toggles_in_one_script_see_each_other(cx: &mut gpui::TestAppContext) {
+    // Two toggles in ONE script flip twice (body on each flip) and leave the
+    // mode off; a later read in the same script sees a queued enable; the
+    // next command reads the applied stack.
+    let editor = setup(cx, "text");
+    for src in [
+        r#"(define *flips* 0)
+           (define-minor-mode dbl-mode "D." :lighter " Dbl" (set! *flips* (+ *flips* 1)))"#,
+        "(dbl-mode) (dbl-mode)",
+    ] {
+        editor.update(cx, |e, cx| {
+            e.publish_point();
+            e.run_script_blocking(src, cx);
+        });
+        settle(&editor, cx);
+    }
+    editor.read_with(cx, |e, _| {
+        assert!(
+            !e.active.modes.minor("dbl-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+        assert_eq!(e.script.eval("*flips*").unwrap().value.unwrap(), "2");
+    });
+    editor.update(cx, |e, cx| {
+        e.publish_point();
+        e.run_script_blocking(
+            "(dbl-mode 1) (define *seen* (minor-mode-enabled? 'dbl-mode))",
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, _| {
+        assert!(
+            e.active.modes.minor("dbl-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+        assert_eq!(e.script.eval("*seen*").unwrap().value.unwrap(), "#true");
+        e.publish_point();
+        let fresh = e.script.eval("(minor-mode-enabled? 'dbl-mode)").unwrap();
+        assert_eq!(fresh.value.unwrap(), "#true");
+        assert_eq!(e.script.eval("*flips*").unwrap().value.unwrap(), "3");
+    });
+}
+
+#[gpui::test]
 fn minor_mode_enable_disable_is_idempotent_at_the_apply(cx: &mut gpui::TestAppContext) {
     // The editor's apply arm is the idempotency point: a redundant enable or
     // disable must not re-push/re-remove, and — the real bug this guards —
@@ -2065,8 +2112,6 @@ fn minor_mode_enable_disable_is_idempotent_at_the_apply(cx: &mut gpui::TestAppCo
     let editor = setup(cx, "text");
     // Each toggle is its own script run — the pre-command snapshot refreshes
     // between evals, exactly as separate keystrokes dispatch in real use.
-    // (Batching them in ONE eval would read one stale snapshot for all five:
-    // the documented snapshot-model caveat, not a bug.)
     for src in [
         r#"(define-minor-mode idem-mode "I." :lighter " Id")"#,
         r#"(define *fires* 0)

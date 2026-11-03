@@ -50,7 +50,7 @@ Unknown keywords raise an error at definition time. Not supported: `:global`, `:
 
 Like Emacs, `define-minor-mode` defines `my-mode`, `my-mode-map`, and `my-mode-hook`:
 
-- `my-mode` — the toggle command. Internally it queues `enable-minor-mode` / `disable-minor-mode`, and the editor applies the push/remove and fires the hooks.
+- `my-mode` — the toggle command. Internally it queues `enable-minor-mode` / `disable-minor-mode`, and the editor applies the push/remove and fires the hooks. Reads in the same script already see the change: `(my-mode 1)` followed by `(minor-mode-enabled? 'my-mode)` returns `#t`, and `(my-mode) (my-mode)` flips twice (toggles queued after switching to another buffer or window aren't tracked this way, since they apply to the new buffer).
 - `my-mode-map` — an introspection alist of your `:keymap` bindings. The framework *also* installs the chords into the live `my-mode` / `evil-normal:my-mode` / `helix-normal:my-mode` keymaps, which resolve only while the mode is on the stack.
 - `my-mode-hook` — a parity binding holding `#f`. The **live** hook is keyed by the string `"my-mode-hook"`; add and remove hooks by that name:
 

@@ -57,7 +57,10 @@
 ;; --- per-buffer state (Rust: entries on the mode stack) -----------------------
 ;; Active minor modes are stack entries above the major. The snapshot carries
 ;; them space-joined; membership is all Scheme needs (mode names are
-;; identifiers — no spaces).
+;; identifiers — no spaces). `(active-minor-modes)` also applies the
+;; enable/disable-minor-mode calls this script has queued so far (Rust side,
+;; reset per script), so a read after a toggle sees it. Toggles queued after
+;; a buffer or window switch target the new buffer and are not reflected.
 (define (minor-mode-active? name)
   (let ((n (if (symbol? name) (symbol->string name) name)))
     (string-contains? (string-append " " (active-minor-modes) " ")
@@ -89,15 +92,10 @@
                             (string-append "helix-normal:" n))
         (map (lambda (b) (list (car b) (cadr b))) keymap)))))
 
-;; STALE-SNAPSHOT CAVEAT: `minor-mode-active?` reads the command-time snapshot
-;; taken BEFORE this command runs, so two toggles of the SAME mode within one
-;; script both see the pre-command state (the second toggle computes the same
-;; flip as the first). Interactive use and one toggle per script are fine;
-;; scripts that need the fresh state should check the return value of the
-;; first toggle instead of re-reading `minor-mode-active?`.
 ;; Emacs arg semantics: no arg = toggle; #t or positive number = on; #f or
-;; non-positive number = off. minor-mode-active? reads the PRE-command
-;; snapshot — exactly the state before this command. Order per call: run the
+;; non-positive number = off. minor-mode-active? reads the pre-command
+;; snapshot plus the toggles this script already queued, so `(m) (m)` flips
+;; twice. Order per call: run the
 ;; body ONLY on an actual flip (DEVIATION from Emacs, which runs the body on
 ;; every invocation; use MODE-hook for unconditional per-invocation work),
 ;; queue the enable/disable (the EDITOR applies it and fires NAME-hook from
@@ -227,5 +225,6 @@
                  (list 'register-command (list 'quote name-sym)))))])))
 
 ;; Public: is NAME on in the current buffer? Other modules gate their hooks
-;; and key handlers on this (reads the pre-command snapshot).
+;; and key handlers on this (the pre-command snapshot plus this script's
+;; queued toggles).
 (define (minor-mode-enabled? name) (minor-mode-active? name))

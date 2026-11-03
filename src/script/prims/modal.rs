@@ -104,11 +104,14 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     // `(major-mode)` → the buffer's major mode name ("rust", "org-mode", …).
     register_snapshot_read(reg, snapshot, "major-mode", |s| s.major_mode.clone());
     // `(active-minor-modes)` → the active buffer's minor modes, space-joined
-    // ("" when none). Scheme tests membership (names are identifiers, no
-    // spaces).
-    register_snapshot_read(reg, snapshot, "active-minor-modes", |s| {
-        s.minor_modes.clone()
-    });
+    // ("" when none), including toggles this script already queued. Scheme
+    // tests membership (names are identifiers, no spaces).
+    {
+        let (snapshot, queue) = (snapshot.clone(), queue.clone());
+        reg.register_fn("active-minor-modes", move || {
+            queue.minor_modes(&snapshot.load().minor_modes)
+        });
+    }
     // `(mode-stack)` → the active buffer's mode names, bottom-up,
     // space-joined ("fundamental rust my-minor" — topmost last).
     register_snapshot_read(reg, snapshot, "mode-stack", |s| s.mode_stack.clone());

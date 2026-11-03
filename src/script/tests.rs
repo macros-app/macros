@@ -14670,6 +14670,70 @@ mod minor_mode_lib {
     }
 
     #[test]
+    fn minor_mode_reads_see_toggles_queued_in_the_same_script() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        engine
+            .eval(
+                r#"(define *flips* 0)
+                   (define-minor-mode twice-mode "T." (set! *flips* (+ *flips* 1)))"#,
+            )
+            .unwrap();
+        // Two toggles in one script: on, then off — the body runs on each
+        // flip, and the last queued state wins.
+        let out = engine
+            .eval("(list (twice-mode) (twice-mode) (minor-mode-enabled? 'twice-mode))")
+            .unwrap();
+        assert_eq!(out.value.as_deref(), Some("(#true #false #false)"));
+        assert_eq!(v(&engine, "*flips*"), "2");
+        let toggles: Vec<_> = out
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                EditorCommand::EnableMinorMode(n) => Some(format!("+{n}")),
+                EditorCommand::DisableMinorMode(n) => Some(format!("-{n}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(toggles, ["+twice-mode", "-twice-mode"]);
+        // An explicit enable is visible to a read later in the same script,
+        // as is a direct primitive call.
+        assert_eq!(
+            v(&engine, "(twice-mode 1) (minor-mode-enabled? 'twice-mode)"),
+            "#true"
+        );
+        assert_eq!(
+            v(
+                &engine,
+                r#"(enable-minor-mode "other") (disable-minor-mode "absent") (active-minor-modes)"#
+            ),
+            "\"other\""
+        );
+        // A fresh script starts from the snapshot alone: the previous jobs'
+        // toggles were never applied here, so the stack (empty) is the truth.
+        assert_eq!(v(&engine, "(minor-mode-enabled? 'twice-mode)"), "#false");
+        engine.set_snapshot(EditorSnapshot {
+            minor_modes: "twice-mode".into(),
+            ..Default::default()
+        });
+        assert_eq!(v(&engine, "(minor-mode-enabled? 'twice-mode)"), "#true");
+        assert_eq!(
+            v(&engine, "(twice-mode 0) (minor-mode-enabled? 'twice-mode)"),
+            "#false"
+        );
+        // After a buffer switch, toggles target the new buffer, so the
+        // (old buffer's) reads don't pick them up.
+        engine.set_snapshot(EditorSnapshot::default());
+        assert_eq!(
+            v(
+                &engine,
+                r#"(switch-to-buffer "other") (twice-mode 1) (minor-mode-enabled? 'twice-mode)"#
+            ),
+            "#false"
+        );
+    }
+
+    #[test]
     fn minor_mode_rejects_unknown_keywords_and_bad_docs() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
