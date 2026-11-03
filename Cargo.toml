@@ -143,7 +143,7 @@ chrono = "0.4"
 # (fetched as a `.sha256` sidecar next to the artifact on R2).
 ureq = "3"
 semver = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 # Encoding + OS randomness for the Scheme crypto primitives (`base64url-encode`,
 # `hex->base64url`, `random-bytes`) that let a Steel package run an OAuth PKCE
@@ -186,7 +186,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 # macros-email-client; also usable by any package wanting a real database). The
 # `bundled` feature compiles SQLite from source — no system libsqlite3 — and
 # includes FTS5, the full-text search engine those primitives expose.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # Cross-platform cache dir (`~/Library/Caches` / `~/.cache` / `%LOCALAPPDATA%`)
 # for staging update downloads and compiled user grammars (src/grammar.rs).
 dirs = "7"
@@ -203,9 +203,10 @@ libloading = "0.9"
 # `revision` for the HEAD rev-walk behind `gix-log`, `mailmap` so blame shows
 # `.mailmap`-resolved authors like `git blame` does, and `sha1` so gix-hash's
 # `Kind` object-id enum is non-empty (without a sha feature the whole crate
-# fails to compile). `max-performance-safe` pulls the pure-Rust `zlib-rs`
+# fails to compile). `max-performance` (renamed from `max-performance-safe` in
+# 0.90, when zlib-rs became unconditional) pulls the pure-Rust `zlib-rs`
 # inflate — fast, and no system zlib/C toolchain required.
-gix = { version = "0.89.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "mailmap", "max-performance-safe"] }
+gix = { version = "0.90.0", default-features = false, features = ["blame", "revision", "sha1", "blob-diff", "mailmap", "max-performance"] }
 
 # All unix: `libc::kill` for the process-group kill in `kill-process`. On
 # macOS additionally `libc::statfs` to detect a read-only volume (DMG / App
