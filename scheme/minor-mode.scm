@@ -4,8 +4,8 @@
 ;; modes as real entries on the editor's mode stack (Rust state).
 ;; Doc: web/content/docs/minor-mode.md
 ;;
-;; Emacs parity subset: :lighter, :init-value, :keymap, and a toggle body.
-;; Modes are buffer-local. `:global`, `:variable`, `:interactive`,
+;; Emacs parity subset: :lighter, :init-value, :keymap, :global, and a toggle
+;; body, plus `define-globalized-minor-mode`. `:variable`, `:interactive`,
 ;; `:set`/`:initialize`/`:type`, `:after-hook`, and the pre-Emacs-21
 ;; positional triplet are NOT supported — see the doc page for why.
 ;;
@@ -24,6 +24,11 @@
 ;;    AND disable, from the same path as major-mode hooks.
 ;;  - `:init-value` modes are pushed at a buffer's FIRST activation (Rust
 ;;    side, init_minors_ran) — a later user disable sticks.
+;;  - `:global` modes are NOT stack entries: the editor keeps one on/off
+;;    state in a global layer that key lookup consults between every
+;;    buffer's local minors and its major chain (local minors shadow global
+;;    ones). Same enable/disable primitives; the Rust side routes by the
+;;    registered definition. Hooks and body run once per toggle.
 ;;
 ;; Probe outcomes that still govern the macro mechanics (see
 ;; src/script/tests.rs :: minor_mode_probes): syntax-case identifier synthesis
@@ -122,7 +127,8 @@
 
 ;; --- the macro ----------------------------------------------------------------
 ;; Grammar: (define-minor-mode NAME DOC [:lighter S] [:init-value B]
-;;                                [:keymap ((CHORD . CMD) ...)] [BODY ...])
+;;                                [:global B] [:keymap ((CHORD CMD) ...)]
+;;                                [BODY ...])
 ;; Expansion shape:
 ;;   (begin
 ;;     (define NAME-map <keymap datum>)             ; introspection alist
@@ -130,6 +136,7 @@
 ;;                                                  ; hook key is the STRING
 ;;     (minor-mode--install-scoped-keys 'NAME '<keymap>)
 ;;     (register-minor-mode-def "NAME" lighter init-value)  ; Rust stack entry
+;;                                ; (register-global-minor-mode-def for :global)
 ;;     (minor-mode--register! 'NAME props-with-body-thunk)
 ;;     (define NAME (lambda arg (minor-mode--toggle 'NAME arg)))
 ;;     (register-command 'NAME))
@@ -159,12 +166,12 @@
                                (cons (reverse body) (reverse kws)))
                               ((and (pair? items)
                                     (memq (car items)
-                                          '(:lighter :init-value :keymap))
+                                          '(:lighter :init-value :keymap :global))
                                     (pair? (cdr items)))
                                (peel (cddr items)
                                      (cons (list (car items) (cadr items)) kws)
                                      body))
-                              ((memq (car items) '(:lighter :init-value :keymap))
+                              ((memq (car items) '(:lighter :init-value :keymap :global))
                                (error "define-minor-mode: keyword needs a value:"
                                       (car items)))
                               ((and (pair? items)
@@ -190,6 +197,7 @@
          (let ((lighter (kwval kws ':lighter ""))
                (init-value (kwval kws ':init-value #f))
                (keymap (kwval kws ':keymap '()))
+               (global (if (kwval kws ':global #f) #t #f))
                (name-sym (syntax->datum #'name)))
            ;; The whole expansion is a constructed datum returned from the
            ;; transformer — defines land in the caller's scope (probe:
@@ -206,14 +214,18 @@
                        #f)
                  (list 'minor-mode--install-scoped-keys (list 'quote name-sym)
                        (list 'quote keymap))
-                 ;; The Rust-side definition: stack entry + lighter +
-                 ;; :init-value handling. "" lighter = none.
-                 (list 'register-minor-mode-def mode-name lighter init-value)
+                 ;; The Rust-side definition: stack entry (or global layer)
+                 ;; + lighter + :init-value handling. "" lighter = none.
+                 (list (if global
+                           'register-global-minor-mode-def
+                           'register-minor-mode-def)
+                       mode-name lighter init-value)
                  (list 'minor-mode--register!
                        (list 'quote name-sym)
                        (list 'list
                              (list 'cons ''lighter lighter)
                              (list 'cons ''init-value init-value)
+                             (list 'cons ''global global)
                              (list 'cons ''keymap (list 'quote keymap))
                              (list 'cons ''doc doc-str)
                              (list 'cons ''body
@@ -226,6 +238,30 @@
                                    (list 'quote name-sym) 'arg)))
                  (list 'register-command (list 'quote name-sym)))))])))
 
-;; Public: is NAME on in the current buffer? Other modules gate their hooks
-;; and key handlers on this (reads the pre-command snapshot).
+;; --- globalized minor modes ---------------------------------------------------
+;; (define-globalized-minor-mode GLOBAL-MODE MODE TURN-ON [KEYWORD VAL]... [BODY])
+;;
+;; Defines GLOBAL-MODE as a `:global` minor mode (keywords and body pass
+;; through to define-minor-mode) and registers the per-buffer wiring with the
+;; editor: while GLOBAL-MODE is on, the editor calls TURN-ON — a NAMED
+;; function, typically `(lambda () (MODE 1))` given a name — in the current
+;; buffer at enable, in each buffer the first time it is activated after
+;; that, and again after every major-mode switch. Switching GLOBAL-MODE off
+;; removes MODE from every buffer. MODE stays an ordinary buffer-local mode,
+;; so `(MODE 0)` in one buffer still works.
+(define-syntax define-globalized-minor-mode
+  (syntax-rules ()
+    [(_ global mode turn-on rest ...)
+     (begin
+       (define-minor-mode global
+         "Toggle a buffer-local minor mode in every buffer."
+         :global #t
+         rest ...)
+       (register-globalized-minor-mode (symbol->string 'global)
+                                       (symbol->string 'mode)
+                                       (symbol->string 'turn-on)))]))
+
+;; Public: is NAME on in the current buffer (a `:global` mode counts as on in
+;; every buffer)? Other modules gate their hooks and key handlers on this
+;; (reads the pre-command snapshot).
 (define (minor-mode-enabled? name) (minor-mode-active? name))

@@ -302,16 +302,28 @@ pub enum EditorCommand {
         parent: String,
         language: String,
     },
-    /// Register a minor-mode definition: its lighter ("" = none) and whether
-    /// it is `:init-value` (enabled in newly-activated buffers). Queued by
+    /// Register a minor-mode definition: its lighter ("" = none), whether
+    /// it is `:init-value` (enabled in newly-activated buffers) and whether
+    /// it is `:global` (one editor-wide state). Queued by
     /// `define-minor-mode`; the enable/disable commands read it back.
     RegisterMinorMode {
         name: String,
         lighter: String,
         init_value: bool,
+        global: bool,
+    },
+    /// `define-globalized-minor-mode`: while the `:global` mode `name` is on,
+    /// run the Steel function `turn_on` in every buffer as it is activated
+    /// (once per buffer) and after each major-mode switch; switching `name`
+    /// off turns the buffer-local `mode` off in every buffer.
+    RegisterGlobalizedMinorMode {
+        name: String,
+        mode: String,
+        turn_on: String,
     },
     /// Push the minor mode onto the active buffer's mode stack (above the
-    /// major), fire its hooks, and update the mode line. Idempotent.
+    /// major) — or, for a `:global` mode, switch it on editor-wide — fire its
+    /// hooks, and update the mode line. Idempotent.
     EnableMinorMode(String),
     /// A user `add-auto-mode` entry (Rust `regex` pattern → mode NAME). The
     /// editor consults these BEFORE the built-in extension→language detection

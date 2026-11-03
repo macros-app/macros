@@ -152,6 +152,8 @@ impl Editor {
                         // Majors render their name; minors their lighter
                         // (fallback: the name).
                         let mut modes = self.active.modes.names_with_lighters();
+                        // `:global` minors render after the buffer's own.
+                        modes.extend(self.global_minor_lighters());
                         if self.is_narrowed() {
                             modes.push("Narrow".to_string());
                         }

@@ -2099,3 +2099,149 @@ fn minor_mode_enable_disable_is_idempotent_at_the_apply(cx: &mut gpui::TestAppCo
         assert_eq!(fires, "2", "hook must fire once per real transition");
     });
 }
+
+/// Open a fresh temp file `name` as the active buffer (a buffer that did not
+/// exist when the test's modes were enabled).
+fn open_temp_file(editor: &Entity<Editor>, cx: &mut TestAppContext, tag: &str, name: &str) {
+    let dir = std::env::temp_dir().join(format!("macros-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, "hello").unwrap();
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(editor, cx);
+}
+
+/// Run each script as its own command (fresh pre-command snapshot), the way
+/// separate keystrokes dispatch.
+fn run_each(editor: &Entity<Editor>, cx: &mut TestAppContext, scripts: &[&str]) {
+    for src in scripts {
+        editor.update(cx, |e, cx| {
+            e.publish_point();
+            e.run_script_blocking(src, cx);
+        });
+        settle(editor, cx);
+    }
+}
+
+#[gpui::test]
+fn global_minor_mode_applies_in_every_buffer(cx: &mut gpui::TestAppContext) {
+    // A `:global` mode is one editor-wide state: its key resolves in a buffer
+    // opened AFTER enabling, its lighter renders there, its hook fires once
+    // per toggle, and disabling removes it everywhere.
+    let editor = setup(cx, "text");
+    run_each(
+        &editor,
+        cx,
+        &[
+            r#"(define-minor-mode gl-mode "G." :global #t :lighter " GL"
+                 :keymap (("ctrl-c q" gl-cmd)))
+               (define *fires* 0)
+               (add-hook "gl-mode-hook" (lambda () (set! *fires* (+ *fires* 1))))"#,
+            "(gl-mode 1)",
+        ],
+    );
+    open_temp_file(&editor, cx, "global-minor", "a.txt");
+    editor.read_with(cx, |e, _| {
+        assert!(e.active.path.is_some(), "the new file is active");
+        // Not a stack entry — the global layer.
+        assert!(!e.active.modes.minor("gl-mode"));
+        assert_eq!(
+            e.keymap.resolve(&e.active.modes, "ctrl-c q"),
+            Some("(gl-cmd)")
+        );
+        let text: String = e
+            .mode_line_segments()
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert!(text.contains("GL"), "mode line: {text}");
+    });
+    // minor-mode-active? sees it in the new buffer, so the toggle flips off.
+    run_each(&editor, cx, &["(gl-mode)"]);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.keymap.resolve(&e.active.modes, "ctrl-c q"), None);
+        assert!(
+            e.inactive
+                .iter()
+                .all(|d| e.keymap.resolve(&d.modes, "ctrl-c q").is_none())
+        );
+        let fires = e.script.eval("*fires*").unwrap().value.unwrap();
+        assert_eq!(fires, "2", "hook fires once per toggle, not per buffer");
+    });
+}
+
+#[gpui::test]
+fn buffer_local_minor_shadows_global_minor(cx: &mut gpui::TestAppContext) {
+    // Precedence: buffer-local minors > global minors > the major chain —
+    // regardless of which was enabled first.
+    let editor = setup(cx, "text");
+    run_each(
+        &editor,
+        cx,
+        &[
+            r#"(define-minor-mode loc-mode "L." :keymap (("ctrl-c w" loc-cmd)))
+               (define-minor-mode glb-mode "G." :global #t
+                 :keymap (("ctrl-c w" glb-cmd) ("ctrl-c e" glb-e)))"#,
+            "(loc-mode 1)",
+            "(glb-mode 1)",
+        ],
+    );
+    editor.read_with(cx, |e, _| {
+        assert_eq!(
+            e.keymap.resolve(&e.active.modes, "ctrl-c w"),
+            Some("(loc-cmd)")
+        );
+        assert_eq!(
+            e.keymap.resolve(&e.active.modes, "ctrl-c e"),
+            Some("(glb-e)")
+        );
+    });
+}
+
+#[gpui::test]
+fn globalized_minor_mode_turns_on_in_new_buffers(cx: &mut gpui::TestAppContext) {
+    // define-globalized-minor-mode: TURN-ON runs in the current buffer at
+    // enable and in each new buffer; switching off clears MODE everywhere.
+    let editor = setup(cx, "text");
+    run_each(
+        &editor,
+        cx,
+        &[
+            r#"(define-minor-mode bl-mode "B." :lighter " BL"
+                 :keymap (("ctrl-c b" bl-cmd)))
+               (define (turn-on-bl) (bl-mode 1))
+               (define-globalized-minor-mode global-bl-mode bl-mode turn-on-bl)"#,
+            "(global-bl-mode 1)",
+        ],
+    );
+    editor.read_with(cx, |e, _| {
+        assert!(e.keymap.global_minor("global-bl-mode"));
+        assert!(
+            e.active.modes.minor("bl-mode"),
+            "TURN-ON ran in the current buffer: {:?}",
+            e.active.modes.names()
+        );
+    });
+    open_temp_file(&editor, cx, "globalized-minor", "b.txt");
+    editor.read_with(cx, |e, _| {
+        assert!(e.active.path.is_some(), "the new file is active");
+        assert!(
+            e.active.modes.minor("bl-mode"),
+            "TURN-ON ran in the new buffer: {:?}",
+            e.active.modes.names()
+        );
+        assert!(e.inactive.iter().any(|d| d.modes.minor("bl-mode")));
+    });
+    // Switching the global mode off clears MODE in every buffer.
+    run_each(&editor, cx, &["(global-bl-mode 0)"]);
+    editor.read_with(cx, |e, _| {
+        assert!(!e.keymap.global_minor("global-bl-mode"));
+        assert!(!e.active.modes.minor("bl-mode"));
+        assert!(
+            e.inactive.iter().all(|d| !d.modes.minor("bl-mode")),
+            "MODE must be off in every buffer"
+        );
+    });
+}

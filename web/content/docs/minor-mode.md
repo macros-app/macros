@@ -1,11 +1,11 @@
 ---
 title: Minor modes
-description: Write Emacs-style minor modes in Steel — one form gives you the toggle command, per-buffer state, a mode-line lighter, and a mode hook.
+description: Write Emacs-style minor modes in Steel — one form gives you the toggle command, per-buffer (or editor-wide) state, a mode-line lighter, and a mode hook.
 ---
 
 # Minor modes
 
-`define-minor-mode` is the Emacs-style way to write a buffer-local minor mode in Steel. One form defines everything a mode needs: the toggle command (M-x registered), per-buffer on/off state, a mode-line lighter, and a mode hook.
+`define-minor-mode` is the Emacs-style way to write a minor mode in Steel — buffer-local by default, or editor-wide with [`:global`](#global-minor-modes). One form defines everything a mode needs: the toggle command (M-x registered), per-buffer on/off state, a mode-line lighter, and a mode hook.
 
 ```scheme
 (define-minor-mode my-mode
@@ -41,10 +41,11 @@ A minor mode is a real entry on the buffer's [mode stack](derived-mode), pushed 
 ## Keywords
 
 - `:lighter STRING` — mode-line text while on (default `""`).
-- `:init-value BOOL` — the mode is enabled in a buffer's **first activation** (default `#f`). If the user disables it there, it stays off in that buffer; other new buffers still start with it on.
+- `:init-value BOOL` — the mode is enabled in a buffer's **first activation** (default `#f`). If the user disables it there, it stays off in that buffer; other new buffers still start with it on. For a `:global` mode, it is switched on once, when the mode is first defined.
+- `:global BOOL` — one editor-wide on/off state instead of per-buffer (default `#f`). See [Global minor modes](#global-minor-modes).
 - `:keymap ((CHORD COMMAND) ...)` — chords active while the mode is on. Note this is a Steel list: chord and command as two elements, not Emacs's dotted `(CHORD . COMMAND)`. Commands are `'symbol`s (or plain strings without `%c`); `%c` substitution forms aren't supported inside a minor-mode keymap — wrap them in a named command first.
 
-Unknown keywords raise an error at definition time. Not supported: `:global`, `:variable`, `:interactive`, `:set`/`:initialize`/`:type`, `:after-hook`, and the pre-Emacs-21 positional triplet.
+Unknown keywords raise an error at definition time. Not supported: `:variable`, `:interactive`, `:set`/`:initialize`/`:type`, `:after-hook`, and the pre-Emacs-21 positional triplet.
 
 ## What the form defines
 
@@ -59,9 +60,54 @@ Like Emacs, `define-minor-mode` defines `my-mode`, `my-mode-map`, and `my-mode-h
 (remove-hook "my-mode-hook" 'my-setup)
 ```
 
+## Global minor modes
+
+```scheme
+(define-minor-mode my-global-mode
+  "Do my thing everywhere."
+  :global #t
+  :lighter " MyG"
+  :keymap (("ctrl-c m g" my-global-thing)))
+```
+
+`M-x my-global-mode` toggles one editor-wide state. While it's on, its keymap (plain, `evil-normal:` and `helix-normal:`), its lighter and `minor-mode-enabled?` apply in **every** buffer — including buffers opened later. Its hook and body run **once per toggle**, not once per buffer.
+
+A global mode is not pushed onto each buffer's mode stack. The editor keeps a single global layer that key lookup consults between the buffer's own minor modes and its major mode:
+
+1. buffer-local minor modes (newest first)
+2. global minor modes (newest first)
+3. the major mode chain, then `fundamental`
+
+So a buffer-local minor mode always shadows a global one on the same chord — even if the global mode was enabled later — and a global mode shadows the major. The lighter renders after the buffer's own minor-mode lighters.
+
+## Globalized minor modes
+
+`define-globalized-minor-mode` turns an ordinary buffer-local mode on everywhere, like Emacs's `global-foo-mode`:
+
+```scheme
+(define-minor-mode my-mode "Do my thing." :lighter " My")
+(define (turn-on-my-mode)
+  (unless (equal? (major-mode) "magit-mode")
+    (my-mode 1)))
+(define-globalized-minor-mode global-my-mode my-mode turn-on-my-mode)
+```
+
+`global-my-mode` is a `:global` minor mode (it takes the same keywords and optional body as `define-minor-mode`). While it's on, the editor calls `TURN-ON`:
+
+- in the current buffer when `global-my-mode` is switched on,
+- in each other buffer the first time it is activated after that — new buffers included,
+- again after every major-mode switch, so `TURN-ON` can decide by major mode.
+
+Switching `global-my-mode` off turns `my-mode` off in every buffer. `my-mode` stays a buffer-local mode, so `(my-mode 0)` in one buffer still works while the global mode is on.
+
 ## Deviations from Emacs
 
 - **The body runs only on an actual flip.** Emacs runs the body on every invocation, even when the mode's state doesn't change. If you need work done on every call regardless, put it on `my-mode-hook` instead (the hook runs after every enable *and* disable).
 - **`:init-value` applies on a buffer's first activation**, not "in every buffer until toggled". A buffer that existed before the mode was defined (or one where you disabled it) doesn't get it pushed again on later switches.
 - **Special buffers clear minors.** Modes set via the editor's special-mode path (magit-style buffers) take over the buffer and start from a fresh stack — the analog of Emacs's `kill-all-local-variables`.
+- **Global modes are a separate layer.** Emacs orders all minor-mode keymaps by definition order in `minor-mode-map-alist`; here buffer-local minors always beat global ones (see [Global minor modes](#global-minor-modes)).
+- **Globalized modes reach existing buffers lazily.** Emacs runs `TURN-ON` in every live buffer at once. Here it runs in the current buffer right away and in each other existing buffer when you next switch to it. That buffer's mode line, and its keys, are updated at that point.
+- **`TURN-ON` must be a named function.** Pass a symbol bound to a zero-argument function, not a `lambda`.
+- **Turning a globalized mode off** removes `MODE` from every buffer directly (no per-buffer `(MODE -1)` call). `MODE`'s body doesn't run, and its hook fires once, not once per buffer.
+- **The generated docstring is generic.** `define-globalized-minor-mode` takes no docstring.
 - **No custom `defcustom` wiring** (`:set`, `:type`, groups). Mode variables are plain Scheme state.

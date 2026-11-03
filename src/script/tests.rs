@@ -14588,8 +14588,8 @@ mod minor_mode_lib {
         // Registered on the Rust side: stack entry + lighter + init-value.
         assert!(
             defined.commands.iter().any(
-                |c| matches!(c, EditorCommand::RegisterMinorMode { name, lighter, init_value }
-                    if name == "test-mode" && lighter == " Tst" && !init_value)
+                |c| matches!(c, EditorCommand::RegisterMinorMode { name, lighter, init_value, global }
+                    if name == "test-mode" && lighter == " Tst" && !init_value && !global)
             ),
             "no RegisterMinorMode queued: {:?}",
             defined.commands
@@ -15682,8 +15682,8 @@ mod minor_mode_stack_lib {
             .unwrap();
         assert!(out.commands.iter().any(|c| matches!(
             c,
-            EditorCommand::RegisterMinorMode { name, lighter, init_value }
-                if name == "m1" && lighter == " M1" && !init_value
+            EditorCommand::RegisterMinorMode { name, lighter, init_value, global }
+                if name == "m1" && lighter == " M1" && !init_value && !global
         )));
         assert!(
             out.commands

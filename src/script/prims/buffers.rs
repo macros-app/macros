@@ -91,6 +91,32 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             name,
             lighter,
             init_value,
+            global: false,
+        },
+    );
+    // `(register-global-minor-mode-def name lighter init-value)` — the same
+    // for a `:global` minor mode (one editor-wide state).
+    register_ternary(
+        reg,
+        queue,
+        "register-global-minor-mode-def",
+        |name, lighter, init_value| EditorCommand::RegisterMinorMode {
+            name,
+            lighter,
+            init_value,
+            global: true,
+        },
+    );
+    // `(register-globalized-minor-mode name mode turn-on)` — the per-buffer
+    // TURN-ON wiring behind `define-globalized-minor-mode`.
+    register_ternary(
+        reg,
+        queue,
+        "register-globalized-minor-mode",
+        |name, mode, turn_on| EditorCommand::RegisterGlobalizedMinorMode {
+            name,
+            mode,
+            turn_on,
         },
     );
     register_unary(

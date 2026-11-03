@@ -271,6 +271,15 @@ enum MinibufferPurpose {
 /// the others are snapshots in [`Editor::inactive`]. Switching buffers swaps
 /// whole [`Document`]s (see `snapshot_active` / `install_active`), so a
 /// buffer-local field can never leak across a switch.
+/// One `define-globalized-minor-mode`: while the `:global` mode `global` is
+/// on, `turn_on` runs in each buffer; switching it off clears `mode`.
+#[derive(Debug, Clone)]
+struct GlobalizedMinor {
+    global: String,
+    mode: String,
+    turn_on: String,
+}
+
 struct Document {
     /// Buffer name shown in the mode line (e.g. `*scratch*`, `main.scm`).
     name: String,
@@ -296,6 +305,9 @@ struct Document {
     /// come on at a buffer's FIRST activation; the flag keeps a later user
     /// disable sticky across switches).
     init_minors_ran: bool,
+    /// Globalized minor modes whose TURN-ON already ran in this buffer since
+    /// the global mode was last switched on (once per buffer per enable).
+    globalized_ran: Vec<String>,
     /// When `Some(mode)`, this is a read-only program-generated buffer (the
     /// magit pattern): plain keys are commands resolved against `mode`'s keymap
     /// rather than self-inserting.
@@ -661,6 +673,9 @@ pub struct Editor {
     /// parent + language, consulted when a mode becomes major so the stack is
     /// built from the ancestry (keymaps/hooks/grammar inherit down the chain).
     mode_registry: ModeRegistry,
+    /// `define-globalized-minor-mode` wiring: (global mode, buffer-local
+    /// mode, TURN-ON function), consulted while the global mode is on.
+    globalized_minors: Vec<GlobalizedMinor>,
     /// User `add-auto-mode` entries (pattern → command NAME), later-registered
     /// first. Consulted by `open_file` before the built-in extension→language
     /// detection.
@@ -1539,6 +1554,7 @@ impl Editor {
             modal_helix: false,
             hooks: HashMap::new(),
             mode_registry: ModeRegistry::default(),
+            globalized_minors: Vec::new(),
             auto_modes: Vec::new(),
             last_hook_line: None,
             capf_functions: Vec::new(),
@@ -3830,7 +3846,7 @@ impl Editor {
                 .as_ref()
                 .and_then(|h| h.tree().cloned()),
             major_mode: self.active.modes.major().to_string(),
-            minor_modes: self.active.modes.minor_names().join(" "),
+            minor_modes: self.active_minor_names().join(" "),
             mode_stack: self.active.modes.names().join(" "),
             grid: self.active.grid.as_deref().map(|g| g.snapshot()),
         });
@@ -4420,12 +4436,14 @@ impl Editor {
     /// where steel-mode's `(add-hook "steel" "enable-lsp")` brings up the
     /// LSP — entirely Scheme-driven, with the default set in `steel-mode.scm`.
     pub fn run_mode_hooks_once(&mut self, cx: &mut Context<Self>) {
-        if self.active.hooks_ran {
-            return;
+        if !self.active.hooks_ran {
+            self.active.hooks_ran = true;
+            let names = self.active.modes.major_chain_names();
+            self.fire_mode_hooks(&names);
         }
-        self.active.hooks_ran = true;
-        let names = self.active.modes.major_chain_names();
-        self.fire_mode_hooks(&names);
+        // Every activation path ends here, so globalized minor modes run
+        // TURN-ON in a buffer the first time it is seen while they're on.
+        self.run_globalized_turn_ons();
         let _ = cx;
     }
 
@@ -4434,6 +4452,119 @@ impl Editor {
     /// (a function on both `fundamental` and `steel` runs once).
     /// `run_mode_hooks_once` walks the stack's major chain with this;
     /// minor-mode enable/disable fire their own mode's hooks through it too.
+    /// The minor modes on in the active buffer: its own stack entries plus
+    /// the editor-wide `:global` ones (what `minor-mode-active?` and
+    /// `describe-mode` see).
+    fn active_minor_names(&self) -> Vec<&str> {
+        let mut names = self.active.modes.minor_names();
+        for g in self.keymap.global_minors() {
+            if !names.contains(&g.as_str()) {
+                names.push(g);
+            }
+        }
+        names
+    }
+
+    /// Mode-line lighters of the `:global` minor modes that are on (the name
+    /// when the mode has no lighter).
+    fn global_minor_lighters(&self) -> Vec<String> {
+        self.keymap
+            .global_minors()
+            .iter()
+            .map(|g| {
+                self.mode_registry
+                    .get(g)
+                    .and_then(|d| d.lighter.clone())
+                    .unwrap_or_else(|| g.clone())
+            })
+            .collect()
+    }
+
+    /// Switch a minor mode on/off: a `:global` one in the keymap's global
+    /// layer (hooks fire ONCE per toggle, not per buffer), a buffer-local one
+    /// on the active buffer's stack. Idempotent: hooks fire only on a real
+    /// transition.
+    fn set_minor_mode(&mut self, name: &str, on: bool) {
+        let global = self.mode_registry.get(name).is_some_and(|d| d.global);
+        if global {
+            if !self.keymap.set_global_minor(name, on) {
+                return;
+            }
+            self.fire_mode_hooks(&[name.to_string()]);
+            if on {
+                self.run_globalized_turn_ons();
+            } else {
+                self.globalized_off(name);
+            }
+            return;
+        }
+        if on == self.active.modes.minor(name) {
+            return;
+        }
+        if on {
+            let lighter = self.mode_registry.get(name).and_then(|d| d.lighter.clone());
+            self.active.modes.push(Mode {
+                name: name.to_string(),
+                language: None,
+                minor: true,
+                lighter,
+            });
+        } else {
+            self.active.modes.remove_minor(name);
+        }
+        self.fire_mode_hooks(&[name.to_string()]);
+    }
+
+    /// Run the TURN-ON function of every globalized minor mode that is on in
+    /// the active buffer — only where it hasn't run since the global mode was
+    /// enabled (a major-mode switch clears the buffer's marks, so TURN-ON
+    /// re-decides by major mode, Emacs parity).
+    fn run_globalized_turn_ons(&mut self) {
+        let due: Vec<GlobalizedMinor> = self
+            .globalized_minors
+            .iter()
+            .filter(|g| self.keymap.global_minor(&g.global))
+            .filter(|g| !self.active.globalized_ran.contains(&g.global))
+            .cloned()
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        self.publish_point();
+        for g in due {
+            self.active.globalized_ran.push(g.global.clone());
+            self.script.dispatch_action(&g.turn_on, None);
+        }
+    }
+
+    /// A globalized minor mode was switched off: turn its buffer-local MODE
+    /// off in EVERY buffer and forget where TURN-ON ran, so a later enable
+    /// re-runs it everywhere. MODE's hooks fire once (in the active buffer),
+    /// if it was on anywhere.
+    fn globalized_off(&mut self, global: &str) {
+        let modes: Vec<String> = self
+            .globalized_minors
+            .iter()
+            .filter(|g| g.global == global)
+            .map(|g| g.mode.clone())
+            .collect();
+        let mut fired = Vec::new();
+        for doc in std::iter::once(&mut self.active).chain(self.inactive.iter_mut()) {
+            doc.globalized_ran.retain(|g| g != global);
+            for mode in &modes {
+                if doc.modes.minor(mode) {
+                    doc.modes.remove_minor(mode);
+                    if !fired.contains(mode) {
+                        fired.push(mode.clone());
+                    }
+                }
+            }
+        }
+        if !fired.is_empty() {
+            self.fire_mode_hooks(&fired);
+        }
+    }
+
     fn fire_mode_hooks(&mut self, modes: &[String]) {
         let mut seen = std::collections::HashSet::new();
         let mut to_run = Vec::new();
@@ -5131,6 +5262,7 @@ fn blank_document(
         read_only: false,
         hooks_ran: false,
         init_minors_ran: false,
+        globalized_ran: Vec::new(),
         special: None,
         line_faces: HashMap::new(),
         line_icons: HashMap::new(),

@@ -138,9 +138,34 @@ impl ModeStack {
         self.modes.iter().map(|m| m.name.as_str()).collect()
     }
 
-    /// Mode names top-to-bottom, for keymap resolution (newer shadows older).
+    /// Mode names top-to-bottom (newer shadows older). Key lookup goes
+    /// through [`resolution_order_with`](Self::resolution_order_with).
+    #[cfg(test)]
     pub fn resolution_order(&self) -> impl Iterator<Item = &str> {
         self.modes.iter().rev().map(|m| m.name.as_str())
+    }
+
+    /// [`resolution_order`](Self::resolution_order) with the editor-wide
+    /// `:global` minor modes spliced in just BELOW this buffer's lowest
+    /// buffer-local minor: local minors shadow global ones, global ones
+    /// shadow the major chain. With no globals it is exactly
+    /// `resolution_order`.
+    pub fn resolution_order_with<'a>(
+        &'a self,
+        globals: &'a [String],
+    ) -> impl Iterator<Item = &'a str> {
+        let split = self
+            .modes
+            .iter()
+            .position(|m| m.minor)
+            .unwrap_or(self.modes.len());
+        let (below, above) = self.modes.split_at(split);
+        above
+            .iter()
+            .rev()
+            .map(|m| m.name.as_str())
+            .chain(globals.iter().rev().map(String::as_str))
+            .chain(below.iter().rev().map(|m| m.name.as_str()))
     }
 
     /// The highlighting language of the topmost mode that declares one.
@@ -164,8 +189,13 @@ pub struct ModeDef {
     pub minor: bool,
     pub lighter: Option<String>,
     /// `define-minor-mode`'s `:init-value` — enable in newly-activated
-    /// buffers that haven't applied init-values yet.
+    /// buffers that haven't applied init-values yet (a `:global` mode is
+    /// instead switched on once, editor-wide, at its first registration).
     pub init_value: bool,
+    /// `:global` minor mode: one editor-wide on/off state, kept in the
+    /// keymap's global layer ([`Keymap::global_minors`]) instead of a stack
+    /// entry per buffer.
+    pub global: bool,
 }
 
 /// Every mode definition registered from Scheme. `set-major-mode` consults it
@@ -198,7 +228,7 @@ impl ModeRegistry {
         let mut minors: Vec<_> = self
             .defs
             .iter()
-            .filter(|(_, d)| d.minor && d.init_value)
+            .filter(|(_, d)| d.minor && d.init_value && !d.global)
             .map(|(n, d)| (n.clone(), d.lighter.clone()))
             .collect();
         minors.sort_by(|a, b| a.0.cmp(&b.0));
@@ -273,6 +303,11 @@ pub enum LeaderMatch<'a> {
 #[derive(Debug, Default)]
 pub struct Keymap {
     maps: HashMap<String, HashMap<String, String>>,
+    /// The `:global` minor modes currently on, in enable order (newest
+    /// last = highest precedence among globals). Consulted by every
+    /// stack-based lookup below, between the buffer's local minors and its
+    /// major chain — see [`ModeStack::resolution_order_with`].
+    global_minors: Vec<String>,
 }
 
 impl Keymap {
@@ -289,11 +324,41 @@ impl Keymap {
             .insert(sequence.into(), expr.into());
     }
 
+    /// The `:global` minor modes that are on, enable order.
+    pub fn global_minors(&self) -> &[String] {
+        &self.global_minors
+    }
+
+    /// Is the `:global` minor mode `name` on?
+    pub fn global_minor(&self, name: &str) -> bool {
+        self.global_minors.iter().any(|m| m == name)
+    }
+
+    /// Switch the `:global` minor mode `name` on or off editor-wide. Returns
+    /// whether the state actually changed (the caller fires hooks only then).
+    pub fn set_global_minor(&mut self, name: &str, on: bool) -> bool {
+        match (on, self.global_minor(name)) {
+            (true, false) => {
+                self.global_minors.push(name.to_string());
+                true
+            }
+            (false, true) => {
+                self.global_minors.retain(|m| m != name);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A buffer's modes in lookup order, global layer included.
+    fn order<'a>(&'a self, modes: &'a ModeStack) -> impl Iterator<Item = &'a str> {
+        modes.resolution_order_with(&self.global_minors)
+    }
+
     /// Resolve a sequence against a buffer's active modes (top-down); the first
     /// mode that binds it wins.
     pub fn resolve(&self, modes: &ModeStack, sequence: &str) -> Option<&str> {
-        modes
-            .resolution_order()
+        self.order(modes)
             .find_map(|name| self.maps.get(name).and_then(|m| m.get(sequence)))
             .map(String::as_str)
     }
@@ -320,8 +385,7 @@ impl Keymap {
     /// Whether `sequence` is a strict prefix of some longer binding in any of
     /// the active modes (a pending prefix awaiting more keys).
     pub fn is_prefix(&self, modes: &ModeStack, sequence: &str) -> bool {
-        modes
-            .resolution_order()
+        self.order(modes)
             .any(|name| self.is_prefix_mode(name, sequence))
     }
 
@@ -330,8 +394,7 @@ impl Keymap {
     /// stack first — so an active minor mode beats the major chain, a child
     /// beats its parent, and derived modes get per-state inheritance.
     pub fn resolve_evil(&self, state: &str, modes: &ModeStack, sequence: &str) -> Option<&str> {
-        modes
-            .resolution_order()
+        self.order(modes)
             .find_map(|name| self.resolve_mode(&format!("{state}:{name}"), sequence))
             .or_else(|| self.resolve_mode(state, sequence))
     }
@@ -340,8 +403,7 @@ impl Keymap {
     /// mode's scoped keymap and the global `state` keymap (so a mode-specific
     /// multi-key sequence still pends).
     pub fn is_prefix_evil(&self, state: &str, modes: &ModeStack, sequence: &str) -> bool {
-        modes
-            .resolution_order()
+        self.order(modes)
             .any(|name| self.is_prefix_mode(&format!("{state}:{name}"), sequence))
             || self.is_prefix_mode(state, sequence)
     }
@@ -482,6 +544,59 @@ mod tests {
         // scoped maps plus the global one.
         assert_eq!(km.resolve_evil("evil-normal", &modes, "x"), None);
         assert!(!km.is_prefix_evil("evil-normal", &modes, "d"));
+    }
+
+    #[test]
+    fn global_minor_layer_sits_between_local_minors_and_majors() {
+        use super::{Mode, ModeStack};
+        let mut km = Keymap::default();
+        km.define("rust", "ctrl-c g", "rust-g");
+        km.define("glob-mode", "ctrl-c g", "glob-g");
+        km.define("glob-mode", "ctrl-c h", "glob-h");
+        km.define("local-mode", "ctrl-c h", "local-h");
+        km.define("evil-normal:glob-mode", "g x", "glob-gx");
+        km.define("evil-normal:local-mode", "g x", "local-gx");
+
+        let mut modes = ModeStack::with_major(Mode::new("rust"));
+        let local = Mode {
+            name: "local-mode".into(),
+            language: None,
+            minor: true,
+            lighter: None,
+        };
+        modes.push(local);
+        // Off: the global map is not consulted.
+        assert_eq!(km.resolve(&modes, "ctrl-c g"), Some("rust-g"));
+        assert!(!km.is_prefix(&modes, "g"));
+
+        assert!(km.set_global_minor("glob-mode", true));
+        assert!(!km.set_global_minor("glob-mode", true), "idempotent");
+        // Global beats the major; the buffer-local minor beats the global —
+        // even though the local one was enabled FIRST.
+        assert_eq!(km.resolve(&modes, "ctrl-c g"), Some("glob-g"));
+        assert_eq!(km.resolve(&modes, "ctrl-c h"), Some("local-h"));
+        assert_eq!(
+            km.resolve_evil("evil-normal", &modes, "g x"),
+            Some("local-gx")
+        );
+        // A stack with no minors (another buffer) still sees the global.
+        let other = ModeStack::with_major(Mode::new("go"));
+        assert_eq!(km.resolve(&other, "ctrl-c h"), Some("glob-h"));
+        assert_eq!(
+            km.resolve_evil("evil-normal", &other, "g x"),
+            Some("glob-gx")
+        );
+        assert!(km.is_prefix_evil("evil-normal", &other, "g"));
+        assert_eq!(
+            modes
+                .resolution_order_with(km.global_minors())
+                .collect::<Vec<_>>(),
+            vec!["local-mode", "glob-mode", "rust", "fundamental"]
+        );
+
+        assert!(km.set_global_minor("glob-mode", false));
+        assert_eq!(km.resolve(&other, "ctrl-c h"), None);
+        assert_eq!(km.resolve(&modes, "ctrl-c g"), Some("rust-g"));
     }
 
     #[test]

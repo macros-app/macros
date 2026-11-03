@@ -564,6 +564,8 @@ impl Editor {
                 // the server for the now-active language. Idempotent — re-running
                 // `fundamental`'s hooks is a no-op when nothing changed.
                 self.active.hooks_ran = false;
+                // Globalized minor modes re-decide after a major switch.
+                self.active.globalized_ran.clear();
                 self.run_mode_hooks_once(cx);
                 cx.notify();
             }
@@ -594,38 +596,45 @@ impl Editor {
                 name,
                 lighter,
                 init_value,
+                global,
             } => {
+                let first = self.mode_registry.get(&name).is_none();
                 self.mode_registry.register(
                     &name,
                     ModeDef {
                         minor: true,
                         lighter: (!lighter.is_empty()).then_some(lighter),
                         init_value,
+                        global,
                         ..Default::default()
                     },
                 );
-            }
-            EnableMinorMode(name) => {
-                if !self.active.modes.minor(&name) {
-                    let lighter = self
-                        .mode_registry
-                        .get(&name)
-                        .and_then(|d| d.lighter.clone());
-                    self.active.modes.push(Mode {
-                        name: name.clone(),
-                        language: None,
-                        minor: true,
-                        lighter,
-                    });
-                    self.fire_mode_hooks(&[name]);
+                // A `:global :init-value #t` mode is on from its FIRST
+                // definition (re-evaluating the config must not undo a user
+                // disable). No hooks: none can be attached yet.
+                if global && init_value && first {
+                    self.keymap.set_global_minor(&name, true);
                 }
                 cx.notify();
             }
+            RegisterGlobalizedMinorMode {
+                name,
+                mode,
+                turn_on,
+            } => {
+                self.globalized_minors.retain(|g| g.global != name);
+                self.globalized_minors.push(GlobalizedMinor {
+                    global: name,
+                    mode,
+                    turn_on,
+                });
+            }
+            EnableMinorMode(name) => {
+                self.set_minor_mode(&name, true);
+                cx.notify();
+            }
             DisableMinorMode(name) => {
-                if self.active.modes.minor(&name) {
-                    self.active.modes.remove_minor(&name);
-                    self.fire_mode_hooks(&[name]);
-                }
+                self.set_minor_mode(&name, false);
                 cx.notify();
             }
             AddAutoMode { pattern, mode } => {
