@@ -33,6 +33,12 @@ pub(crate) type BufferNames = Arc<Mutex<Vec<String>>>;
 /// resolve a non-active buffer's path (`buffer-file-name-of`) — the snapshot
 /// bridges only expose the active buffer. Published alongside `BufferNames`.
 pub(crate) type BufferPaths = Arc<Mutex<HashMap<String, String>>>;
+/// Major mode name → its derivation parent (`None` for a root mode), the
+/// engine-side copy of the editor's [`crate::mode::ModeRegistry`] edges.
+/// `register-mode` writes it synchronously as it queues the registration, so
+/// `(mode-parent name)` sees a mode the moment it is defined — before the
+/// queued command reaches the editor.
+pub(crate) type ModeParents = Arc<Mutex<HashMap<String, Option<String>>>>;
 /// A snapshot of the active buffer, published by the editor before it dispatches
 /// a command so the read bridges (`buffer-string`, `point`, `region-text`, …)
 /// see the buffer as of the moment the command was invoked — Emacs's command
@@ -304,6 +310,7 @@ pub(crate) struct EngineShared {
     pub(crate) queue: Queue,
     pub(crate) buffers: BufferNames,
     pub(crate) buffer_paths: BufferPaths,
+    pub(crate) mode_parents: ModeParents,
     pub(crate) snapshot: SharedSnapshot,
     pub(crate) markers: Markers,
     pub(crate) options: Options,

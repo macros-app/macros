@@ -10,11 +10,13 @@
 ;; set once from user config (load-order safe — the table exists whether or
 ;; not the mode has been defined yet), read while the mode is active.
 ;;
-;; Inheritance: `define-derived-mode` (scheme/derived-mode.scm) registers the
-;; child→parent edge via `mode-local--set-parent`, so `mode-local-value` walks
-;; the chain and a child inherits every value it has not set itself. The walk
-;; carries a visited list, so a hand-registered cycle just stops the lookup
-;; instead of looping forever.
+;; Inheritance: the parent edges live in the editor's mode registry
+;; (src/mode.rs, filled by `register-mode` — `define-derived-mode` and the
+;; bundled language modes call it). `mode-local-value` walks them through the
+;; `mode-parent` primitive, so a child inherits every value it has not set
+;; itself, and every registered major mode ends the chain at "fundamental".
+;; The walk carries a visited list, so a hand-registered cycle just stops the
+;; lookup instead of looping forever.
 ;;
 ;; Values are stored WRAPPED in a list ((var . (value))) so an explicitly-set
 ;; #f stays distinguishable from "not set" — same tri-state gotcha as
@@ -24,12 +26,11 @@
 ;; Deviation from Emacs: there is no `defvar-mode-local` variable-splicing (a
 ;; variable's value is read through `mode-local-value`, not as a bare
 ;; identifier), and no mode-hierarchy inference beyond the parent edges the
-;; derived-mode framework records.
+;; mode registry records.
 
 ;; --- registry -----------------------------------------------------------------
-;; mode-name(string) -> ((var . value) ...); parents: mode -> parent mode name.
+;; mode-name(string) -> ((var . value) ...).
 (define *mode-local-table* '())
-(define *mode-local-parents* '())
 
 (define (mode-local--name m)
   (cond ((symbol? m) (symbol->string m))
@@ -56,21 +57,10 @@
           ((string=? (caar entries) name) (cdar entries))
           (else (loop (cdr entries))))))
 
-;; Registered by define-derived-mode's expansion. Public-ish so the macro can
-;; call it across the module boundary; not meant for hand use.
-(define (mode-local--set-parent child parent)
-  (let ((child (mode-local--name child)) (parent (mode-local--name parent)))
-    (set! *mode-local-parents*
-          (cons (cons child parent)
-                (filter (lambda (e) (not (string=? (car e) child)))
-                        *mode-local-parents*)))))
-
+;; The registry's parent for MODE ("fundamental" for a root major mode), or
+;; #f for fundamental itself and for modes never registered.
 (define (mode-local-parent mode)
-  (let ((name (mode-local--name mode)))
-    (let loop ((entries *mode-local-parents*))
-      (cond ((null? entries) #f)
-            ((string=? (caar entries) name) (cdar entries))
-            (else (loop (cdr entries)))))))
+  (mode-parent (mode-local--name mode)))
 
 ;; The value THIS mode set itself, without walking the parent chain.
 ;; Returns 'unset when the mode has no binding for var (an explicitly-set #f
@@ -109,10 +99,8 @@
 ;; (mode-local-value VAR DEFAULT) — no mode: search the buffer's mode stack
 ;; TOP-DOWN. An active minor mode overrides the major; a child overrides its
 ;; parent (the ancestors are ON the stack, so inheritance is free — the
-;; parent-table walk below is only needed when code names a mode directly).
-;; NOTE: *mode-local-parents* STAYS for the explicit form — snapshot reads are
-;; nullary, so Scheme cannot ask the Rust registry for an ARBITRARY mode's
-;; parent, only about the active buffer.
+;; registry walk in the explicit form is only needed when code names a mode
+;; directly).
 (define (mode-local--stack-value var default)
   (let loop ((names (reverse (mode-local--stack-names))))
     (if (null? names)
@@ -122,7 +110,7 @@
               (loop (cdr names))
               hit)))))
 
-;; Arity dispatch: (MODE VAR DEFAULT) names a mode (parent-table walk);
+;; Arity dispatch: (MODE VAR DEFAULT) names a mode (registry parent walk);
 ;; (VAR DEFAULT) uses the active buffer's stack.
 (define (mode-local-value . args)
   (cond ((and (pair? args) (pair? (cdr args)) (null? (cddr args)))

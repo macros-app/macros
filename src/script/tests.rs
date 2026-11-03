@@ -3938,7 +3938,7 @@ mod magit_tests {
     }
 
     /// language-modes.scm generates an `<id>-mode` command per bundled grammar:
-    /// each is M-x discoverable AND callable (the `eval-string` define persists),
+    /// each is M-x discoverable AND callable (the `eval`'d define persists),
     /// and invoking it switches the buffer's major mode. Scheme is excluded (it
     /// has the richer steel-mode / macros-steel-mode commands).
     #[test]
@@ -15328,11 +15328,10 @@ mod mode_local_lib {
         });
         assert_eq!(v(&engine, "(mode-local-value 'tab-stop 99)"), "99");
         assert_eq!(v(&engine, "(mode-local-value 'indent 99)"), "2");
-        // The explicit 3-arg form still walks the parent table.
-        engine
-            .eval(r#"(mode-local--set-parent "mylang" "fundamental")"#)
-            .unwrap();
+        // The explicit 3-arg form walks the registry's parent chain.
+        engine.eval(r#"(register-mode "mylang" "" "")"#).unwrap();
         assert_eq!(v(&engine, "(mode-local-value 'mylang 'indent 99)"), "4");
+        assert_eq!(v(&engine, "(mode-local-value 'mylang 'tab-stop 99)"), "99");
     }
 
     #[test]
@@ -15396,8 +15395,8 @@ mod mode_local_lib {
             v(&engine, r#"(mode-local-value "ml-parent" 'shared 0)"#),
             "1"
         );
-        // The parent edge was registered at expansion time — for the child
-        // AND for ml-parent itself (it derives from fundamental).
+        // The registry knows the edge — for the child AND for ml-parent
+        // itself (a root mode sits on fundamental).
         assert_eq!(
             v(&engine, r#"(mode-local-parent "ml-child")"#),
             r#""ml-parent""#
@@ -15424,6 +15423,37 @@ mod mode_local_lib {
         );
     }
 
+    /// The explicit form inherits through a 3-level derived chain using only
+    /// the mode registry — the Scheme-side parent table is gone.
+    #[test]
+    fn explicit_mode_local_inherits_through_three_level_chain() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        engine
+            .eval(
+                r#"(define-derived-mode ml3-a fundamental "A.")
+                   (define-derived-mode ml3-b ml3-a "B.")
+                   (define-derived-mode ml3-c ml3-b "C.")
+                   (setq-mode-local "fundamental" (root 1))
+                   (setq-mode-local "ml3-a" (from-a 2) (shadowed 10))
+                   (setq-mode-local "ml3-b" (from-b 3) (shadowed 20))"#,
+            )
+            .unwrap();
+        assert_eq!(v(&engine, r#"(mode-parent "ml3-c")"#), r#""ml3-b""#);
+        assert_eq!(v(&engine, r#"(mode-parent "ml3-b")"#), r#""ml3-a""#);
+        assert_eq!(v(&engine, r#"(mode-parent "ml3-a")"#), r#""fundamental""#);
+        // Two levels up, one level up, and the nearest override wins.
+        assert_eq!(v(&engine, r#"(mode-local-value "ml3-c" 'from-a 0)"#), "2");
+        assert_eq!(v(&engine, r#"(mode-local-value "ml3-c" 'from-b 0)"#), "3");
+        assert_eq!(
+            v(&engine, r#"(mode-local-value "ml3-c" 'shadowed 0)"#),
+            "20"
+        );
+        // Past the chain's root to fundamental, then the default.
+        assert_eq!(v(&engine, r#"(mode-local-value 'ml3-c 'root 0)"#), "1");
+        assert_eq!(v(&engine, r#"(mode-local-value "ml3-c" 'missing 0)"#), "0");
+    }
+
     #[test]
     fn mode_local_chain_cycle_guard_returns_default() {
         let engine = engine();
@@ -15432,14 +15462,17 @@ mod mode_local_lib {
         // these non-interned strings and recurse forever.
         engine
             .eval(
-                r#"(mode-local--set-parent (string-append "cyc" "-x")
-                                           (string-append "cyc" "-y"))
-                   (mode-local--set-parent (string-append "cyc" "-y")
-                                           (string-append "cyc" "-x"))"#,
+                r#"(register-mode (string-append "cyc" "-x")
+                                  (string-append "cyc" "-y") "")
+                   (register-mode (string-append "cyc" "-y")
+                                  (string-append "cyc" "-x") "")"#,
             )
             .unwrap();
         // A hand-made cycle terminates at the default instead of looping.
         assert_eq!(v(&engine, r#"(mode-local-value "cyc-x" 'v 42)"#), "42");
+        // Unregistered modes have no parent; fundamental is the root.
+        assert_eq!(v(&engine, r#"(mode-parent "never-registered")"#), "#false");
+        assert_eq!(v(&engine, r#"(mode-parent "fundamental")"#), "#false");
         // A bad mode-name type errors clearly instead of failing inside
         // string=?.
         assert!(engine.eval(r#"(mode-local-value 42 'v 0)"#).is_err());
