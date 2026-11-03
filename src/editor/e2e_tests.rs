@@ -1798,6 +1798,161 @@ fn minor_modes_stack_precedence_and_survival(cx: &mut gpui::TestAppContext) {
     });
 }
 
+/// One script run as a separate command: publish the snapshot first (as real
+/// dispatch does), so the run's pre-command reads see the previous command's
+/// applied state, then let its outcomes apply.
+fn run_cmd(editor: &Entity<Editor>, cx: &mut TestAppContext, src: &str) {
+    editor.update(cx, |e, cx| {
+        e.publish_point();
+        e.run_script_blocking(src, cx);
+    });
+    settle(editor, cx);
+}
+
+/// `(describe-mode-text)` — the `C-h m` report — for the active buffer.
+fn describe_mode(editor: &Entity<Editor>, cx: &mut TestAppContext) -> String {
+    editor.update(cx, |e, _| {
+        e.publish_point();
+        e.script
+            .eval("(describe-mode-text)")
+            .unwrap()
+            .value
+            .unwrap()
+    })
+}
+
+#[gpui::test]
+fn abbrev_and_spell_modes_live_on_each_buffers_stack(cx: &mut gpui::TestAppContext) {
+    // abbrev-mode and spell-mode have no Scheme-side state: the buffer's mode
+    // stack is the only truth. They are per-buffer, survive a major-mode
+    // switch, and C-h m lists them from the stack.
+    let editor = setup(cx, "helllo wrld");
+    editor.update(cx, |e, _| {
+        e.inactive
+            .push(make_document("other.txt".into(), None, "other"));
+    });
+    // A backend symbol with no checker arm: spell-mode turns on without
+    // touching the OS (nothing to check against in CI).
+    run_cmd(&editor, cx, "(set! *spell-backend* 'test)");
+    run_cmd(&editor, cx, "(abbrev-mode)");
+    run_cmd(&editor, cx, "(spell-mode)");
+    editor.read_with(cx, |e, _| {
+        assert!(
+            e.active.modes.minor("abbrev-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+        assert!(
+            e.active.modes.minor("spell-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+    });
+    let report = describe_mode(&editor, cx);
+    assert!(
+        report.contains("abbrev-mode") && report.contains("spell-mode"),
+        "C-h m: {report}"
+    );
+
+    // Per-buffer: another buffer has neither, and C-h m there lists neither.
+    run_cmd(&editor, cx, r#"(switch-to-buffer "other.txt")"#);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "other.txt");
+        assert!(!e.active.modes.minor("abbrev-mode"));
+        assert!(!e.active.modes.minor("spell-mode"));
+    });
+    let report = describe_mode(&editor, cx);
+    assert!(
+        !report.contains("abbrev-mode") && !report.contains("spell-mode"),
+        "C-h m: {report}"
+    );
+    // Toggling here leaves test.txt alone (and vice versa below).
+    run_cmd(&editor, cx, "(abbrev-mode)");
+    run_cmd(&editor, cx, "(abbrev-mode)");
+
+    // Back in test.txt both are still on — no switch-hook re-sync needed —
+    // and they survive a major-mode switch.
+    run_cmd(&editor, cx, r#"(switch-to-buffer "test.txt")"#);
+    run_cmd(&editor, cx, r#"(set-major-mode "fundamental")"#);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "test.txt");
+        assert_eq!(e.active.modes.major(), "fundamental");
+        assert!(
+            e.active.modes.minor("abbrev-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+        assert!(
+            e.active.modes.minor("spell-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+        let text: String = e
+            .mode_line_segments()
+            .iter()
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert!(
+            text.contains("abbrev") && text.contains("spell"),
+            "mode line: {text}"
+        );
+    });
+
+    // Disabling pops the entries (spell's cleanup runs with it).
+    run_cmd(&editor, cx, "(spell-mode)");
+    run_cmd(&editor, cx, "(abbrev-mode)");
+    editor.read_with(cx, |e, _| {
+        assert!(!e.active.modes.minor("abbrev-mode"));
+        assert!(!e.active.modes.minor("spell-mode"));
+    });
+    let errors = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(length *spell-errors*)")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert_eq!(errors, "0");
+}
+
+#[gpui::test]
+fn abbrev_mode_default_turns_on_new_buffers_but_an_off_buffer_stays_off(
+    cx: &mut gpui::TestAppContext,
+) {
+    let editor = setup(cx, "text");
+    run_cmd(&editor, cx, "(set-abbrev-mode-default #t)");
+    editor.update(cx, |e, _| {
+        e.inactive.push(make_document("a.txt".into(), None, "a"));
+        e.inactive.push(make_document("b.txt".into(), None, "b"));
+    });
+    // First activation pushes the :init-value mode.
+    run_cmd(&editor, cx, r#"(switch-to-buffer "a.txt")"#);
+    editor.read_with(cx, |e, _| {
+        assert!(
+            e.active.modes.minor("abbrev-mode"),
+            "{:?}",
+            e.active.modes.names()
+        );
+    });
+    // a.txt turns itself off; that sticks across switches.
+    run_cmd(&editor, cx, "(abbrev-mode)");
+    run_cmd(&editor, cx, r#"(switch-to-buffer "b.txt")"#);
+    editor.read_with(cx, |e, _| {
+        assert!(
+            e.active.modes.minor("abbrev-mode"),
+            "b.txt gets the default"
+        );
+    });
+    run_cmd(&editor, cx, r#"(switch-to-buffer "a.txt")"#);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "a.txt");
+        assert!(
+            !e.active.modes.minor("abbrev-mode"),
+            "a.txt's disable must stick"
+        );
+    });
+}
+
 #[gpui::test]
 fn auto_mode_beats_extension_detection(cx: &mut gpui::TestAppContext) {
     // A file whose extension has NO built-in language but whose PATH matches

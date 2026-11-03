@@ -259,25 +259,31 @@ impl Editor {
     pub(super) fn after_activation(&mut self, deliberate: bool, cx: &mut Context<Self>) {
         self.parse_full();
         self.ensure_cursor_visible();
-        // `:init-value` minor modes come on in a buffer's FIRST activation;
-        // the flag means a later user disable sticks (no re-push per switch).
-        if !self.active.init_minors_ran {
-            self.active.init_minors_ran = true;
-            for (name, lighter) in self.mode_registry.init_minors() {
-                if !self.active.modes.minor(&name) {
-                    self.active.modes.push(Mode {
-                        name: name.clone(),
-                        language: None,
-                        minor: true,
-                        lighter,
-                    });
-                    self.fire_mode_hooks(&[name]);
-                }
-            }
-        }
+        self.push_init_minors();
         self.run_mode_hooks_once(cx);
         self.switch_hooks(deliberate);
         cx.notify();
+    }
+
+    /// `:init-value` minor modes come on in a buffer's FIRST activation; the
+    /// flag means a later user disable sticks (no re-push per switch). Also
+    /// run once at startup for the initial buffer, which is never "activated".
+    pub(crate) fn push_init_minors(&mut self) {
+        if self.active.init_minors_ran {
+            return;
+        }
+        self.active.init_minors_ran = true;
+        for (name, lighter) in self.mode_registry.init_minors() {
+            if !self.active.modes.minor(&name) {
+                self.active.modes.push(Mode {
+                    name: name.clone(),
+                    language: None,
+                    minor: true,
+                    lighter,
+                });
+                self.fire_mode_hooks(&[name]);
+            }
+        }
     }
 
     /// Fire the buffer-change hooks after the active buffer was replaced.

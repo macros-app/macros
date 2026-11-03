@@ -40,11 +40,14 @@
 ;; The buffer's major mode, the minor modes on in it, and the bindings each
 ;; keymap adds. Minor modes are registered here with a predicate so packages
 ;; (and your config) can list theirs: (register-minor-mode "name" (lambda () …)).
-(define *minor-modes* '())   ; ((name . on?-thunk) …)
+;; NOT `*minor-modes*`: that is minor-mode.scm's define-minor-mode registry,
+;; and a second top-level define of it here clobbered every mode registered
+;; before this file loaded (abbrev-mode's toggle body among them).
+(define *describe-minor-modes* '())   ; ((name . on?-thunk) …)
 (define (register-minor-mode name on?)
-  (set! *minor-modes* (alist-set *minor-modes* name on?)))
-;; abbrev-mode and spell-mode live on the mode stack now (their Scheme state
-;; mirrors onto it), so they come through enabled-minor-modes automatically.
+  (set! *describe-minor-modes* (alist-set *describe-minor-modes* name on?)))
+;; abbrev-mode and spell-mode are mode-stack entries, so they come through
+;; enabled-minor-modes automatically.
 (register-minor-mode "evil-mode" (lambda () (and (evil-enabled?) (not (helix-enabled?)))))
 (register-minor-mode "helix-mode" (lambda () (helix-enabled?)))
 
@@ -56,7 +59,7 @@
   (sort-strings
    (dedup (append (let ((s (active-minor-modes)))
                     (if (equal? s "") '() (split-many s " ")))
-                  (map car (filter (lambda (m) ((cdr m))) *minor-modes*))))))
+                  (map car (filter (lambda (m) ((cdr m))) *describe-minor-modes*))))))
 
 ;; A keymap's bindings as indented "key    command" rows, or a note when empty.
 (define (help--keymap-rows km)
