@@ -99,9 +99,9 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
 
 /// Every `"path:line:text"` match of `pattern` under `dir` (see `build_walk`).
 fn grep_walk(dir: &str, pattern: &str, config: &SearchConfig) -> Result<Vec<String>, String> {
-    let matcher = grep::regex::RegexMatcher::new(pattern)
+    let matcher = grep_regex::RegexMatcher::new(pattern)
         .map_err(|e| format!("Invalid regexp {pattern:?}: {e}"))?;
-    let mut searcher = grep::searcher::SearcherBuilder::new()
+    let mut searcher = grep_searcher::SearcherBuilder::new()
         .line_number(true)
         .build();
     let mut results: Vec<String> = Vec::new();
@@ -115,7 +115,7 @@ fn grep_walk(dir: &str, pattern: &str, config: &SearchConfig) -> Result<Vec<Stri
         let _ = searcher.search_path(
             &matcher,
             &path,
-            grep::searcher::sinks::UTF8(move |lnum, line| {
+            grep_searcher::sinks::UTF8(move |lnum, line| {
                 out.push(format!("{}:{}:{}", path_str, lnum, line.trim_end()));
                 Ok(true)
             }),

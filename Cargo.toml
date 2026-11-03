@@ -59,10 +59,13 @@ regex = "1"
 # the `diff-strings` / `diff-inline` primitives behind scheme/ediff.scm.
 similar = "3"
 # ripgrep, as a library: `ignore` is its gitignore-aware parallel directory
-# walker; `grep` is its content searcher. Drives the Scheme-configurable
-# `walk-files` / `grep-files` primitives (no external `rg` binary needed).
+# walker; `grep-regex` + `grep-searcher` are its content matcher/searcher.
+# Drives the Scheme-configurable `walk-files` / `grep-files` primitives (no
+# external `rg` binary needed). The `grep` facade crate was dropped: it also
+# pulls grep-cli and grep-printer, which we never use.
 ignore = "0.4"
-grep = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 # Filesystem watching: powers buffer auto-revert and live dired-sidebar/dired refresh.
 # `-mini` coalesces the OS event storm into a debounced batch on its own thread;
 # we forward each batch onto the GPUI foreground (see `Editor::on_fs_events`).
@@ -117,9 +120,16 @@ codebook-tree-sitter-typst = "0.12.1"
 # grid extracted from Alacritty. We drive it as a library (it has no renderer of
 # its own) for the embedded terminal — see `src/terminal.rs`.
 alacritty_terminal = "0.26.0"
-# Decode raster images (PNG/JPEG/GIF/…) for Org inline-image display. Same
+# Decode raster images (PNG/JPEG/GIF/WebP) for Org inline-image display. Same
 # version GPUI uses, so `image::Frame` matches what `RenderImage::new` expects.
-image = "0.25"
+# default-features off: the default format set also compiles bmp, ico, pnm,
+# tga, tiff, hdr, dds, exr, qoi, farbfeld — none of which Org images use.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 # Unique node IDs for org-roam (`(org-id-new)`) and local-time formatting for
 # timestamps / agenda "today" (`(current-time fmt)`). Both already in the tree
 # transitively via gpui; promoted to direct deps for the Scheme primitives.
