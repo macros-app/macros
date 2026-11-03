@@ -100,12 +100,13 @@
 ;; Emacs arg semantics: no arg = toggle; #t or positive number = on; #f or
 ;; non-positive number = off. minor-mode-active? reads the pre-command
 ;; snapshot plus the toggles this script already queued, so `(m) (m)` flips
-;; twice. Order per call: run the
-;; body ONLY on an actual flip (DEVIATION from Emacs, which runs the body on
-;; every invocation; use MODE-hook for unconditional per-invocation work),
-;; queue the enable/disable (the EDITOR applies it and fires NAME-hook from
-;; the same path as major-mode hooks), message. The lighter renders from the
-;; stack, so there is no slot to update.
+;; twice. Order per call: queue the enable/disable FIRST (the EDITOR applies
+;; it and fires NAME-hook from the same path as major-mode hooks), so the body
+;; sees the new state, as in Emacs's `(if my-mode (setup) (teardown))`; then
+;; run the body ONLY on an actual flip (DEVIATION from Emacs, which runs the
+;; body on every invocation; use MODE-hook for unconditional per-invocation
+;; work); then message. The lighter renders from the stack, so there is no
+;; slot to update.
 (define (minor-mode--toggle name arg)
   (let* ((on? (if (null? arg)
                   (not (minor-mode-active? name))
@@ -115,10 +116,10 @@
                           (else #t)))))
          (was (minor-mode-active? name)))
     (unless (equal? on? was)
-      (let ((body (minor-mode--prop name 'body)))
-        (when body (body)))
       ((if on? enable-minor-mode disable-minor-mode)
-       (symbol->string name)))
+       (symbol->string name))
+      (let ((body (minor-mode--prop name 'body)))
+        (when body (body))))
     (message (string-append (symbol->string name)
                             (if on? " enabled" " disabled")))
     on?))

@@ -35,7 +35,28 @@
 (define (mode-local--name m)
   (cond ((symbol? m) (symbol->string m))
         ((string? m) m)
+        ;; setq-mode-local quotes MODE, so `'mylang` arrives as (quote mylang).
+        ((and (pair? m) (eq? (car m) 'quote) (pair? (cdr m)))
+         (mode-local--name (cadr m)))
         (else (error "mode-local: mode name must be a string or symbol:" m))))
+
+;; Major modes have two spellings: the command ("mylang-mode", what the docs
+;; and Emacs use) and the bare name on the stack and in the registry
+;; ("mylang"). Values may be stored under either — setq-mode-local is
+;; load-order safe, so it can't consult the registry — and lookups try both.
+(define (mode-local--bare name)
+  (and (ends-with? name "-mode")
+       (substring name 0 (- (string-length name) 5))))
+
+;; The registry name for MODE: the bare name when MODE is a registered major
+;; mode's command spelling, else MODE itself (minor modes keep "-mode").
+(define (mode-local--canonical name)
+  (let ((bare (mode-local--bare name)))
+    (if (and bare
+             (not (mode-parent name))
+             (or (mode-parent bare) (string=? bare "fundamental")))
+        bare
+        name)))
 
 ;; Functional rebuild — no in-place mutation of shared cells (same rule as
 ;; minor-mode.scm's state handling).
@@ -60,15 +81,21 @@
 ;; The registry's parent for MODE ("fundamental" for a root major mode), or
 ;; #f for fundamental itself and for modes never registered.
 (define (mode-local-parent mode)
-  (mode-parent (mode-local--name mode)))
+  (mode-parent (mode-local--canonical (mode-local--name mode))))
 
-;; The value THIS mode set itself, without walking the parent chain.
-;; Returns 'unset when the mode has no binding for var (an explicitly-set #f
-;; is a real hit — values are stored wrapped, see the header).
-(define (mode-local--lookup1 name var)
+(define (mode-local--lookup-own name var)
   (let ((cell (assq var (mode-local--own-table name))))
-    (cond ((not cell) 'unset)
-          (else (car (cdr cell))))))
+    (if cell (car (cdr cell)) 'unset)))
+
+;; The value THIS mode set itself, without walking the parent chain, under
+;; either spelling of its name (the bare one wins). Returns 'unset when the
+;; mode has no binding for var (an explicitly-set #f is a real hit — values
+;; are stored wrapped, see the header).
+(define (mode-local--lookup1 name var)
+  (let ((hit (mode-local--lookup-own name var)))
+    (if (and (eq? hit 'unset) (not (ends-with? name "-mode")))
+        (mode-local--lookup-own (string-append name "-mode") var)
+        hit)))
 
 ;; DEFAULT is REQUIRED (a rest-arg default can come back #<void> when omitted
 ;; — engine quirk); pass 'unset if you want "was it set at all" instead.
@@ -77,7 +104,7 @@
 ;; on strings only matches interned literals — names built at runtime would
 ;; slip past it).
 (define (mode-local--explicit mode var default)
-  (let walk ((name (mode-local--name mode)) (seen '()))
+  (let walk ((name (mode-local--canonical (mode-local--name mode))) (seen '()))
     (let ((hit (mode-local--lookup1 name var)))
       (cond ((not (eq? hit 'unset)) hit)
             ((let seen? ((xs seen))
@@ -123,13 +150,15 @@
                 args))))
 
 ;; --- setq-mode-local ------------------------------------------------------------
-;; Emacs-compatible shape: (setq-mode-local MODE (VAR VALUE) ...) — vars are
-;; UNEVALUATED symbols, values are evaluated. Multiple bindings per form.
+;; Emacs-compatible shape: (setq-mode-local MODE (VAR VALUE) ...) — MODE and
+;; the vars are UNEVALUATED (a bare `mylang-mode` names the mode rather than
+;; evaluating to its command), values are evaluated. MODE may also be a
+;; string literal. Multiple bindings per form.
 (define-syntax setq-mode-local
   (lambda (stx)
     (syntax-case stx ()
       [(_ mode (var val) rest ...)
-       #'(begin (mode-local-set mode 'var val)
+       #'(begin (mode-local-set 'mode 'var val)
                 (setq-mode-local mode rest ...))]
       [(_ mode) #'(begin)]
       [(_ mode bad ...)

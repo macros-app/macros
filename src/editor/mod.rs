@@ -4584,6 +4584,13 @@ impl Editor {
                 }
             }
         }
+        if to_run.is_empty() {
+            return;
+        }
+        // Hooks run after the mode change applied: republish so they read
+        // the new stack (`major-mode`, `minor-mode-enabled?`), not the
+        // snapshot from before the command that changed it.
+        self.publish_point();
         for function in to_run {
             // Dispatch to the engine thread; results apply via the drain task.
             self.script.dispatch_action(&function, None);

@@ -832,9 +832,24 @@
 ;; first. The modal Normal map shadows `fundamental`, and the Emacs chords stay
 ;; reachable underneath it — so this is the list the help commands must search
 ;; rather than assuming "fundamental".
+;; Mode keymaps come in the editor's resolution order: buffer-local minor
+;; modes (top of the stack first), global minor modes, then the major chain
+;; (child before parent) — each mode's "<state>:<mode>" map ahead of its plain
+;; map when a modal state is on.
 (define (active-keymaps)
-  (let ((m (current-modal-keymap)))
-    (if m (list m "fundamental") (list "fundamental"))))
+  (let* ((m (current-modal-keymap))
+         (stack (let ((s (mode-stack))) (if (equal? s "") '() (split-many s " "))))
+         (minors (let ((s (active-minor-modes))) (if (equal? s "") '() (split-many s " "))))
+         (minor? (lambda (n) (member n minors)))
+         (top-down (reverse stack))
+         (locals (filter minor? top-down))
+         (globals (filter (lambda (n) (not (member n stack))) minors))
+         (majors (filter (lambda (n) (not (or (minor? n) (equal? n "fundamental"))))
+                         top-down))
+         (per-mode (lambda (n) (if m (list (string-append m ":" n) n) (list n)))))
+    (append (foldr (lambda (n acc) (append (per-mode n) acc)) '()
+                   (append locals globals majors))
+            (if m (list m "fundamental") (list "fundamental")))))
 
 ;; --- deferred jump into a buffer that is still loading --------------------
 ;; Opening a file that isn't visited yet is ASYNC, so a goto queued in the same

@@ -12,8 +12,11 @@ description: Write Emacs-style minor modes in Steel — one form gives you the t
   "Do my thing in the current buffer."
   :lighter " My"
   :keymap (("ctrl-c m t" my-toggle-thing))
-  ;; Optional body — runs when the mode actually flips on or off.
-  (message "my-mode flipped"))
+  ;; Optional body — runs when the mode actually flips on or off, after the
+  ;; flip, so it can branch on the new state (Emacs's usual idiom).
+  (if (minor-mode-enabled? 'my-mode)
+      (message "my-mode on")
+      (message "my-mode off")))
 ```
 
 Then `M-x my-mode` toggles it in the current buffer.
@@ -24,7 +27,7 @@ A minor mode is a real entry on the buffer's [mode stack](derived-mode), pushed 
 
 - **Keys** resolve over the stack top-down, so an enabled minor mode's bindings shadow the major mode's — as in Emacs.
 - **The mode line** renders the lighter straight from the stack entry.
-- **`C-h m`** (`describe-mode`) reads the stack, so your mode shows up under "Enabled minor modes" when it's on.
+- **`C-h m`** (`describe-mode`) reads the stack, so your mode shows up under "Enabled minor modes" when it's on, with its key bindings; **`C-h k`** (`describe-key`) finds its chords.
 - **Minors survive a major-mode switch.** `M-x fundamental-mode` (or any other major mode) keeps your enabled minor modes on, exactly like Emacs keeps buffer-local minor modes.
 
 ## What you get
@@ -35,8 +38,8 @@ A minor mode is a real entry on the buffer's [mode stack](derived-mode), pushed 
 | Per-buffer state | The mode is buffer-local: enabling pushes it onto *this buffer's* mode stack. `my-mode` in one buffer doesn't affect another. |
 | `:lighter` | Rendered in the mode line from the stack entry while the mode is on in that buffer. |
 | `:keymap` | Bound into the mode's **own keymap** (active only while the mode is on the stack — so non-modal users get the bindings too) plus `evil-normal:my-mode` and `helix-normal:my-mode` for modal users. Two minor modes can bind the same chord and each keeps its own binding; nothing lands in the shared global Normal maps. Chords are the usual whitespace-separated sequences and may be any length. |
-| `my-mode-hook` | Fired by the editor after every enable **and** disable. Add hooks with `(add-hook "my-mode-hook" 'my-setup)` — a `'symbol` or string, not `#'` (Steel's `#'` is `syntax`, and the hook fails with "Application not a procedure"). |
-| Body | Runs when the mode **actually flips** — not on redundant re-invocations. |
+| `my-mode-hook` | Fired by the editor after every enable **and** disable, once the change has applied, so `(minor-mode-enabled? 'my-mode)` inside the hook tells you which it was. Add hooks with `(add-hook "my-mode-hook" 'my-setup)` — a `'symbol` or string, not `#'` (Steel's `#'` is `syntax`, and the hook fails with "Application not a procedure"). |
+| Body | Runs when the mode **actually flips** — not on redundant re-invocations — and after the flip, so `(minor-mode-enabled? 'my-mode)` reads the new state. |
 
 ## Keywords
 

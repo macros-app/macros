@@ -19,7 +19,7 @@ The bundled `mode-local` module gives major modes their own variables — one va
 
 | Piece | Behavior |
 |---|---|
-| `setq-mode-local` | `(setq-mode-local MODE (VAR VALUE) ...)` — set one or more values. Vars are unevaluated symbols; values are evaluated. Load-order safe: the table exists whether or not the mode has been defined yet. |
+| `setq-mode-local` | `(setq-mode-local MODE (VAR VALUE) ...)` — set one or more values. MODE and the vars are unevaluated, as in Emacs: `mylang-mode`, `"mylang-mode"` and the bare stack name `"mylang"` all name the same major mode. Values are evaluated. Load-order safe: the table exists whether or not the mode has been defined yet. |
 | `mode-local-value` | `(mode-local-value MODE VAR DEFAULT)` — read a value, walking the derived-mode parent chain; `DEFAULT` when nothing on the chain has it. The two-argument form `(mode-local-value VAR DEFAULT)` searches the **current buffer's mode stack top-down** — an active minor mode overrides the major mode, and a child overrides its parent (the ancestors are on the stack, so inheritance is free). |
 | `mode-local-set` | Functional core under `setq-mode-local`; `(mode-local-set MODE 'VAR VALUE)` when you have the variable name in a variable. |
 | `mode-local-parent` | `(mode-local-parent MODE)` — the parent in the editor's mode registry (`"fundamental"` for a root major mode), or `#f` for `fundamental` and unregistered modes. Same as the `mode-parent` primitive. |

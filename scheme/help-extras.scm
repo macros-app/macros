@@ -68,6 +68,30 @@
         "  (no bindings of its own)"
         (join-lines (map (lambda (l) (string-append "  " (string-replace l "\t" "    "))) rows)))))
 
+;; One "Key bindings (MODE):" section per active mode keymap, in resolution
+;; order (minors, then the major chain — inherited parents included). The
+;; major always gets a section; other modes only when they bind something.
+;; The "<state>:<mode>" maps hold the same chords as the plain mode map
+;; (minor-mode--install-scoped-keys binds both), so the plain map stands for
+;; both.
+(define (help--mode-key-sections major)
+  (let* ((modal (current-modal-keymap))
+         (modes (filter (lambda (km)
+                          (not (or (string-contains? km ":")
+                                   (equal? km "fundamental")
+                                   (equal? km modal))))
+                        (active-keymaps))))
+    (foldr (lambda (km acc)
+             (if (or (equal? km major)
+                     (not (null? (keys-with-prefix km ""))))
+                 (append (list (string-append "Key bindings (" km "):")
+                               (help--keymap-rows km)
+                               "")
+                         acc)
+                 acc))
+           '()
+           (if (member major modes) modes (cons major modes)))))
+
 (define (describe-mode-text)
   (let* ((major (major-mode))
          (major (if (equal? major "") "fundamental" major))
@@ -80,7 +104,7 @@
       (list (string-append "Major mode: " major (if (equal? lang "") "" (string-append "  (language: " lang ")")))
             "")
       (if (equal? doc "") '() (list doc ""))
-      (list (string-append "Key bindings (" major "):") (help--keymap-rows major) "")
+      (help--mode-key-sections major)
       (list "Enabled minor modes:"
             (if (null? minors) "  (none)" (join-lines (map (lambda (m) (string-append "  " m)) minors)))
             "")

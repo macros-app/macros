@@ -2445,3 +2445,117 @@ fn globalized_minor_mode_turns_on_in_new_buffers(cx: &mut gpui::TestAppContext) 
         );
     });
 }
+
+fn scheme_value(editor: &Entity<Editor>, cx: &mut TestAppContext, src: &str) -> String {
+    editor.update(cx, |e, _| {
+        e.publish_point();
+        e.script.eval(src).unwrap().value.unwrap_or_default()
+    })
+}
+
+#[gpui::test]
+fn minor_mode_body_and_hook_see_the_new_state(cx: &mut TestAppContext) {
+    // Emacs's `(if my-mode (setup) (teardown))` idiom: the body and the hook
+    // both run AFTER the mode variable flips, so each sees the new state.
+    let editor = setup(cx, "text");
+    run_cmd(
+        &editor,
+        cx,
+        r#"(define *seen* '())
+           (define (note! x) (set! *seen* (append *seen* (list x))))
+           (define-minor-mode see-mode "S."
+             (note! (if (minor-mode-enabled? 'see-mode) "body-on" "body-off")))
+           (define (see-hook)
+             (note! (if (minor-mode-enabled? 'see-mode) "hook-on" "hook-off")))
+           (add-hook "see-mode-hook" 'see-hook)"#,
+    );
+    run_cmd(&editor, cx, "(see-mode)");
+    run_cmd(&editor, cx, "(see-mode)");
+    assert_eq!(
+        scheme_value(&editor, cx, "*seen*"),
+        r#"("body-on" "hook-on" "body-off" "hook-off")"#
+    );
+}
+
+#[gpui::test]
+fn major_mode_hook_sees_the_new_major_mode(cx: &mut TestAppContext) {
+    // Mode hooks are dispatched after SetMajorMode applies; they must read
+    // the switched buffer, not the snapshot from before the command.
+    let editor = setup(cx, "text");
+    run_cmd(
+        &editor,
+        cx,
+        r#"(define *hook-saw* #f)
+           (define-derived-mode hk1-mode fundamental "H1.")
+           (define-derived-mode hk2-mode fundamental "H2.")
+           (define (hk2-hook) (set! *hook-saw* (major-mode)))
+           (add-hook "hk2-mode-hook" 'hk2-hook)"#,
+    );
+    run_cmd(&editor, cx, "(hk1-mode)");
+    run_cmd(&editor, cx, "(hk2-mode)");
+    assert_eq!(scheme_value(&editor, cx, "*hook-saw*"), r#""hk2""#);
+}
+
+#[gpui::test]
+fn mode_local_accepts_the_command_name_of_a_derived_mode(cx: &mut TestAppContext) {
+    // The docs (and Emacs) name modes by their command — "ml1-mode" or the
+    // bare symbol ml1-mode — while the stack and registry use "ml1".
+    let editor = setup(cx, "text");
+    run_cmd(
+        &editor,
+        cx,
+        r#"(setq-mode-local "ml1-mode" (width 2) (label "one"))
+           (define-derived-mode ml1-mode fundamental "M1.")
+           (define-derived-mode ml2-mode ml1-mode "M2.")
+           (define-derived-mode ml3-mode ml2-mode "M3.")
+           (setq-mode-local ml3-mode (label "three"))"#,
+    );
+    run_cmd(&editor, cx, "(ml3-mode)");
+    assert_eq!(
+        scheme_value(
+            &editor,
+            cx,
+            r#"(list (mode-local-value 'width 'none)
+                     (mode-local-value 'label 'none)
+                     (mode-local-value "ml3-mode" 'width 'none)
+                     (mode-local-value "ml2-mode" 'label 'none)
+                     (mode-local-value 'ml2-mode 'width 'none)
+                     (mode-local-value "ml2" 'width 'none))"#
+        ),
+        r#"(2 "three" 2 "one" 2 2)"#
+    );
+}
+
+#[gpui::test]
+fn help_finds_mode_scoped_bindings(cx: &mut TestAppContext) {
+    // C-h k and C-h m must see the keys modes bind: the major chain
+    // (inherited keys included), buffer-local minors and global minors.
+    let editor = setup(cx, "text");
+    run_cmd(
+        &editor,
+        cx,
+        r#"(define (hb-a) #t) (define (hb-c) #t) (define (hb-m) #t) (define (hb-g) #t)
+           (define-derived-mode hba-mode fundamental "A." :keymap (("ctrl-c 1" hb-a)))
+           (define-derived-mode hbc-mode hba-mode "C." :keymap (("ctrl-c 3" hb-c)))
+           (define-minor-mode hbm-mode "M." :keymap (("ctrl-c 9" hb-m)))
+           (define-minor-mode hbg-mode "G." :global #t :keymap (("ctrl-c 8" hb-g)))"#,
+    );
+    run_cmd(&editor, cx, "(hbc-mode) (hbm-mode 1) (hbg-mode 1)");
+    for (chord, cmd) in [
+        ("ctrl-c 1", "hb-a"),
+        ("ctrl-c 3", "hb-c"),
+        ("ctrl-c 9", "hb-m"),
+        ("ctrl-c 8", "hb-g"),
+    ] {
+        run_cmd(&editor, cx, &format!(r#"(describe-key-finish "{chord}")"#));
+        let echo = editor.read_with(cx, |e, _| e.status.to_string());
+        assert!(
+            echo.contains(&format!("{chord} runs {cmd}")),
+            "{chord}: {echo}"
+        );
+    }
+    let text = scheme_value(&editor, cx, "(describe-mode-text)");
+    for row in ["ctrl-c 1", "ctrl-c 3", "ctrl-c 9", "ctrl-c 8"] {
+        assert!(text.contains(row), "describe-mode lacks {row}:\n{text}");
+    }
+}
