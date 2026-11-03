@@ -517,6 +517,9 @@ impl Editor {
         // (hooks_ran). Deadline-bounded like `run_mode_hooks_once` (we're on
         // the UI thread; a looping mode command must not hang the editor).
         if let Some(mode) = self.auto_mode_for(&path) {
+            // The command reads the NEW buffer (`buffer-file-name`,
+            // `current-buffer`, minor-mode state), not the one active before.
+            self.publish_point();
             let (commands, error) = self
                 .script
                 .eval_collecting_within(&format!("({mode})"), SYNC_HOOK_TIMEOUT);

@@ -1870,6 +1870,44 @@ fn auto_mode_runs_derived_mode_body(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn auto_mode_body_sees_the_opened_buffer(cx: &mut gpui::TestAppContext) {
+    // The auto-mode command runs synchronously inside open_file, so the
+    // snapshot must be published first — otherwise the body reads the
+    // buffer that was active BEFORE the file opened.
+    let dir = std::env::temp_dir().join("macros-auto-mode-snapshot-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("c.foo");
+    std::fs::write(&path, "hello").unwrap();
+
+    let editor = setup(cx, "");
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(
+            r#"(define *body-file* #f)
+               (define-derived-mode foo-mode fundamental "F."
+                 (set! *body-file* (buffer-file-name)))
+               (add-auto-mode "\\.foo$" "foo-mode")"#,
+            cx,
+        );
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, cx| {
+        e.apply_command(EditorCommand::OpenFile(path.to_string_lossy().into()), cx);
+    });
+    settle(&editor, cx);
+    let seen = editor.read_with(cx, |e, _| {
+        e.script
+            .eval("(if (string? *body-file*) *body-file* \"none\")")
+            .unwrap()
+            .value
+            .unwrap()
+    });
+    assert!(
+        seen.contains("c.foo"),
+        "body must see the opened file's buffer, got {seen}"
+    );
+}
+
+#[gpui::test]
 fn auto_mode_bundled_mode_keeps_grammar(cx: &mut gpui::TestAppContext) {
     // A bundled mode named through add-auto-mode (`rust-mode`) runs the
     // COMMAND, so the buffer lands in the registered `rust` stack entry with
