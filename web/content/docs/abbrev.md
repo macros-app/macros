@@ -17,7 +17,7 @@ To enable it everywhere by default — Emacs's "enable Abbrev mode by default in
 (set-abbrev-mode-default #t)
 ```
 
-Buffers where you've toggled `abbrev-mode` explicitly keep their own value.
+Every buffer then starts with `abbrev-mode` on (it is the mode's `:init-value`, applied when a buffer is first shown); a buffer where you turn it off stays off. Buffers that were already open when the default changed keep their state, so set it from `init.scm`. Like any [minor mode](minor-mode.md), `abbrev-mode` survives a major-mode switch.
 
 | Key | Command | Action |
 | --- | --- | --- |

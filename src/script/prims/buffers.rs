@@ -1,6 +1,8 @@
 //! Buffer and window primitives: names, files, buffer-locals and window
 //! layout.
 
+use steel::rvals::SteelVal;
+
 use super::*;
 
 pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
@@ -8,6 +10,7 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         queue,
         buffers,
         buffer_paths,
+        mode_parents,
         snapshot,
         ..
     } = ctx;
@@ -72,14 +75,44 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
     register_unary(reg, queue, "set-major-mode", EditorCommand::SetMajorMode);
     // `(register-mode name parent language)` — register a mode definition
     // (derivation parent + language; "" means none). Queued: it is installed
-    // when the command applies, before any later set-major-mode.
-    register_ternary(reg, queue, "register-mode", |name, parent, language| {
-        EditorCommand::RegisterMode {
-            name,
-            parent,
-            language,
-        }
-    });
+    // when the command applies, before any later set-major-mode. The parent
+    // edge is also recorded right away in the engine-side map behind
+    // `mode-parent`, normalized like ModeRegistry::register.
+    {
+        let parents = mode_parents.clone();
+        register_ternary(
+            reg,
+            queue,
+            "register-mode",
+            move |name: String, parent: String, language| {
+                let edge = (!parent.is_empty() && parent != "fundamental").then(|| parent.clone());
+                parents.lock().unwrap().insert(name.clone(), edge);
+                EditorCommand::RegisterMode {
+                    name,
+                    parent,
+                    language,
+                }
+            },
+        );
+    }
+    {
+        // `(mode-parent name)` → the mode a registered major mode derives
+        // from: its parent, "fundamental" for a root mode (every major mode
+        // sits on the fundamental base), #f for fundamental itself or a mode
+        // never registered. mode-local.scm's explicit form walks this chain.
+        let parents = mode_parents.clone();
+        reg.register_fn("mode-parent", move |name: String| -> SteelVal {
+            if name == "fundamental" {
+                return SteelVal::BoolV(false);
+            }
+            match parents.lock().unwrap().get(&name) {
+                None => SteelVal::BoolV(false),
+                Some(parent) => {
+                    SteelVal::StringV(parent.as_deref().unwrap_or("fundamental").into())
+                }
+            }
+        });
+    }
     // `(register-minor-mode-def name lighter init-value)` — register a minor
     // mode's lighter/init-value ("" lighter = none). Named `-def` to avoid
     // the Scheme-level register-minor-mode (describe-mode's listing).

@@ -162,10 +162,14 @@ impl Workspace {
     }
 
     /// Run the initial buffer's mode hooks, after the startup + user scripts have
-    /// registered them (this is what brings up the Steel LSP for `*scratch*`).
+    /// registered them (this is what brings up the Steel LSP for `*scratch*`),
+    /// and push its `:init-value` minor modes (e.g. `set-abbrev-mode-default`).
     pub fn run_startup_hooks(&self, cx: &mut Context<Self>) {
-        self.editor
-            .update(cx, |editor, cx| editor.run_mode_hooks_once(cx));
+        self.editor.update(cx, |editor, cx| {
+            editor.push_init_minors();
+            editor.run_mode_hooks_once(cx);
+            cx.notify();
+        });
     }
 
     /// An OS window-close request: defer to the editor, which cancels the close

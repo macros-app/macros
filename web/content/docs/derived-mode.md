@@ -52,7 +52,7 @@ The command runs the mode's setup body — ancestors' bodies first — then swit
 
 - **Naming**: `(major-mode)` holds the bare name (`mylang`), not `mylang-mode` (see above).
 - **No `:syntax-table`, `:abbrev-table`, or `:group`** — not part of Macros' model.
-- **Mode-local variables**: the expansion registers the parent edge with the `mode-local` module, so the child inherits every mode-local value the parent has set. See [Mode-local variables](/docs/mode-local).
+- **Mode-local variables**: the `mode-local` module reads the parent edge from the mode registry, so the child inherits every mode-local value the parent has set. See [Mode-local variables](/docs/mode-local).
 
 ## File association: `add-auto-mode`
 

@@ -1253,6 +1253,45 @@ pub enum EditorCommand {
     SetWindowLayout(LayoutSpec),
 }
 
+impl EditorCommand {
+    /// Whether applying this may leave a different buffer active, or replace
+    /// the active buffer's mode stack, so minor-mode toggles queued after it
+    /// no longer target the buffer the script's snapshot describes. Errs
+    /// toward `true` for anything that selects a buffer or window.
+    pub(crate) fn may_select_buffer(&self) -> bool {
+        use EditorCommand::*;
+        matches!(
+            self,
+            FindFile
+                | OpenFile(_)
+                | SwitchBuffer
+                | SwitchToBufferNamed(_)
+                | KillBufferNamed(_)
+                | NextBuffer
+                | PreviousBuffer
+                | SelectWindow(_)
+                | OpenFileOtherWindow(_)
+                | FindFileOtherWindow(_)
+                | SwitchToBufferOtherWindow(_)
+                | KillBuffer
+                | KillBufferAndWindow
+                | WindmoveLeft
+                | WindmoveDown
+                | WindmoveUp
+                | WindmoveRight
+                | PreviousWindow
+                | LastWindow
+                | TopLeftWindow
+                | BottomRightWindow
+                | OtherWindow
+                | DeleteWindow
+                | SetSpecialMode(_)
+                | RestoreFileBuffers(_)
+                | SetWindowLayout(_)
+        ) || matches!(self, RenderBuffer { quiet: false, .. })
+    }
+}
+
 /// One row of a transient popup: a key, its description, and the Steel command
 /// to run when it's pressed.
 #[derive(Debug, Clone)]

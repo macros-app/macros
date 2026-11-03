@@ -17,28 +17,37 @@
 ;; Scheme is intentionally excluded: it has the richer, editor-aware `steel-mode`
 ;; / `macros-steel-mode` commands (see steel-mode.scm, macros-steel-mode.scm).
 
-;; Define `<lang>-mode` as a nullary interactive command and register it so M-x
-;; and apropos list it. Built via eval-string because the name is data, not a
-;; literal — the same mechanism `execute-command` uses to call commands by name.
+;; The `<lang>-mode` command: a closure over LANG, so the language id is a
+;; value rather than text spliced into source.
+(define (language-mode-command lang)
+  (lambda ()
+    (set-major-mode lang)
+    (message (string-append lang " mode"))))
+
+;; Bind `<lang>-mode` globally and register it for M-x and with the Rust mode
+;; registry. The command NAME comes from data (`bundled-languages`), and M-x
+;; runs commands by name, so it must be a real global binding: `eval` of a
+;; constructed `define` datum binds it (a macro can't do this — registered
+;; primitives such as `bundled-languages` don't exist at expansion time). The
+;; language id travels as a datum, never spliced into source text.
+;;
+;; register-mode: the `<lang>-mode-hook` alias works for all of them
+;; (run_mode_hooks_once fires `<name>`, `<name>-hook` AND `<name>-mode-hook`),
+;; and set-major-mode builds the stack from the registry (fundamental → lang,
+;; grammar via the language field).
+;;
+;; Not `define-derived-mode`: it would add a keymap variable, a
+;; `<lang>-mode-hook` variable, scoped-key wiring and a setup chain per
+;; language, and stop these commands echoing "<lang> mode". It also takes a
+;; literal name, and would record the commands as its own, so a user's
+;; `(define-derived-mode rust …)` would silently replace the bundled mode
+;; instead of erroring as it does now.
 (define (define-language-mode lang)
-  (let ((cmd (string-append lang "-mode")))
-    (eval-string
-     (string-append "(define (" cmd ") "
-                    "(set-major-mode \"" lang "\") "
-                    "(message \"" lang " mode\"))"))
-    (register-command cmd)))
+  (let ((cmd (string->symbol (string-append lang "-mode"))))
+    (eval (list 'define cmd (list 'language-mode-command lang)))
+    (register-command cmd)
+    (register-mode lang "" lang)))
 
 (for-each define-language-mode
           (filter (lambda (lang) (not (equal? lang "scheme")))
                   (bundled-languages)))
-
-;; Register every bundled language mode with the Rust mode registry: the
-;; `<lang>-mode-hook` alias works for all of them (run_mode_hooks_once fires
-;; `<name>`, `<name>-hook` AND `<name>-mode-hook`), and set-major-mode builds
-;; the stack from the registry (same shape as before — fundamental → lang,
-;; grammar via the language field — now through one code path). Scheme is
-;; excluded as above: it keeps its editor-aware commands.
-(for-each
- (lambda (lang) (register-mode lang "" lang))
- (filter (lambda (lang) (not (equal? lang "scheme")))
-         (bundled-languages)))

@@ -1,4 +1,4 @@
-;; requires: core completion hooks modeline
+;; requires: core completion hooks modeline minor-mode
 
 ;; abbrev — Emacs-style abbreviations, the Macros port of `abbrev`.
 ;; See web/content/docs/abbrev.md for the user-facing docs (including the
@@ -37,8 +37,8 @@
 ;;                           source + the mode-line indicator (typing-time
 ;;                           expansion is planned for when real minor-mode
 ;;                           support lands)
-;;   set-abbrev-mode-default #t   enable abbrev-mode by default in every
-;;                           buffer without an explicit toggle (init.scm)
+;;   set-abbrev-mode-default #t   enable abbrev-mode by default: every buffer
+;;                           gets it at its first activation (init.scm)
 ;;   add-global-abbrev (C-x a g)     define an abbrev interactively: the word
 ;;   add-mode-abbrev (C-x a m)       (or region) before point is the expansion,
 ;;   inverse-add-global-abbrev       the name (or, for the inverse pair, the
@@ -612,55 +612,44 @@
 (define-key "fundamental" "ctrl-x a -" 'abbrev-prefix-mark)
 
 ;; --- abbrev-mode: the buffer-local minor mode ---------------------------------
-;; The Emacs `abbrev-mode` minor mode (Macros has no minor-mode framework yet
-;; — this follows spell.scm's hand-rolled shape). Like Emacs, the mode is a
-;; buffer-local value with a global default:
-;;   * `abbrev-mode` (M-x) toggles the CURRENT buffer, recording an explicit
-;;     value that shadows the default (a buffer-local variable write);
-;;   * `set-abbrev-mode-default` sets the default — #t enables the mode in
-;;     every buffer that has no explicit toggle (Emacs's "Customize this
+;; The Emacs `abbrev-mode` minor mode, a `define-minor-mode` mode: its on/off
+;; state IS the buffer's mode stack (the " abbrev" lighter renders from the
+;; stack entry, C-h m lists it, it survives a major-mode switch). Like Emacs,
+;; it has a global default:
+;;   * `abbrev-mode` (M-x) toggles the CURRENT buffer only;
+;;   * `set-abbrev-mode-default` sets the mode's `:init-value` — #t pushes the
+;;     mode onto every buffer at its FIRST activation (Emacs's "Customize this
 ;;     variable to non-nil to enable Abbrev mode by default in all buffers").
-;; Hooks register while the mode is live anywhere (default on, or any buffer
-;; explicitly on) and come down when it is not; the mode-line slot names the
-;; focused buffer's state.
+;;     A buffer that then turns itself off stays off. Buffers already activated
+;;     when the default changes keep their state (call it from init.scm).
 
-(define *abbrev-state* '())          ; buffer name -> explicit #t/#f, when set
-(define *abbrev-mode-default* #f)    ; the global default value
 (define *abbrev-capf-registered* #f)
 (define *abbrev-capf-min-prefix* 2)  ; decline prefixes shorter than this
 (define (set-abbrev-capf-min-prefix n) (set! *abbrev-capf-min-prefix* n))
 
-;; An absent per-buffer entry inherits the default, like a buffer-local
-;; variable with no local value. Explicit values are stored WRAPPED in a list
-;; — buffer-state-get cannot tell a stored #f from "no entry", so the wrapper
-;; preserves the tri-state (default / explicitly on / explicitly off). The
-;; SCHEME tri-state stays the truth (Emacs: "customize the variable
-;; abbrev-mode to a non-nil value" enables by default; a buffer can toggle
-;; itself off and stay off); the mode STACK entry is a mirror of it —
-;; registered via register-minor-mode-def so the lighter renders from the
-;; stack and C-h m lists the mode — synced on every toggle and buffer switch.
-(define (abbrev--on?)
-  (let ((e (alist-ref *abbrev-state* (current-buffer))))
-    (if e (car e) *abbrev-mode-default*)))
-(define (abbrev--on-set! v)
-  (set! *abbrev-state* (alist-set *abbrev-state* (current-buffer) (list v))))
+;; Reads the PRE-command snapshot (see the caveat in minor-mode.scm).
+(define (abbrev--on?) (minor-mode-active? 'abbrev-mode))
+
+;; The CAPF registers once, the first time the mode can be on anywhere (an
+;; enable, or a #t default); it declines in buffers where the mode is off.
+(define (abbrev--ensure-capf)
+  (unless *abbrev-capf-registered*
+    (set! *abbrev-capf-registered* #t)
+    (add-completion-at-point-function "abbrev-capf")))
 
 ;; No after-change hook for now: auto-expansion is gone (see below), so
-;; nothing should register on `after-change-functions`. The toggle, mode-line
-;; indicator and completion source stay; the hook re-registers here when
-;; typing-time expansion comes back with real minor-mode support.
-(define (set-abbrev-mode-default v)
-  (set! *abbrev-mode-default* v)
-  (abbrev--sync-stack))
+;; nothing should register on `after-change-functions`. The toggle, lighter
+;; and completion source stay.
+(define-minor-mode abbrev-mode
+  "Toggle Abbrev mode in the current buffer (abbrev completion source)."
+  :lighter " abbrev"
+  (abbrev--ensure-capf))
 
-;; The mode stack mirror: abbrev-mode is a real stack entry (so the " abbrev"
-;; lighter renders from the mode line and C-h m lists it), present in THIS
-;; buffer iff abbrev--on? is true. Synced on toggle, default change, and
-;; buffer switch — the same paths the old mode-line slot used.
-(register-minor-mode-def "abbrev-mode" " abbrev" #f)
-(define (abbrev--sync-stack)
-  ((if (abbrev--on?) enable-minor-mode disable-minor-mode) "abbrev-mode"))
-(add-hook "buffer-switch-hook" "abbrev--sync-stack")
+;; Re-registering the def replaces only its init-value (same lighter); the
+;; editor reads it at each buffer's first activation.
+(define (set-abbrev-mode-default v)
+  (when v (abbrev--ensure-capf))
+  (register-minor-mode-def "abbrev-mode" " abbrev" v))
 
 ;; Completes a prefix against the full table chain (local, :parents, global —
 ;; the same resolution abbrev-symbol uses), earlier tables shadowing later.
@@ -702,21 +691,6 @@
 ;; `abbrev--guard-in-place?` blocked every later expansion in the buffer.
 ;; When this returns with real minor-mode support, test it end-to-end through
 ;; `type_text` (`teh teh `) — not with hand-set snapshots, which hid both.
-
-(define (abbrev-mode)
-  (if (abbrev--on?)
-      (begin
-        (abbrev--on-set! #f)
-        (message "abbrev-mode disabled"))
-      (begin
-        (unless *abbrev-capf-registered*
-          (set! *abbrev-capf-registered* #t)
-          (add-completion-at-point-function "abbrev-capf"))
-        (abbrev--on-set! #t)
-        (message "abbrev-mode enabled")))
-  (abbrev--sync-stack))
-
-(register-command 'abbrev-mode)
 
 ;; --- expand-on-insert-exit ---------------------------------------------------
 ;; The `evil-want-abbrev-expand-on-insert-exit` analog: while enabled, leaving

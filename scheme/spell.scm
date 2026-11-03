@@ -1,4 +1,4 @@
-;; requires: core evil modeline
+;; requires: core evil modeline minor-mode
 
 ;; spell.scm — flyspell-style live spell checking with squiggly underlines.
 ;;
@@ -32,7 +32,6 @@
 (spell--register-faces)
 
 ;; --- state ----------------------------------------------------------------------
-(define *spell-state* '())            ; buffer name -> #t while spell-mode is on
 (define *spell-backend* #f)           ; 'native | 'pipe, resolved on first enable
 (define *spell-delay* 400)            ; recheck debounce (ms)
 (define *spell-errors* '())           ; ((start end word) ...) absolute bytes, ascending
@@ -41,7 +40,10 @@
 (define *spell-auto-exts* '())        ; find-file auto-enable extensions
 (define *spell-ignored* '())          ; words accepted for this session (both backends)
 
-(define (spell--on?) (buffer-state-get *spell-state* #f))
+;; On/off is the buffer's mode stack (spell-mode is a real stack entry). Reads
+;; the PRE-command snapshot — see the caveat in minor-mode.scm — so code that
+;; runs in the same command as the toggle must not gate on it.
+(define (spell--on?) (minor-mode-active? 'spell-mode))
 
 ;; The cached error list, valid only for the buffer it was computed in.
 (define (spell--errors)
@@ -244,15 +246,19 @@
 
 ;; --- checking -------------------------------------------------------------------
 (define (spell--check-now)
-  (when (spell--on?)
-    (let* ((region (spell--visible-region))
-           (start (car region))
-           (end (cdr region)))
-      (when (> end start)
-        (let ((text (buffer-substring start end)))
-          (cond ((eq? *spell-backend* 'native) (spell--check-native start text))
-                ((eq? *spell-backend* 'pipe) (spell--check-pipe start text))
-                (else #f)))))))
+  (when (spell--on?) (spell--check-visible)))
+
+;; Unguarded: the enable path calls this directly, since its own snapshot
+;; still says the mode is off.
+(define (spell--check-visible)
+  (let* ((region (spell--visible-region))
+         (start (car region))
+         (end (cdr region)))
+    (when (> end start)
+      (let ((text (buffer-substring start end)))
+        (cond ((eq? *spell-backend* 'native) (spell--check-native start text))
+              ((eq? *spell-backend* 'pipe) (spell--check-pipe start text))
+              (else #f))))))
 
 (define spell--debounce
   (make-debounce "spell" 400 (lambda () (when (spell--on?) (spell--check-now)))))
@@ -268,19 +274,15 @@
         (set! *spell-last-visible* vl)
         (spell--schedule)))))
 
-;; --- mode line ---------------------------------------------------------------------
-;; The mode stack mirror (sanctioned state-routing, not the full framework:
-;; spell keeps its hand-rolled toggle for the distinct on/off actions, the
-;; enable-abort when no checker exists, and the custom messages). spell-mode
-;; is a real stack entry — the " spell" lighter renders from the mode line
-;; and C-h m lists it — mirrored from the Scheme state on every toggle and
-;; buffer switch.
+;; --- mode stack entry ------------------------------------------------------------
+;; spell-mode is a real stack entry: the " spell" lighter renders from the mode
+;; line, C-h m lists it, and it survives a major-mode switch. Registered here
+;; with the raw primitive, not `define-minor-mode` — see spell-mode below.
 (register-minor-mode-def "spell-mode" " spell" #f)
-(define (spell--sync-stack)
-  ((if (spell--on?) enable-minor-mode disable-minor-mode) "spell-mode"))
 
+;; The error cache is per-buffer; a switch rechecks the newly shown buffer
+;; (a no-op where the mode is off).
 (define (spell--buffer-switch)
-  (spell--sync-stack)
   (spell--schedule))
 
 ;; --- the minor mode -----------------------------------------------------------------
@@ -295,13 +297,18 @@
     (add-hook "after-change-functions" "spell--schedule")
     (add-hook "post-command-hook" "spell--follow-view")))
 
+;; Not `define-minor-mode`: its body runs BEFORE the stack push is queued and
+;; cannot veto it, but spell-mode must refuse to turn on when no checker
+;; backend exists. So the toggle calls enable-minor-mode / disable-minor-mode
+;; itself, only once it knows the flip will happen, and keeps its own
+;; messages. The editor fires spell-mode-hook from those primitives, as for
+;; any minor mode.
 (define-command (spell-mode)
   (if (spell--on?)
       (begin
-        (set! *spell-state* (buffer-state-set *spell-state* #f))
+        (disable-minor-mode "spell-mode")
         (spell--set-errors '())
         (clear-overlay-faces-matching "spell-error")
-        (spell--sync-stack)
         (message "spell-mode off"))
       (begin
         (unless *spell-backend* (set! *spell-backend* (spell--resolve-backend)))
@@ -310,9 +317,8 @@
                                     "(spell-set-program \"hunspell\" '(\"-a\"))"))
             (begin
               (spell--ensure-hooks)
-              (set! *spell-state* (buffer-state-set *spell-state* #t))
-              (spell--sync-stack)
-              (spell--check-now)
+              (enable-minor-mode "spell-mode")
+              (spell--check-visible)
               (message (string-append "spell-mode on ("
                                       (symbol->string *spell-backend*) ")")))))))
 

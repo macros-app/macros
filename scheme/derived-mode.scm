@@ -169,10 +169,7 @@
                                      (list 'derived-mode--run-setup bare)
                                      (list 'set-major-mode bare)
                                      #f)))
-                   (list 'register-command (list 'quote cmd-sym))
-                   ;; Kept until the mode-local stack lookup lands: the
-                   ;; child→parent edge for mode-local inheritance.
-                   (list 'mode-local--set-parent bare parent-bare)))))])))
+                   (list 'register-command (list 'quote cmd-sym))))))])))
 
 ;; --- auto-mode-alist -----------------------------------------------------------
 ;; Scheme-level file association (Emacs's `auto-mode-alist`): entries are

@@ -9,22 +9,90 @@ use super::EditorCommand;
 /// The engine thread's outbox: the [`EditorCommand`]s Scheme queued during the
 /// current job, handed to the editor (in order) when the job finishes.
 #[derive(Clone, Default)]
-pub(crate) struct Queue(Arc<Mutex<Vec<EditorCommand>>>);
+pub(crate) struct Queue {
+    cmds: Arc<Mutex<Vec<EditorCommand>>>,
+    minor: Arc<Mutex<MinorOverlay>>,
+}
 
 impl Queue {
     /// Queue one command.
     pub(crate) fn push(&self, cmd: EditorCommand) {
-        self.0.lock().unwrap().push(cmd);
+        self.minor.lock().unwrap().note(&cmd);
+        self.cmds.lock().unwrap().push(cmd);
     }
 
     /// Queue several commands under one lock (a batch primitive's output).
     pub(crate) fn extend(&self, cmds: impl IntoIterator<Item = EditorCommand>) {
-        self.0.lock().unwrap().extend(cmds);
+        let mut minor = self.minor.lock().unwrap();
+        let mut queued = self.cmds.lock().unwrap();
+        for cmd in cmds {
+            minor.note(&cmd);
+            queued.push(cmd);
+        }
     }
 
     /// Take everything queued so far, oldest first.
     pub(crate) fn drain(&self) -> Vec<EditorCommand> {
-        std::mem::take(&mut *self.0.lock().unwrap())
+        std::mem::take(&mut *self.cmds.lock().unwrap())
+    }
+
+    /// The snapshot's space-joined minor modes with the toggles queued since
+    /// it was published applied on top (see [`MinorOverlay`]).
+    pub(crate) fn minor_modes(&self, snapshot: &str) -> String {
+        self.minor.lock().unwrap().apply(snapshot)
+    }
+
+    /// Forget the recorded toggles — at the start of each engine job, so a
+    /// job never sees another's (the editor has applied or will apply them,
+    /// and the snapshot it publishes then carries them).
+    pub(crate) fn reset_minor_overlay(&self) {
+        *self.minor.lock().unwrap() = MinorOverlay::default();
+    }
+}
+
+/// Minor-mode toggles the current engine job has queued, so
+/// `(active-minor-modes)` sees a mode the same script already enabled or
+/// disabled (`(my-mode) (my-mode)` flips twice, not once). Reset at the start
+/// of every engine job, so entries never outlive the script that queued them.
+///
+/// The snapshot describes the buffer the script started in; once the script
+/// queues a command that may select another buffer, later toggles target that
+/// buffer, so they are not recorded (the reads still describe the first one).
+#[derive(Default)]
+struct MinorOverlay {
+    /// Mode name → on (`true`) / off, last write wins.
+    toggles: Vec<(String, bool)>,
+    /// A buffer- or window-selecting command was queued.
+    switched: bool,
+}
+
+impl MinorOverlay {
+    fn note(&mut self, cmd: &EditorCommand) {
+        use EditorCommand::*;
+        let (name, on) = match cmd {
+            EnableMinorMode(name) => (name, true),
+            DisableMinorMode(name) => (name, false),
+            _ => {
+                self.switched |= cmd.may_select_buffer();
+                return;
+            }
+        };
+        if self.switched {
+            return;
+        }
+        self.toggles.retain(|(n, _)| n != name);
+        self.toggles.push((name.clone(), on));
+    }
+
+    fn apply(&self, snapshot: &str) -> String {
+        let mut modes: Vec<&str> = snapshot.split_whitespace().collect();
+        for (name, on) in &self.toggles {
+            modes.retain(|m| m != name);
+            if *on {
+                modes.push(name);
+            }
+        }
+        modes.join(" ")
     }
 }
 
@@ -33,6 +101,12 @@ pub(crate) type BufferNames = Arc<Mutex<Vec<String>>>;
 /// resolve a non-active buffer's path (`buffer-file-name-of`) — the snapshot
 /// bridges only expose the active buffer. Published alongside `BufferNames`.
 pub(crate) type BufferPaths = Arc<Mutex<HashMap<String, String>>>;
+/// Major mode name → its derivation parent (`None` for a root mode), the
+/// engine-side copy of the editor's [`crate::mode::ModeRegistry`] edges.
+/// `register-mode` writes it synchronously as it queues the registration, so
+/// `(mode-parent name)` sees a mode the moment it is defined — before the
+/// queued command reaches the editor.
+pub(crate) type ModeParents = Arc<Mutex<HashMap<String, Option<String>>>>;
 /// A snapshot of the active buffer, published by the editor before it dispatches
 /// a command so the read bridges (`buffer-string`, `point`, `region-text`, …)
 /// see the buffer as of the moment the command was invoked — Emacs's command
@@ -66,7 +140,8 @@ pub struct EditorSnapshot {
     /// for `point-min` / `point-max` and the searches; `None` when widened.
     pub narrow: Option<(usize, usize)>,
     /// Active minor-mode names, space-joined ("" when none) — the stack
-    /// entries above the major. Scheme tests membership via
+    /// entries above the major plus any `:global` modes that are on. Scheme
+    /// tests membership via
     /// `(active-minor-modes)`.
     pub minor_modes: String,
     /// The active buffer's mode names, bottom-up, space-joined
@@ -304,6 +379,7 @@ pub(crate) struct EngineShared {
     pub(crate) queue: Queue,
     pub(crate) buffers: BufferNames,
     pub(crate) buffer_paths: BufferPaths,
+    pub(crate) mode_parents: ModeParents,
     pub(crate) snapshot: SharedSnapshot,
     pub(crate) markers: Markers,
     pub(crate) options: Options,
