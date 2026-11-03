@@ -13995,7 +13995,7 @@ mod abbrev_lib {
         assert!(
             out.commands.iter().any(|c| matches!(
                 c,
-                EditorCommand::RegisterMinorMode { name, lighter, init_value: true }
+                EditorCommand::RegisterMinorMode { name, lighter, init_value: true, global: false }
                     if name == "abbrev-mode" && lighter == " abbrev"
             )),
             "{:?}",
