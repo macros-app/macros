@@ -11,6 +11,21 @@
           ((and (pair? acc) (equal? (car xs) (car acc))) (loop (cdr xs) acc))
           (else (loop (cdr xs) (cons (car xs) acc))))))
 
+;; A VARIABLE name: the Scheme global convention every bundled file follows,
+;; `*like-this*`. function-list (the doc index) is every top-level define —
+;; functions AND variables — so the pickers filter on this, not on the index.
+(define (help--variable-name? n)
+  (and (> (string-length n) 2) (starts-with? n "*") (ends-with? n "*")))
+
+;; Function-picker candidates: everything in the doc index EXCEPT variables
+;; (`*star*` globals) and editor options, both of which belong to
+;; describe-variable / describe-option instead.
+(define (function-candidates)
+  (filter (lambda (n)
+            (and (not (help--variable-name? n))
+                 (not (member n (option-list)))))
+          (function-list)))
+
 ;; All invocable command names: built-ins + registered Scheme commands. Deduped,
 ;; because a command can legitimately appear in BOTH lists — a Rust nullary
 ;; builtin that a Scheme file also `register-command`s — and M-x must list it once.
@@ -100,10 +115,15 @@
                                       (join-lines (map apropos-row matches))))
                    '())))
 
-;; describe-function (C-h f): show a function's documentation — its bundled source
-;; comment. Completion ranges over every Scheme-defined function.
+;; describe-function (C-h f): pick a function in Helm — a vertical, type-to-
+;; narrow list, each candidate annotated with its one-line doc (dimmed, right-
+;; aligned). RET shows the doc; M-a → Jump to definition opens the source.
+;; Completion ranges over every Scheme-defined function.
 (define (describe-function)
-  (completing-read "Describe function: " (function-list) 'describe-function-show))
+  (helm (list (list "Functions"
+                    (map apropos-pair (function-candidates))
+                    (list (list "Describe"           'describe-function-show)
+                          (list "Jump to definition" 'jump-to-definition))))))
 (define (describe-function-show name)
   (when (not (equal? name ""))
     (if (member name (option-list))

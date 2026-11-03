@@ -5,9 +5,8 @@
 ;; --- describe-variable (C-h v) ------------------------------------------------
 ;; Variables are the Scheme globals named `*like-this*` (the convention every
 ;; bundled file follows) plus the editor options. Any other global can still
-;; be typed by name.
-(define (help--variable-name? n)
-  (and (> (string-length n) 2) (starts-with? n "*") (ends-with? n "*")))
+;; be typed by name. `help--variable-name?` is shared with help.scm's function
+;; picker, which excludes these same names.
 (define (variable-list)
   (sort-strings (dedup (append (filter help--variable-name? (function-list)) (option-list)))))
 
@@ -17,8 +16,13 @@
         ((boolean? v) (if v "#t" "#f"))
         (else (to-string v))))
 
+;; describe-variable (C-h v): a Helm picker over the variables (annotated like
+;; the function picker — see apropos-pair in help.scm; options show their
+;; current value). RET shows the doc.
 (define (describe-variable)
-  (completing-read "Describe variable: " (variable-list) 'describe-variable-show))
+  (helm (list (list "Variables"
+                    (map apropos-pair (variable-list))
+                    (list (list "Describe" 'describe-variable-show))))))
 (define (describe-variable-show name)
   (cond
     ((equal? name "") #f)

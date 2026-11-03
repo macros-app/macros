@@ -4124,6 +4124,61 @@ mod magit_tests {
         assert_eq!(finds("font orange", "font-size"), "#false");
     }
 
+    /// describe-function / describe-variable scopes: `function-list` is every
+    /// top-level define (functions AND `*star*` variables AND options), so the
+    /// function picker filters to non-variable, non-option names while the
+    /// variable picker keeps star-globals and options.
+    #[test]
+    fn help_pick_scope_functions_exclude_variables_and_options() {
+        let (engine, _rx) = ScriptEngine::new();
+        for src in crate::runtime::startup_scripts() {
+            engine.eval(src).expect("startup script failed to load");
+        }
+        let v = |e: &str| engine.eval(e).unwrap().value.unwrap_or_default();
+
+        // Precondition: the doc index mixes functions and `*star*` variables
+        // (options are NOT in the index — they only join via `option-list`).
+        assert_eq!(v(r#"(if (member "*recentf*" (function-list)) #t #f)"#), "#true");
+        assert_eq!(
+            v(r#"(if (member "sort-strings" (function-list)) #t #f)"#),
+            "#true"
+        );
+
+        // The function picker: no star-variables, no options, but real fns stay.
+        assert_eq!(
+            v(r#"(if (member "*recentf*" (function-candidates)) #t #f)"#),
+            "#false"
+        );
+        assert_eq!(
+            v(r#"(if (member "font-size" (function-candidates)) #t #f)"#),
+            "#false"
+        );
+        assert_eq!(
+            v(r#"(if (member "sort-strings" (function-candidates)) #t #f)"#),
+            "#true"
+        );
+
+        // The variable picker: star-globals and options in, functions out.
+        assert_eq!(
+            v(r#"(if (member "*recentf*" (variable-list)) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member "font-size" (variable-list)) #t #f)"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(if (member "sort-strings" (variable-list)) #t #f)"#),
+            "#false"
+        );
+
+        // Belt and braces: the two scopes are disjoint.
+        assert_eq!(
+            v(r#"(if (null? (filter (lambda (n) (member n (variable-list))) (function-candidates))) #t #f)"#),
+            "#true"
+        );
+    }
+
     #[test]
     fn package_url_and_option_parsing() {
         let (engine, _rx) = ScriptEngine::new();
