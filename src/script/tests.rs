@@ -163,7 +163,7 @@ mod engine_tests {
         assert!(val("(string-length (tls-last-error))") != "0");
         // Operations on a bogus id fail soft.
         assert!(
-            val("(tls-send 9999 \"x\")").contains("#f")
+            val("(tls-send 9999 \"x\")").contains("#false")
                 || val("(tls-send 9999 \"x\")").contains("false")
         );
         assert_eq!(val("(string-length (tls-recv-line 9999))"), "0");
@@ -180,7 +180,7 @@ mod engine_tests {
             .eval(r#"(define srv (tcp-listen "127.0.0.1" 0))"#)
             .unwrap();
         assert!(
-            val("(> srv 0)").contains("#t"),
+            val("(> srv 0)").contains("#true"),
             "listen failed: {}",
             val("(socket-last-error)")
         );
@@ -195,15 +195,15 @@ mod engine_tests {
         });
         engine.eval("(define conn (tcp-accept srv))").unwrap();
         assert!(
-            val("(> conn 0)").contains("#t"),
+            val("(> conn 0)").contains("#true"),
             "accept failed: {}",
             val("(socket-last-error)")
         );
         assert!(val("(socket-recv-line conn)").contains("ping"));
-        assert!(val(r#"(socket-send conn "pong\n")"#).contains("#t"));
+        assert!(val(r#"(socket-send conn "pong\n")"#).contains("#true"));
         assert!(client.join().unwrap().contains("pong"));
-        assert!(val("(socket-close conn)").contains("#t"));
-        assert!(val("(tcp-listener-close srv)").contains("#t"));
+        assert!(val("(socket-close conn)").contains("#true"));
+        assert!(val("(tcp-listener-close srv)").contains("#true"));
     }
 
     #[test]
@@ -220,13 +220,15 @@ mod engine_tests {
             server.send_to(&buf[..n], from).unwrap();
         });
         engine.eval("(define u (udp-open))").unwrap();
-        assert!(val("(> u 0)").contains("#t"));
+        assert!(val("(> u 0)").contains("#true"));
         // 68656c6c6f = "hello"
-        assert!(val(&format!(r#"(udp-send u "127.0.0.1" {sport} "68656c6c6f")"#)).contains("#t"));
+        assert!(
+            val(&format!(r#"(udp-send u "127.0.0.1" {sport} "68656c6c6f")"#)).contains("#true")
+        );
         let got = val("(udp-recv u 64)");
         assert!(got.contains("68656c6c6f"), "udp echo wrong: {got}");
         echo.join().unwrap();
-        assert!(val("(udp-close u)").contains("#t"));
+        assert!(val("(udp-close u)").contains("#true"));
     }
 
     #[test]
@@ -245,18 +247,18 @@ mod engine_tests {
                 .unwrap()
                 > 0
         );
-        assert!(val(r#"(socket-async-send 1 "6869")"#).contains("#t"));
-        assert!(val("(socket-async-close 1)").contains("#t"));
+        assert!(val(r#"(socket-async-send 1 "6869")"#).contains("#true"));
+        assert!(val("(socket-async-close 1)").contains("#true"));
         assert!(
             val(r#"(ws-connect "wss://example.com/socket" 'on-msg 'on-close)"#)
                 .parse::<i64>()
                 .unwrap()
                 > 0
         );
-        assert!(val(r#"(ws-send 1 "hello")"#).contains("#t"));
-        assert!(val("(ws-close 1)").contains("#t"));
+        assert!(val(r#"(ws-send 1 "hello")"#).contains("#true"));
+        assert!(val("(ws-close 1)").contains("#true"));
         // http-request / http-request-full both queue and return #t.
-        assert!(val(r#"(http-request-full "GET" "https://x" '() "" 'k)"#).contains("#t"));
+        assert!(val(r#"(http-request-full "GET" "https://x" '() "" 'k)"#).contains("#true"));
     }
 
     #[test]
@@ -266,12 +268,12 @@ mod engine_tests {
         let dir = std::env::temp_dir().join(format!("macros-del-{}", std::process::id()));
         let f = dir.join("x.txt");
         let p = f.display();
-        assert!(val(&format!(r#"(write-file-text "{p}" "hi")"#)).contains("#t"));
-        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
-        assert!(val(&format!(r#"(file-exists? "{p}")"#)).contains("#f"));
+        assert!(val(&format!(r#"(write-file-text "{p}" "hi")"#)).contains("#true"));
+        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#true"));
+        assert!(val(&format!(r#"(file-exists? "{p}")"#)).contains("#false"));
         // Already-absent is #t (idempotent retract); a directory is #f.
-        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#t"));
-        assert!(val(&format!(r#"(delete-file "{}")"#, dir.display())).contains("#f"));
+        assert!(val(&format!(r#"(delete-file "{p}")"#)).contains("#true"));
+        assert!(val(&format!(r#"(delete-file "{}")"#, dir.display())).contains("#false"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -281,22 +283,22 @@ mod engine_tests {
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         // In-memory db; create a plain table + an FTS5 virtual table, insert
         // bound rows, and query both ways.
-        assert!(val(r#"(define db (sqlite-open ":memory:")) (> db 0)"#).contains("#t"));
+        assert!(val(r#"(define db (sqlite-open ":memory:")) (> db 0)"#).contains("#true"));
         assert!(val(
             r#"(sqlite-exec db "CREATE TABLE t(id TEXT, n INT); CREATE VIRTUAL TABLE ft USING fts5(id, body);" (list))"#
         )
-        .contains("#t"));
+        .contains("#true"));
         assert!(
             val(r#"(sqlite-exec db "INSERT INTO t VALUES (?1, ?2)" (list "a" "7"))"#)
-                .contains("#t")
+                .contains("#true")
         );
         // Bound params are injection-safe: this text is stored literally.
-        assert!(val(r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m1" "invoice payment overdue"))"#).contains("#t"));
+        assert!(val(r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m1" "invoice payment overdue"))"#).contains("#true"));
         assert!(
             val(
                 r#"(sqlite-exec db "INSERT INTO ft VALUES (?1, ?2)" (list "m2" "lunch tomorrow"))"#
             )
-            .contains("#t")
+            .contains("#true")
         );
         // Column values come back US-joined (0x1f); integer coerced to text.
         let row = val(r#"(car (sqlite-query db "SELECT id, n FROM t" (list)))"#);
@@ -316,9 +318,9 @@ mod engine_tests {
             )
             .contains('1')
         );
-        assert!(val("(sqlite-close db)").contains("#t"));
+        assert!(val("(sqlite-close db)").contains("#true"));
         // Ops on a closed/bogus id fail soft.
-        assert!(val("(sqlite-exec 9999 \"SELECT 1\" (list))").contains("#f"));
+        assert!(val("(sqlite-exec 9999 \"SELECT 1\" (list))").contains("#false"));
         assert_eq!(val("(length (sqlite-query 9999 \"SELECT 1\" (list)))"), "0");
     }
 
@@ -353,11 +355,11 @@ mod engine_tests {
         let (engine, _rx) = ScriptEngine::new();
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         assert!(val(r#"(tcp-connect "127.0.0.1" 1 500 500)"#).contains('0'));
-        assert!(val("(socket-send 9999 \"x\")").contains("#f"));
+        assert!(val("(socket-send 9999 \"x\")").contains("#false"));
         assert_eq!(val("(string-length (socket-recv-line 9999))"), "0");
-        assert!(val("(tls-upgrade 9999 \"x\")").contains("#f"));
-        assert!(val("(socket-set-timeout 9999 100)").contains("#f"));
-        assert!(val("(> (string-length (socket-last-error)) 0)").contains("#t"));
+        assert!(val("(tls-upgrade 9999 \"x\")").contains("#false"));
+        assert!(val("(socket-set-timeout 9999 100)").contains("#false"));
+        assert!(val("(> (string-length (socket-last-error)) 0)").contains("#true"));
         assert!(val("(tcp-accept 9999)").contains('0'));
     }
 
@@ -383,13 +385,13 @@ mod engine_tests {
         let val = |src: &str| engine.eval(src).unwrap().value.unwrap();
         let _ = engine.eval(r#"(define tls-test-conn (tls-connect "imap.gmail.com" 993 0 0))"#);
         assert!(
-            val("(> tls-test-conn 0)").contains("#t"),
+            val("(> tls-test-conn 0)").contains("#true"),
             "connect failed: {}",
             val("(tls-last-error)")
         );
         let greeting = val("(tls-recv-line tls-test-conn)");
         assert!(greeting.contains("* OK"), "unexpected greeting: {greeting}");
-        assert!(val("(tls-close tls-test-conn)").contains("#t"));
+        assert!(val("(tls-close tls-test-conn)").contains("#true"));
     }
 
     #[test]
@@ -470,7 +472,7 @@ mod engine_tests {
             .value
             .unwrap();
         assert!(
-            bad.contains("#f") || bad.contains("false"),
+            bad.contains("#false") || bad.contains("false"),
             "bad hex wrote: {bad}"
         );
         let missing = engine
@@ -5426,17 +5428,20 @@ mod magit_tests {
         );
 
         // Node lookups over a hand-built index (5-element records: …line).
+        // Lookups go through the hash indexes now, so insert via the
+        // index-insert path the create-node commands use.
         engine
             .eval(
-                r#"(set! *org-roam-nodes* (list (list "ID1" "Alpha" "/n/a.org" '() 0)
-                                                  (list "ID2" "Beta" "/n/b.org" '() 7)))"#,
+                r#"(for-each org-roam--index-insert
+                   (list (list "ID1" "Alpha" "/n/a.org" '() 0)
+                         (list "ID2" "Beta" "/n/b.org" '() 7)))"#,
             )
             .unwrap();
         assert_eq!(v(r#"(nth (org-roam--node-by-title "Beta") 0)"#), "\"ID2\"");
         assert_eq!(v(r#"(nth (org-roam--node-by-id "ID1") 1)"#), "\"Alpha\"");
         assert_eq!(
             v(r#"(string-join (org-roam--titles) "|")"#),
-            "\"Alpha|Beta\""
+            "\"Beta|Alpha\""
         );
         // Subtree node carries its headline line; file-level node is line 0.
         assert_eq!(
@@ -12076,7 +12081,7 @@ mod audit_fixes {
             go_rx.recv().unwrap();
         });
         engine.eval("(define conn (tcp-accept srv))").unwrap();
-        assert!(val("(socket-set-timeout conn 200)").contains("#t"));
+        assert!(val("(socket-set-timeout conn 200)").contains("#true"));
         assert_eq!(val("(socket-recv-line conn)"), "\"\"");
         go_tx.send(()).unwrap();
         assert_eq!(val("(socket-recv-line conn)"), "\"hello\\n\"");
@@ -12086,8 +12091,8 @@ mod audit_fixes {
         assert_eq!(val("(socket-recv-bytes conn 4)"), "\"ABCD\"");
         go_tx.send(()).unwrap();
         client.join().unwrap();
-        assert!(val("(socket-close conn)").contains("#t"));
-        assert!(val("(tcp-listener-close srv)").contains("#t"));
+        assert!(val("(socket-close conn)").contains("#true"));
+        assert!(val("(tcp-listener-close srv)").contains("#true"));
     }
 }
 
@@ -15839,5 +15844,501 @@ mod minor_mode_stack_lib {
                 .iter()
                 .any(|c| matches!(c, EditorCommand::DisableMinorMode(n) if n == "m1"))
         );
+    }
+}
+
+#[cfg(test)]
+mod org_roam_scaling_lib {
+    use super::*;
+
+    /// The scaling plan (docs/plans/2026-11-02-org-roam-scaling.md): single-read
+    /// scan records, hash-table indexes, fs-watch registration and the per-file
+    /// sync entry point, exercised against a fixture tree.
+    #[test]
+    fn org_roam_indexes_and_live_sync() {
+        let (engine, _rx) = ScriptEngine::new();
+        engine
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        let v = |q: &str| engine.eval(q).unwrap().value.unwrap();
+
+        // Task 3: the hook handlers exist.
+        assert_eq!(
+            v("(if (procedure? org-roam-on-fs-change) \"y\" \"n\")"),
+            "\"y\""
+        );
+        assert_eq!(
+            v("(if (procedure? org-roam-db-sync-file) \"y\" \"n\")"),
+            "\"y\""
+        );
+
+        // Fixture tree: two nodes, an alias on A, a link A → B, a subtree node.
+        // Pid-suffixed so concurrent test runs/checkouts can't collide.
+        let dir = std::env::temp_dir().join(format!("macros-org-roam-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("daily")).unwrap();
+        std::fs::write(
+            dir.join("a.org"),
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_ALIASES: \"alpha a\"\n:ROAM_REFS: \"https://example.com/a\"\n\nlink [[id:id-b][B]] and [[id:id-sub][S]].\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B\n\n* Sub\n:PROPERTIES:\n:ID:       id-sub\n:END:\nback [[id:id-a][A]].\n\n* Other\nno id here, link [[id:id-a][A]].\n",
+        )
+        .unwrap();
+
+        engine
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let out = engine.eval("(org-roam--sync)").unwrap();
+
+        // Task 3: the first sync registers the tree watch + the fs hook.
+        assert!(out.commands.iter().any(
+            |c| matches!(c, EditorCommand::WatchTree(o, d) if o == "org-roam" && d == &vec![dir.to_string_lossy().into_owned()])
+        ));
+        assert!(out.commands.iter().any(
+            |c| matches!(c, EditorCommand::AddHook(h, f) if h == "directory-changed-hook" && f == "org-roam-on-fs-change")
+        ));
+
+        // Task 1: one record per file; links attributed per node (deduped).
+        // Records are consed in walk order, so find files by path.
+        assert_eq!(v("(length *org-roam-files*)"), "2");
+        assert_eq!(
+            v(&format!(
+                r#"(org-roam--record-links
+                   (car (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                                *org-roam-files*)))"#,
+                dir.join("a.org").display()
+            )),
+            // Two distinct targets on one line — regression: the first link
+            // insertion for a node used to keep only (car ids).
+            r#"(("id-a" "id-b" "id-sub"))"#
+        );
+        // The link under b.org's *Sub heading belongs to the subtree node;
+        // the link under * Other — a SIBLING heading with no :ID: — belongs
+        // to the FILE node (org-roam climbs ancestors; a sibling isn't one).
+        assert_eq!(
+            v(&format!(
+                r#"(org-roam--record-links
+                   (car (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                                *org-roam-files*)))"#,
+                dir.join("b.org").display()
+            )),
+            r#"(("id-sub" "id-a") ("id-b" "id-a"))"#
+        );
+        // ROAM_REFS land in the ref index at scan time.
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
+
+        // Task 2: all four hash indexes are populated.
+        assert_eq!(v(r#"(hash-contains? *org-roam-by-id* "id-a")"#), "#true");
+        assert_eq!(v(r#"(hash-contains? *org-roam-by-id* "id-sub")"#), "#true");
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-title* "Node B")"#),
+            "#true"
+        );
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#true"
+        );
+        assert_eq!(
+            v(&format!(
+                r#"(nth (hash-try-get *org-roam-by-file* "{}") 1)"#,
+                dir.join("b.org").display()
+            )),
+            "\"Node B\""
+        );
+        // Lookups resolve; the alias path lands on the file-level node.
+        assert_eq!(v(r#"(nth (org-roam--node-by-id "id-b") 0)"#), "\"id-b\"");
+        assert_eq!(
+            v(r#"(nth (org-roam--node-by-title "alpha a") 0)"#),
+            "\"id-a\""
+        );
+        // Edges come from the per-node link lists (deduped), no re-reads.
+        // (Normalized: walk order — and thus edge order — is not stable.)
+        assert_eq!(
+            v(r#"(sort-strings
+                 (map (lambda (e) (string-append (car e) "->" (cdr e)))
+                      (org-roam--edges)))"#),
+            r#"("id-a->id-b" "id-a->id-sub" "id-b->id-a" "id-sub->id-a")"#
+        );
+
+        // set-directory must re-arm the watch: the old vault's registration
+        // pointed at the previous directory (WatchTree is replace-per-owner,
+        // so the next sync re-registers against the new one).
+        engine
+            .eval(r#"(org-roam-set-directory "/nonexistent-vault-xyz")"#)
+            .unwrap();
+        assert_eq!(v("*org-roam-watching*"), "#false");
+        engine
+            .eval(&format!(r#"(org-roam-set-directory "{}")"#, dir.display()))
+            .unwrap();
+        engine.eval("(org-roam--sync)").unwrap();
+
+        // Task 4: the sync saved the cache beside the notes; a fresh engine
+        // loads it back with indexes populated (no rescan).
+        assert!(dir.join(".org-roam-cache.tsv").exists());
+        let (engine2, _rx2) = ScriptEngine::new();
+        engine2
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine2
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine2
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v2 = |q: &str| engine2.eval(q).unwrap().value.unwrap();
+        assert_eq!(v2("(org-roam--load-cache)"), "#true");
+        assert_eq!(v2("(length *org-roam-nodes*)"), "3");
+        assert_eq!(
+            v2(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#true"
+        );
+        // ROAM_REFS survive the cache round-trip.
+        assert_eq!(v2("(length *org-roam-refs*)"), "1");
+        // Per-node edges survive the cache round-trip (subtree link column).
+        assert_eq!(
+            v2(r#"(sort-strings
+                  (map (lambda (e) (string-append (car e) "->" (cdr e)))
+                       (org-roam--edges)))"#),
+            r#"("id-a->id-b" "id-a->id-sub" "id-b->id-a" "id-sub->id-a")"#
+        );
+
+        // Task 3: per-file sync replaces one record in place (title edit + save).
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B2\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("b.org").display()
+            ))
+            .unwrap();
+        assert_eq!(
+            v("(hash-contains? *org-roam-by-title* \"Node B2\")"),
+            "#true"
+        );
+        assert_eq!(
+            v("(hash-contains? *org-roam-by-title* \"Node B\")"),
+            "#false"
+        );
+        // A path outside the vault is refused — proven with REAL foreign files,
+        // not a missing path: a /tmp stray and a sibling directory whose name
+        // extends the vault's (the guard must anchor to the path start, not
+        // substring-match). Both exist on disk, so an unguarded sync-file
+        // would actually index them. Cache bytes must be untouched, too.
+        let rogue = std::env::temp_dir().join(format!("rogue-org-roam-{}.org", std::process::id()));
+        std::fs::write(
+            &rogue,
+            ":PROPERTIES:\n:ID:       id-rogue\n:END:\n#+title: Rogue\n\n",
+        )
+        .unwrap();
+        let sib = std::env::temp_dir().join(format!(
+            "{}-archive",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&sib).unwrap();
+        std::fs::write(
+            sib.join("x.org"),
+            ":PROPERTIES:\n:ID:       id-sib\n:END:\n#+title: Sib\n\n",
+        )
+        .unwrap();
+        let cache_file = dir.join(".org-roam-cache.tsv");
+        let cache_before = std::fs::read(&cache_file).unwrap();
+        engine
+            .eval(&format!(r#"(org-roam-db-sync-file "{}")"#, rogue.display()))
+            .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                sib.join("x.org").display()
+            ))
+            .unwrap();
+        assert_eq!(v("(length *org-roam-files*)"), "2");
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-rogue") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-sib") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(std::fs::read(&cache_file).unwrap(), cache_before);
+        // The fs-change handler schedules the debounced re-sync for a dir under
+        // the vault and ignores dirs outside it. First pin the self-write
+        // suppression: with the cache-write timestamp fresh (just stamped),
+        // even an under-vault event must schedule nothing. A timestamp in the
+        // FUTURE (negative diff — wall clock jumped back) must NOT suppress:
+        // the handler lets the event through and forgets the stamp. Then clear
+        // the stamp and expect exactly one RunWithTimer.
+        engine
+            .eval(r#"(set! *org-roam-last-cache-write* (string->number (current-time "%s")))"#)
+            .unwrap();
+        let out_fs_suppressed = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, dir.display()))
+            .unwrap();
+        assert!(
+            !out_fs_suppressed
+                .commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+        );
+        engine
+            .eval(
+                r#"(set! *org-roam-last-cache-write* (+ (string->number (current-time "%s")) 60))"#,
+            )
+            .unwrap();
+        let out_fs_clockjump = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, dir.display()))
+            .unwrap();
+        assert_eq!(
+            out_fs_clockjump
+                .commands
+                .iter()
+                .filter(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(v("*org-roam-last-cache-write*"), "0");
+        engine.eval("(set! *org-roam-last-cache-write* 0)").unwrap();
+        let out_fs = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, dir.display()))
+            .unwrap();
+        assert_eq!(
+            out_fs
+                .commands
+                .iter()
+                .filter(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+                .count(),
+            1
+        );
+        let out_fs_outside = engine
+            .eval(&format!(r#"(org-roam-on-fs-change "{}")"#, sib.display()))
+            .unwrap();
+        assert!(
+            !out_fs_outside
+                .commands
+                .iter()
+                .any(|c| matches!(c, EditorCommand::RunWithTimer { .. }))
+        );
+        let _ = std::fs::remove_dir_all(&sib);
+        let _ = std::fs::remove_file(&rogue);
+        // b.org's title changed but the A→B edge (which lives in a.org's
+        // record) survives, since id-b is still indexed.
+        assert_eq!(v("(org-roam--edges)"), r#"(("id-a" . "id-b"))"#);
+
+        // Now drop the link AND the alias from a.org; its per-file sync (the
+        // incremental index-update path) removes both the edge and the
+        // alias's by-alias entry.
+        std::fs::write(
+            dir.join("a.org"),
+            ":PROPERTIES:\n:ID:       id-a\n:END:\n#+title: Node A\n:ROAM_REFS: \"https://example.com/a\"\n\nno links anymore.\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("a.org").display()
+            ))
+            .unwrap();
+        assert_eq!(v("(org-roam--edges)"), "()");
+        assert_eq!(
+            v(r#"(hash-contains? *org-roam-by-alias* "alpha a")"#),
+            "#false"
+        );
+        assert_eq!(v("(length *org-roam-refs*)"), "1");
+
+        // After-save hook: saving an in-vault buffer re-indexes its file
+        // (title B3); the file is read from the snapshot's path, as the live
+        // hook would see it.
+        std::fs::write(
+            dir.join("b.org"),
+            ":PROPERTIES:\n:ID:       id-b\n:END:\n#+title: Node B3\n\n",
+        )
+        .unwrap();
+        engine.set_snapshot(EditorSnapshot {
+            path: dir.join("b.org").to_string_lossy().into_owned(),
+            ..Default::default()
+        });
+        engine.eval("(org-roam-on-save)").unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node B3") "y" "n")"#),
+            "\"y\""
+        );
+        // The save stamps its own fs echo even when the cache bytes don't
+        // change (plain body edit): without the stamp the .org write's fs
+        // event would schedule a full vault rescan.
+        assert!(v("*org-roam-last-cache-write*") != "0");
+
+        // create-node routes through the per-file sync (the record — and thus
+        // the cache — picks the node up immediately), and TSV fields escape
+        // cleanly: this title carries a tab and a comma, which would shift the
+        // cache's column split unescaped.
+        engine
+            .eval(r#"(org-roam--create-node "Node C, part\tB")"#)
+            .unwrap();
+        assert_eq!(v("(length *org-roam-files*)"), "3");
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node C, part\tB") "y" "n")"#),
+            "\"y\""
+        );
+        // A tag containing a comma (from :a,b:c filetags) survives too.
+        std::fs::write(
+            dir.join("d.org"),
+            ":PROPERTIES:\n:ID:       id-d\n:END:\n#+title: Node D\n#+filetags: :a,b:c\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(
+                r#"(org-roam-db-sync-file "{}")"#,
+                dir.join("d.org").display()
+            ))
+            .unwrap();
+
+        // A comma in the FILENAME is escaped in the cache; the record key must
+        // load back UNESCAPED or per-file syncs of the real path add a second
+        // record and duplicate the node.
+        let comma = dir.join("foo, bar.org");
+        std::fs::write(
+            &comma,
+            ":PROPERTIES:\n:ID:       id-comma\n:END:\n#+title: Comma\n\n",
+        )
+        .unwrap();
+        engine
+            .eval(&format!(r#"(org-roam-db-sync-file "{}")"#, comma.display()))
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-id "id-comma") "y" "n")"#),
+            "\"y\""
+        );
+
+        // A capture whose template body has NO :ID: stays reachable: the scan
+        // finds no node, so the in-memory node must be inserted by hand.
+        engine
+            .eval(r##"(org-roam--create-node-templated "Node T" (list "t" "T" "${slug}.org" "#+title: ${title}\n\nbody without an id.\n"))"##)
+            .unwrap();
+        assert_eq!(
+            v(r#"(if (org-roam--node-by-title "Node T") "y" "n")"#),
+            "\"y\""
+        );
+        let (engine3, _rx3) = ScriptEngine::new();
+        engine3
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine3
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine3
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v3 = |q: &str| engine3.eval(q).unwrap().value.unwrap();
+        assert_eq!(v3("(org-roam--load-cache)"), "#true");
+        // Round-trip equality is checked INSIDE Scheme — the printed repr
+        // escapes tabs/quotes and would be ambiguous.
+        assert_eq!(
+            v3(r#"(if (equal? (nth (org-roam--node-by-id "id-d") 1) "Node D") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(r#"(if (equal? (nth (org-roam--node-by-id "id-d") 3) (list "a,b" "c")) "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(r#"(if (org-roam--node-by-title "Node C, part\tB") "y" "n")"#),
+            "\"y\""
+        );
+        // The comma-filename loads back under its REAL path: exactly one
+        // record keyed by it, the node's file field unescaped, by-file hit.
+        assert_eq!(
+            v3(&format!(
+                r#"(length (filter (lambda (r) (equal? (org-roam--record-file r) "{}"))
+                              *org-roam-files*))"#,
+                comma.display()
+            )),
+            "1"
+        );
+        assert_eq!(
+            v3(&format!(
+                r#"(if (equal? (nth (org-roam--node-by-id "id-comma") 2) "{}") "y" "n")"#,
+                comma.display()
+            )),
+            "\"y\""
+        );
+        assert_eq!(
+            v3(&format!(
+                r#"(if (org-roam--node-by-file "{}") "y" "n")"#,
+                comma.display()
+            )),
+            "\"y\""
+        );
+
+        // Cache reconciliation at load: overwrite the cache with hand-built
+        // rows — one STALE (mtime 0, title no longer on disk → rescan picks
+        // up the disk title), one with a non-numeric line column (dropped),
+        // one whose file no longer exists (record dropped).
+        std::fs::write(
+            dir.join("x.org"),
+            ":PROPERTIES:\n:ID:       id-x\n:END:\n#+title: Disk X\n\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &cache_file,
+            format!(
+                "id-x\tOld X\t{}\t\t0\t\t0\nid-bad\tBad\t{}\t\tnotanumber\t0\nid-gone\tGone\t{}\t\t0\t\t0\n",
+                dir.join("x.org").display(),
+                dir.join("bad.org").display(),
+                dir.join("gone.org").display()
+            ),
+        )
+        .unwrap();
+        let (engine4, _rx4) = ScriptEngine::new();
+        engine4
+            .eval(include_str!("../../scheme/core.scm"))
+            .expect("core.scm");
+        engine4
+            .eval(include_str!("../../scheme/org-roam.scm"))
+            .expect("org-roam.scm");
+        engine4
+            .eval(&format!(
+                r#"(set! *org-roam-directory* "{}")"#,
+                dir.display()
+            ))
+            .unwrap();
+        let v4 = |q: &str| engine4.eval(q).unwrap().value.unwrap();
+        assert_eq!(v4("(org-roam--load-cache)"), "#true");
+        // The stale row was rescanned: the DISK title wins, "Old X" is gone.
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-title "Disk X") "y" "n")"#),
+            "\"y\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-title "Old X") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-id "id-bad") "y" "n")"#),
+            "\"n\""
+        );
+        assert_eq!(
+            v4(r#"(if (org-roam--node-by-id "id-gone") "y" "n")"#),
+            "\"n\""
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
