@@ -38,6 +38,13 @@ Headings and their body text are **virtually indented** by depth, like Emacs `or
 | <kbd>C-c ,</kbd> | `org-set-priority` | Set priority |
 | <kbd>C-c C-c</kbd> | `org-ctrl-c-ctrl-c` | Context action (toggle checkbox, align table, run block…) |
 
+## Heading navigation
+
+| Key | Command | Action |
+| --- | --- | --- |
+| <kbd>C-c C-n</kbd> | `org-next-visible-heading` | Next heading *as displayed* — folded-away headings are skipped |
+| <kbd>C-c C-p</kbd> | `org-previous-visible-heading` | Previous visible heading |
+
 ## Agenda & capture
 
 | Key | Command | Action |

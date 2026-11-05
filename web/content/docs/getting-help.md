@@ -31,7 +31,7 @@ Under the hood `M-x` is `helm-execute-command`, routed through the [Helm](/docs/
 
 ### describe-key
 
-Press <kbd>C-h k</kbd>, then the chord you're curious about. Macros tells you which command it runs in the current context.
+Press <kbd>C-h k</kbd>, then **press the key** you're curious about (prefix sequences work too — `C-x` pends until you complete it). A `*Help*` buffer opens showing the full key sequence, the command it runs, which keymap bound it, and the command's documentation.
 
 ### describe-function & apropos
 

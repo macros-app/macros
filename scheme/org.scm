@@ -848,6 +848,54 @@
         (org--apply-keyword H (if (equal? (org-keyword-at-point) kw) "" kw))
         (message "Not on a heading"))))
 
+;; C-c C-n / C-c C-p — next/previous VISIBLE heading (Emacs
+;; `org-next-visible-heading' / `org-previous-visible-heading'): move between
+;; headlines the way the folds currently display them, skipping headlines
+;; hidden inside a folded subtree (`folded` state hides everything below the
+;; heading; `children` hides the grandchildren bodies too) or a folded drawer.
+;; Visibility is derived from the same per-heading state TAB maintains, so
+;; what these commands skip matches what is actually on screen.
+(define (org--hidden-intervals)
+  (org--fold-state-resync)
+  (let ((headings (org--headings)) (drawers (org--drawers)) (total (org--total-lines)))
+    (apply append
+           (map (lambda (p)
+                  (let ((line (car p)) (st (cdr p)))
+                    (if (org--find-heading headings line)
+                        (org--fold-ranges-for headings total line st)
+                        (let ((end (and (eq? st 'folded) (org--drawer-end-of line drawers))))
+                          (if end (list (cons (+ line 1) end)) '())))))
+                (org--fold-state-get)))))
+(define (org--line-hidden? intervals line)
+  (let loop ((ivs intervals))
+    (cond ((null? ivs) #f)
+          ((and (>= line (car (car ivs))) (<= line (cdr (car ivs)))) #t)
+          (else (loop (cdr ivs))))))
+
+(define-command (org-next-visible-heading)
+  (let* ((ivs (org--hidden-intervals))
+         ;; `next` is the bare 0-based line number of the target heading.
+         (next (let loop ((hs (org--headings)))
+                 (cond ((null? hs) #f)
+                       ((and (> (car (car hs)) (buffer-line))
+                             (not (org--line-hidden? ivs (car (car hs)))))
+                        (car (car hs)))
+                       (else (loop (cdr hs)))))))
+    (if next
+        (goto-line next)
+        (message "No next heading"))))
+(define-command (org-previous-visible-heading)
+  (let* ((ivs (org--hidden-intervals))
+         (prev (let loop ((hs (org--headings)) (best #f))
+                 (cond ((null? hs) best)
+                       ((and (< (car (car hs)) (buffer-line))
+                             (not (org--line-hidden? ivs (car (car hs)))))
+                        (loop (cdr hs) (car (car hs))))
+                       (else (loop (cdr hs) best))))))
+    (if prev
+        (goto-line prev)
+        (message "No previous heading"))))
+
 ;; M-right — demote (one deeper): add a star.
 (define-command (org-demote)
   (let ((H (org--heading-line-at-point)))
@@ -3341,6 +3389,8 @@
 (define-key "org-mode" "enter" 'org-return)
 (define-key "org-mode" "ctrl-k" 'org-kill-line)
 (define-key "org-mode" "ctrl-c ctrl-t" 'org-todo)
+(define-key "org-mode" "ctrl-c ctrl-n" 'org-next-visible-heading)
+(define-key "org-mode" "ctrl-c ctrl-p" 'org-previous-visible-heading)
 (define-key "org-mode" "ctrl-c ctrl-c" 'org-ctrl-c-ctrl-c)
 (define-key "org-mode" "ctrl-c ctrl-q" 'org-set-tags)
 (define-key "org-mode" "ctrl-c ," 'org-set-priority)

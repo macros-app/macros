@@ -48,17 +48,80 @@
 ;; `C-h b` never listed a single modal binding, leaving the whole modal keymap
 ;; undiscoverable from inside the editor.
 ;;
-;; describe-key (C-h k): what is a chord bound to? Searches the active modal
-;; keymap first, then fundamental (the Emacs chords survive into modal mode).
-(define (describe-key) (read-string "Describe key (e.g. ctrl-x ctrl-f): " 'describe-key-finish))
+;; describe-key (C-h k): what does a KEY do? Like Emacs, the next keystroke(s)
+;; are captured AS KEYS — press `C-x C-f`, don't type its name (the old
+;; typed-name read left every real keypress swallowed while the prompt was
+;; open, which read as "stuck"). A sequence that is still a prefix of some
+;; binding (`C-x`) keeps capturing; one that resolves describes its command;
+;; anything else reports "undefined". C-g disarms the capture (Rust does it
+;; before delivering the key, so the collect callback sees it once).
+(define *describe-key--seq* '())
+(define (describe-key)
+  (set! *describe-key--seq* '())
+  (read-key-start "Describe key: " 'describe-key-collect))
+
+;; The command bound to `seq` in the active keymaps (modal map first), or "".
+(define (describe-key--binding seq)
+  (let loop ((kms (active-keymaps)))
+    (if (null? kms)
+        ""
+        (let ((hit (key-binding (car kms) seq)))
+          (if (equal? hit "")
+              (loop (cdr kms))
+              hit)))))
+
+;; Does some binding in the active keymaps EXTEND `seq` (a longer chord with
+;; `seq` as a whole-token prefix)? `keys-with-prefix` matches raw string
+;; prefixes — "c" would "extend" to "ctrl-x" — so compare against `seq + " "`:
+;; an exact match was already handled by describe-key--binding above.
+(define (describe-key--prefix? seq)
+  (let ((pre (string-append seq " ")))
+    (let loop ((kms (active-keymaps)))
+      (cond ((null? kms) #f)
+            ((let probe ((rows (keys-with-prefix (car kms) seq)))
+               (cond ((null? rows) #f)
+                     ((starts-with? (car rows) pre) #t)
+                     (else (probe (cdr rows))))) #t)
+            (else (loop (cdr kms)))))))
+
+(define (describe-key-collect key)
+  ;; Escape / C-g arrive here only to REPORT — Rust already disarmed the
+  ;; capture before delivering them (see deliver_read_key), like Emacs aborting
+  ;; the read rather than describing keyboard-quit. Reset and stay quiet.
+  (if (or (equal? key "escape") (equal? key "ctrl-g"))
+      (set! *describe-key--seq* '())
+      (let ((seq (string-join (append *describe-key--seq* (list key)) " ")))
+        (cond
+          ((not (equal? (describe-key--binding seq) ""))
+           (set! *describe-key--seq* '())
+           (read-key-stop)
+           (describe-key-finish seq))
+          ((describe-key--prefix? seq)
+           (set! *describe-key--seq* (append *describe-key--seq* (list key)))
+           (message (string-append seq "-")))
+          (else
+           (set! *describe-key--seq* '())
+           (read-key-stop)
+           (message (string-append seq " is undefined")))))))
+
+;; The typed-name variant ("ctrl-x ctrl-f"), kept for programmatic use.
+;; Both paths land in a *Help* buffer (Emacs-style) rather than a passing
+;; echo-area message: chord, command, keymap and the command's full doc.
 (define (describe-key-finish chord)
   (let loop ((kms (active-keymaps)))
     (cond ((null? kms)
            (message (string-append chord " is unbound")))
           ((not (equal? (key-binding (car kms) chord) ""))
-           (message (string-append chord " runs " (key-binding (car kms) chord)
-                                   " (" (car kms) ")")))
+           (describe-key-show chord (key-binding (car kms) chord) (car kms)))
           (else (loop (cdr kms))))))
+
+(define (describe-key-show chord cmd km)
+  (let ((doc (function-doc cmd)))
+    (render-buffer "*Help*" "help-mode"
+                   (string-append
+                    chord " runs " cmd " (" km ")\n\n"
+                    (if (equal? doc "") "(no documentation)" doc))
+                   (list (list 0 "tabulated-header")))))
 
 
 ;; First line of a function's doc (its source comment), or "".

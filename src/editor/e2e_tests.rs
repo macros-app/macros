@@ -74,6 +74,88 @@ fn text(editor: &Entity<Editor>, cx: &mut TestAppContext) -> String {
     editor.read_with(cx, |e, _| e.active.buffer.full_text())
 }
 
+/// C-h k reads REAL keystrokes (Emacs `describe-key`), not a typed chord name:
+/// a prefix key pends (`ctrl-x-`), a full sequence describes its command
+/// against the active keymaps, an unbound key reports and disarms the capture.
+#[gpui::test]
+fn describe_key_reads_keystrokes(cx: &mut TestAppContext) {
+    let ed = setup(cx, "hello\n");
+    ed.update(cx, |e, _| e.evil = EvilState::Disabled);
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking("(describe-key)", cx);
+    });
+    settle(&ed, cx);
+    assert!(
+        ed.read_with(cx, |e, _| e.read_key_pending.is_some()),
+        "describe-key should arm the key capture"
+    );
+    keys(&ed, cx, "ctrl-x");
+    assert_eq!(ed.read_with(cx, |e, _| e.status.to_string()), "ctrl-x-");
+    assert!(
+        ed.read_with(cx, |e, _| e.read_key_pending.is_some()),
+        "a prefix keeps capturing"
+    );
+    keys(&ed, cx, "ctrl-f");
+    assert_eq!(ed.read_with(cx, |e, _| e.active.name.clone()), "*Help*");
+    let help = ed.read_with(cx, |e, _| e.active.buffer.full_text());
+    assert!(
+        help.starts_with("ctrl-x ctrl-f runs helm-find-files (fundamental)"),
+        "help header: {help}"
+    );
+    // The command's source comment rides along as the documentation.
+    assert!(help.contains("file navigator"), "helm doc: {help}");
+    assert!(ed.read_with(cx, |e, _| e.read_key_pending.is_none()));
+
+    // An unbound key reports and disarms.
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking("(describe-key)", cx);
+    });
+    settle(&ed, cx);
+    keys(&ed, cx, "z");
+    assert_eq!(
+        ed.read_with(cx, |e, _| e.status.to_string()),
+        "z is undefined"
+    );
+    assert!(ed.read_with(cx, |e, _| e.read_key_pending.is_none()));
+
+    // C-g aborts the capture quietly: disarmed, no *Help* buffer (switch back
+    // to the file buffer first so "unchanged" is observable).
+    run_cmd(&ed, cx, r#"(switch-to-buffer "test.txt")"#);
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking("(describe-key)", cx);
+    });
+    settle(&ed, cx);
+    keys(&ed, cx, "ctrl-g");
+    assert!(ed.read_with(cx, |e, _| e.read_key_pending.is_none()));
+    assert_eq!(ed.read_with(cx, |e, _| e.active.name.clone()), "test.txt");
+}
+
+/// C-h k in an Org buffer resolves mode-keymap chords (C-c C-t → org-todo).
+#[gpui::test]
+fn describe_key_sees_mode_keymaps(cx: &mut TestAppContext) {
+    let ed = setup(cx, "* head\nbody\n");
+    ed.update(cx, |e, _| e.evil = EvilState::Disabled);
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking("(org-mode)", cx);
+    });
+    settle(&ed, cx);
+    ed.update(cx, |e, cx| {
+        e.run_script_blocking("(describe-key)", cx);
+    });
+    settle(&ed, cx);
+    keys(&ed, cx, "ctrl-c");
+    keys(&ed, cx, "ctrl-t");
+    assert_eq!(ed.read_with(cx, |e, _| e.active.name.clone()), "*Help*");
+    let help = ed.read_with(cx, |e, _| e.active.buffer.full_text());
+    assert!(
+        help.starts_with("ctrl-c ctrl-t runs org-todo (org-mode)"),
+        "help header: {help}"
+    );
+    // The command's source comment is pulled in as its documentation.
+    assert!(help.contains("rotate"), "org-todo doc: {help}");
+    assert!(ed.read_with(cx, |e, _| e.read_key_pending.is_none()));
+}
+
 fn point(editor: &Entity<Editor>, cx: &mut TestAppContext) -> usize {
     editor.read_with(cx, |e, _| e.point())
 }
@@ -2548,11 +2630,14 @@ fn help_finds_mode_scoped_bindings(cx: &mut TestAppContext) {
         ("ctrl-c 8", "hb-g"),
     ] {
         run_cmd(&editor, cx, &format!(r#"(describe-key-finish "{chord}")"#));
-        let echo = editor.read_with(cx, |e, _| e.status.to_string());
+        // The answer lands in the *Help* buffer now (and rendering switches to
+        // it), so switch back to the mode-stacked buffer before the next chord.
+        let help = editor.read_with(cx, |e, _| e.active.buffer.full_text());
         assert!(
-            echo.contains(&format!("{chord} runs {cmd}")),
-            "{chord}: {echo}"
+            help.contains(&format!("{chord} runs {cmd}")),
+            "{chord}: {help}"
         );
+        run_cmd(&editor, cx, r#"(switch-to-buffer "test.txt")"#);
     }
     let text = scheme_value(&editor, cx, "(describe-mode-text)");
     for row in ["ctrl-c 1", "ctrl-c 3", "ctrl-c 9", "ctrl-c 8"] {

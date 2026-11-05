@@ -39,6 +39,11 @@
 ;; Editing / view
 (define-key "fundamental" "ctrl-g" 'keyboard-quit)
 (define-key "fundamental" "ctrl-/" 'undo)
+;; C-_ is the same key as C-/ on a US layout, but backends disagree on how a
+;; shifted symbol is reported (macOS: the produced char, "ctrl-_"; some
+;; Windows paths: the base key with shift, "ctrl-shift--") — bind both.
+(define-key "fundamental" "ctrl-_" 'undo)
+(define-key "fundamental" "ctrl-shift--" 'undo)
 (define-key "fundamental" "ctrl-t" 'transpose-chars)
 (define-key "fundamental" "ctrl-l" 'recenter)
 (define-key "fundamental" "ctrl-o" 'open-line)
