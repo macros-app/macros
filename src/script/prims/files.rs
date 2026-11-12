@@ -98,6 +98,21 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
         let path = crate::util::expand_tilde(&path);
         std::path::Path::new(&path).is_dir()
     });
+    // `(file-mtime path)` → the file's modification time as Unix seconds, or
+    // 0 when it doesn't exist / can't be stat'd (org-roam cache staleness).
+    reg.register_fn("file-mtime", |path: String| -> isize {
+        if let Some(remote) = crate::remote::parse(&path) {
+            let _ = remote;
+            return 0;
+        }
+        let path = crate::util::expand_tilde(&path);
+        std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as isize)
+            .unwrap_or(0)
+    });
     // `(file-truename path)` → the canonical absolute path (symlinks and
     // `..` resolved — Emacs's `file-truename`), or `path` unchanged when it
     // doesn't exist. Lets dap.scm match an adapter's frame paths (e.g. macOS

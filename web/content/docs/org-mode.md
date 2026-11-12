@@ -132,9 +132,13 @@ Notes live in `~/org-roam` by default. Point it somewhere else from `init.scm`:
 | <kbd>C-c n f</kbd> | `org-roam-node-find` | Find a node by title — creates it if the title is new |
 | <kbd>C-c n c</kbd> | `org-roam-capture` | Create a new node, then open it |
 | <kbd>C-c n i</kbd> | `org-roam-node-insert` | Insert an `[[id:…]]` link to a node (org buffers only) |
+| <kbd>C-c n t</kbd> | `org-roam-tag-find` | Pick a tag, then a node carrying it |
+| <kbd>C-c n e</kbd> | `org-roam-ref-find` | Pick a `ROAM_REFS` ref (URL / cite key) and visit its node |
 | <kbd>C-c n s</kbd> | `org-roam-db-sync` | Re-scan the directory and rebuild the index |
 
-`C-c n f`, `C-c n c`, `C-c n s`, and `C-c n g` are bound globally as well as in org buffers; `C-c n i` and the backlinks toggle are org-mode only.
+`C-c n f`, `C-c n c`, `C-c n s`, `C-c n g`, `C-c n t`, and `C-c n e` are bound globally as well as in org buffers; `C-c n i` and the backlinks toggle are org-mode only.
+
+A `#+title:` held by more than one node is offered once per node, annotated with the file (`Shared Title — c.org`), so you pick the one you mean. `ROAM_ALIASES` work per node — the file's `:ROAM_ALIASES:` for the file node, a subtree drawer's for that heading — and alias titles complete in find/insert too.
 
 ### Links & backlinks
 
@@ -144,6 +148,8 @@ Notes live in `~/org-roam` by default. Point it somewhere else from `init.scm`:
 | <kbd>C-c n l</kbd> | `org-roam-buffer-toggle` | Show notes that link **to** the current node in a side buffer |
 
 In the `*org-roam-backlinks*` buffer: <kbd>Enter</kbd> visits the entry, <kbd>g</kbd> refreshes, <kbd>n</kbd>/<kbd>p</kbd> move, <kbd>q</kbd> closes.
+
+Backlinks come from the in-memory link index, so they list the *node* each link lives in (a link inside a subtree names that subtree), and they never grep the vault.
 
 ### Graph
 
