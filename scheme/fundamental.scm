@@ -94,5 +94,5 @@
 ;; Start the configured language server when a buffer is opened (any language;
 ;; runs once per buffer via run-mode-hooks). `maybe_start_lsp` is idempotent and
 ;; a no-op for file types with no `set-lsp` server, so this is safe everywhere.
-;; Override in ~/.config/macros/init.scm: (remove-hook "fundamental" "enable-lsp").
-(add-hook "fundamental" "enable-lsp")
+;; Override in ~/.config/macros/init.scm: (remove-hook "fundamental-mode-hook" "enable-lsp").
+(add-hook "fundamental-mode-hook" "enable-lsp")

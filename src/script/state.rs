@@ -157,6 +157,10 @@ pub struct EditorSnapshot {
     pub props: Vec<(usize, usize, String, String)>,
     /// Buffer-local variables `(key, value)`, for `buffer-local-get`.
     pub locals: Vec<(String, String)>,
+    /// Registered hooks as `(hook-name, [function-name …])` in registration
+    /// order — for `(hook-names)` and `(hook-registered-functions hook)`
+    /// (`describe-variable` renders a hook's live registrations).
+    pub hooks: Vec<(String, Vec<String>)>,
     /// Active-buffer LSP diagnostics, one record each as
     /// `"line\tcol\tseverity\tmessage"` (line/col 0-based), for `(diagnostics)`.
     pub diagnostics: Vec<String>,

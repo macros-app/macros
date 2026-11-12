@@ -28,7 +28,7 @@
 (define-key "fundamental" "alt-;" 'comment-dwim)
 
 ;; steel-mode uses ";; " line comments.
-(add-hook "steel" "edit-steel-comment-string")
+(add-hook "steel-mode-hook" "edit-steel-comment-string")
 (define (edit-steel-comment-string) (buffer-local-set "comment-string" ";; "))
 
 ;; Make the editing entry points M-x discoverable.

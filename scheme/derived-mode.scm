@@ -156,8 +156,6 @@
                    (list 'register-mode bare parent-wire language)
                    (list 'define (string->symbol (string-append cmd-name "-map"))
                          (list 'quote keymap))
-                   (list 'define (string->symbol (string-append cmd-name "-hook"))
-                         #f)
                    (list 'minor-mode--install-scoped-keys (list 'quote bare-sym)
                          (list 'quote keymap))
                    (list 'derived-mode--register-setup! bare
@@ -180,7 +178,8 @@
 ;;
 ;; REGEX DIALECT: Macros' regexp primitives ride the Rust `regex` crate, which
 ;; does NOT support Emacs's `'` end-of-string anchor — use `$`
-;; (`(add-auto-mode "\\.foo$" "foo-mode")`).
+;; (`(add-auto-mode "\\.foo$" "foo-mode")`). An invalid pattern is warned
+;; about and the entry disabled at registration.
 ;;
 ;; One find-file-hook covers the WHOLE alist; buffers with no matching entry
 ;; pay one string-match per entry, and there is no per-mode hook churn. The
@@ -203,12 +202,22 @@
 ;; the command (not a raw SetMajorMode) is what makes derived-mode bodies run,
 ;; lets bundled modes keep their grammar wiring, and preserves hand-written
 ;; mode-command setup.
+;; A bad pattern must not silently never-match (worse than Emacs, which
+;; signals invalid-regexp at match time): warn LOUDLY and disable the entry
+;; — never a fatal error, or one ported Emacs pattern bricks init.
+(define (auto-mode--warn pattern)
+  (string-append "add-auto-mode: invalid pattern \""
+                 pattern
+                 "\" — entry disabled (Rust regex dialect: Emacs \\' is $)"))
+
 (define (add-auto-mode pattern mode-name)
   (unless (string? pattern)
     (error "add-auto-mode: pattern must be a string:" pattern))
-  ;; NOTE: an invalid regex fails SILENT at match time (string-match returns
-  ;; -1 for both no-match and bad-pattern) — that is engine-wide behavior,
-  ;; not something this alist can fix.
+  ;; A bad pattern WARNS and disables ONLY this entry — never a fatal error,
+  ;; or one ported Emacs pattern drops the rest of init.scm after it. The
+  ;; invalid-mode-name case stays fatal: it is a code bug, not config data.
+  (unless (regex-valid? pattern)
+    (message (auto-mode--warn pattern)))
   (unless (auto-mode--valid-name? mode-name)
     (error "add-auto-mode: mode-name must be a command identifier (a-zA-Z0-9-_):"
            mode-name))
@@ -218,11 +227,12 @@
   ;; BEFORE the built-in extension→language detection). open_file dispatches
   ;; to the command via eval-string, so derived-mode bodies, bundled-mode
   ;; wiring and hand-written mode commands all run.
-  (set! *auto-mode-alist*
-        (cons (cons pattern mode-name)
-              (filter (lambda (e) (not (string=? (car e) pattern)))
-                      *auto-mode-alist*)))
-  (add-auto-mode-impl pattern mode-name))
+  (when (regex-valid? pattern)
+    (set! *auto-mode-alist*
+          (cons (cons pattern mode-name)
+                (filter (lambda (e) (not (string=? (car e) pattern)))
+                        *auto-mode-alist*)))
+    (add-auto-mode-impl pattern mode-name)))
 
 ;; Pure matcher — the testable seam / introspection surface (the live path is
 ;; Rust's auto_modes table, applied by open_file).

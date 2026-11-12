@@ -34,7 +34,7 @@ Deviation from Emacs: Emacs's `major-mode` would hold `mylang-mode`. Macros' `(m
 |---|---|
 | `mylang-mode` command | M-x registered. Refuses to define a mode whose command already exists (e.g. `rust-mode`) instead of silently replacing it; re-defining your own mode (a config reload) is fine. |
 | `mylang-mode-map` | An introspection alist of the mode's `:keymap` bindings. |
-| `mylang-mode-hook` | Fires when the editor applies the mode switch — hooks keyed by `"mylang"`, `"mylang-hook"` AND `"mylang-mode-hook"` all run. Add hooks with `(add-hook "mylang-mode-hook" 'my-setup)` — a `'symbol` (or a string), NOT `#'`: Steel's `#'` is `syntax`, and the hook fails with "Application not a procedure". |
+| `mylang-mode-hook` | Fires when the editor applies the mode switch — hooks keyed by `"mylang"`, `"mylang-hook"` AND `"mylang-mode-hook"` all run; the Emacs spelling `mylang-mode-hook` is the documented API (the others are back-compat aliases). Add hooks with `(add-hook "mylang-mode-hook" 'my-setup)` — a `'symbol` (or a string), NOT `#'`: Steel's `#'` is `syntax`, and the hook fails with "Application not a procedure". |
 | Keymap inheritance | Automatic: the buffer's mode stack is built from the ancestry (`fundamental → mylang → mylang-test`), and keymap resolution walks it top-down — the child's binding wins, unbound keys fall through to the parent. |
 | Hook inheritance | Automatic: every ancestor's hook fires, furthest ancestor first, each exactly once (`fundamental` once). |
 | Highlighting | The grammar of the nearest mode in the chain that declares one — `:language mylang` on the parent covers the children. Without `:language`, the default is the mode's bare name when a grammar with that exact id exists. |

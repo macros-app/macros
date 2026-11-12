@@ -6,11 +6,15 @@
 ;; engine-thread boundary). These wrappers add the same ergonomics `bind-key`
 ;; has: a 'symbol defers to its name, and an anonymous procedure is stashed in
 ;; the thunk table behind a generated, callable global stub. So all three forms
-;; work — handy for per-major-mode setup:
+;; work — handy for per-major-mode setup. The PUBLIC hook spellings are the
+;; Emacs ones — `<mode>-hook` (`rust-mode-hook`) or `<mode>-mode-hook`; the
+;; editor fires all three (NAME, NAME-hook, NAME-mode-hook), so the bare mode
+;; name ("rust") still fires as a back-compat alias, but it is NOT the
+;; documented API:
 ;;
-;;   (add-hook "rust" "my-setup")                  ; string  (raw form)
-;;   (add-hook "rust" 'my-setup)                   ; 'symbol (resolved at run time)
-;;   (add-hook "rust" (lambda () (message "hi")))  ; anonymous procedure
+;;   (add-hook "rust-mode-hook" "my-setup")                  ; string  (raw form)
+;;   (add-hook "rust-mode-hook" 'my-setup)                   ; 'symbol (resolved at run time)
+;;   (add-hook "rust-mode-hook" (lambda () (message "hi")))  ; anonymous procedure
 ;;
 ;; Must be a separate file from core.scm (where `raw-add-hook`/`hook->name` live):
 ;; Steel compiles each file with letrec* scope, so redefining `add-hook` in the

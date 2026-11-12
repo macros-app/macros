@@ -278,6 +278,28 @@ impl ModeRegistry {
         }
         stack
     }
+
+    /// `build_stack` + deferred parent validation: an unknown non-fundamental
+    /// parent is an error HERE, not at register time (Emacs deliberately
+    /// allows forward references — the parent may not yet be loaded).
+    /// `ancestry` silently stops walking at an unknown parent, so the check
+    /// inspects each chain entry's recorded parent directly.
+    pub fn build_stack_checked(&self, name: &str) -> Result<ModeStack, String> {
+        for m in self.ancestry(name) {
+            let Some(def) = self.defs.get(&m) else {
+                continue;
+            };
+            if let Some(parent) = def.parent.as_deref()
+                && parent != "fundamental"
+                && !self.defs.contains_key(parent)
+            {
+                return Err(format!(
+                    "mode {m}: unknown parent mode {parent} (registered before its parent?)"
+                ));
+            }
+        }
+        Ok(self.build_stack(name))
+    }
 }
 
 /// The keymap holding modal leader chords (`evil-leader-set`). Normal state in
@@ -483,6 +505,30 @@ mod tests {
             },
         );
         assert_eq!(reg.build_stack("gd").names(), vec!["fundamental", "gd"]);
+    }
+
+    #[test]
+    fn unknown_parent_reports_at_build_time() {
+        use super::{ModeDef, ModeRegistry};
+        let mut reg = ModeRegistry::default();
+        reg.register(
+            "child",
+            ModeDef {
+                parent: Some("typo-parent".into()),
+                ..Default::default()
+            },
+        );
+        // Registration is silent (Emacs defers too); build_stack_checked
+        // reports the unknown parent instead of silently producing
+        // fundamental→child.
+        let err = reg.build_stack_checked("child").unwrap_err();
+        assert!(
+            err.contains("typo-parent"),
+            "error must name the parent: {err}"
+        );
+        // A parent that registers LATER makes the same mode build fine.
+        reg.register("typo-parent", ModeDef::default());
+        assert!(reg.build_stack_checked("child").is_ok());
     }
 
     #[test]

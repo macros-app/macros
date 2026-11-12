@@ -301,10 +301,13 @@ struct Document {
     read_only: bool,
     /// Whether this buffer's mode hooks have run (Emacs: once per buffer).
     hooks_ran: bool,
-    /// Whether this buffer's `:init-value` minor modes have been pushed (they
-    /// come on at a buffer's FIRST activation; the flag keeps a later user
-    /// disable sticky across switches).
-    init_minors_ran: bool,
+    /// The `:init-value` minor modes this buffer has decided init state for
+    /// (per-mode marks): a mode registered LATE still reaches this buffer
+    /// (Emacs's `:init-value` is retroactive), while an explicit toggle —
+    /// including a disable before the first init push — stays sticky; the
+    /// mark is set on first application and by every explicit toggle
+    /// (`set_minor_mode`).
+    init_minors_done: std::collections::HashSet<String>,
     /// Globalized minor modes whose TURN-ON already ran in this buffer since
     /// the global mode was last switched on (once per buffer per enable).
     globalized_ran: Vec<String>,
@@ -3802,6 +3805,23 @@ impl Editor {
             selections,
             props,
             locals,
+            // Registered hooks (registration order per hook): describe-variable
+            // renders a hook's live registrations instead of a decoy value.
+            // Keys with NO registered functions are dropped: remove-hook
+            // retains an empty key, and an empty entry would be offered by
+            // C-h v only to fall through to "No variable named …".
+            // Cost note: this clone rides the same full-snapshot rebuild as
+            // props/locals/diagnostics (the ArcSwap gets a fresh
+            // EditorSnapshot per publish), so it adds nothing asymptotic at
+            // hook-table sizes (tens of entries). If hooks ever grow, the
+            // fix is Arc<Vec<(String, Vec<String>)>> in the snapshot, not a
+            // per-publish filter.
+            hooks: self
+                .hooks
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             diagnostics,
             window_buffers: windows
                 .iter()
@@ -4499,8 +4519,19 @@ impl Editor {
             return;
         }
         if on == self.active.modes.minor(name) {
+            // A no-op explicit disable still counts as "applied": the user
+            // turned the mode off before this buffer ever applied its init,
+            // and that decision must survive the first init push.
+            if !on {
+                self.active.init_minors_done.insert(name.to_string());
+            }
             return;
         }
+        // Any explicit toggle counts as this buffer having decided the mode's
+        // init state: `push_init_minors` (first activation, and re-runs for
+        // late-registered modes) must not re-decide over it, or the disable
+        // resurrects on the next buffer switch.
+        self.active.init_minors_done.insert(name.to_string());
         if on {
             let lighter = self.mode_registry.get(name).and_then(|d| d.lighter.clone());
             self.active.modes.push(Mode {
@@ -5268,7 +5299,7 @@ fn blank_document(
         modified: false,
         read_only: false,
         hooks_ran: false,
-        init_minors_ran: false,
+        init_minors_done: std::collections::HashSet::new(),
         globalized_ran: Vec::new(),
         special: None,
         line_faces: HashMap::new(),

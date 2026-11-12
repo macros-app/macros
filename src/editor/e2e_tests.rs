@@ -2644,3 +2644,169 @@ fn help_finds_mode_scoped_bindings(cx: &mut TestAppContext) {
         assert!(text.contains(row), "describe-mode lacks {row}:\n{text}");
     }
 }
+
+#[gpui::test]
+fn init_value_minor_is_retroactive_to_existing_buffers(cx: &mut TestAppContext) {
+    // `:init-value` is a defvar-local GLOBAL DEFAULT in Emacs — RETROACTIVE to
+    // buffers that already exist when the defining file loads. The old single
+    // per-buffer `init_minors_ran` bool meant a mode registered after the
+    // buffer's first activation never reached it; per-mode marks fix that.
+    let editor = setup(cx, "hello");
+    editor.update(cx, |e, cx| {
+        // The buffer's first activation has already applied init minors.
+        e.push_init_minors();
+        // Register an :init-value minor LATE (simulates config load after the
+        // buffer's first activation).
+        let (cmds, err) = e
+            .script
+            .eval_collecting(r#"(define-minor-mode late-mode "L." :init-value #t)"#);
+        assert!(err.is_none(), "{err:?}");
+        for c in cmds {
+            e.apply_command(c, cx);
+        }
+        // The buffer's first activation already ran, so push again — the
+        // per-mode mark must treat late-mode as never-applied.
+        e.push_init_minors();
+        assert!(e.active.modes.minor("late-mode"), "retroactive push failed");
+        // A later explicit disable must stick (the mark is set on first
+        // application either way).
+        e.apply_command(EditorCommand::DisableMinorMode("late-mode".into()), cx);
+        e.push_init_minors();
+        assert!(!e.active.modes.minor("late-mode"), "disable did not stick");
+    });
+}
+
+#[gpui::test]
+fn explicit_disable_before_first_activation_sticks(cx: &mut TestAppContext) {
+    // The init marks used to be set ONLY by push_init_minors, so an explicit
+    // toggle in a buffer that had never applied the mode's init didn't count:
+    // the next activation re-pushed the mode over the user's disable (repro:
+    // define an :init-value mode while *scratch* is active, enable then
+    // disable it, switch buffers and back — the mode was on again).
+    let editor = setup(cx, "hello");
+    editor.update(cx, |e, cx| {
+        // Register an :init-value minor BEFORE this buffer's first init push.
+        let (cmds, err) = e
+            .script
+            .eval_collecting(r#"(define-minor-mode pr96-probe-mode "Probe." :init-value #t)"#);
+        assert!(err.is_none(), "{err:?}");
+        for c in cmds {
+            e.apply_command(c, cx);
+        }
+        assert!(
+            !e.active.modes.minor("pr96-probe-mode"),
+            "define-minor-mode pushed before any activation"
+        );
+        // Explicit enable then disable BEFORE the first activation.
+        e.apply_command(EditorCommand::EnableMinorMode("pr96-probe-mode".into()), cx);
+        assert!(e.active.modes.minor("pr96-probe-mode"), "enable failed");
+        e.apply_command(
+            EditorCommand::DisableMinorMode("pr96-probe-mode".into()),
+            cx,
+        );
+        assert!(!e.active.modes.minor("pr96-probe-mode"), "disable failed");
+        // A no-op disable (mode never on in this buffer) must also count as
+        // "off, keep it off".
+        let (cmds, err) = e
+            .script
+            .eval_collecting(r#"(define-minor-mode pr96-idle-mode "Idle." :init-value #t)"#);
+        assert!(err.is_none(), "{err:?}");
+        for c in cmds {
+            e.apply_command(c, cx);
+        }
+        e.apply_command(EditorCommand::DisableMinorMode("pr96-idle-mode".into()), cx);
+        // First activation (and any late-registration re-push): both stay off.
+        e.push_init_minors();
+        assert!(
+            !e.active.modes.minor("pr96-probe-mode"),
+            "explicit disable resurrected at first activation"
+        );
+        assert!(
+            !e.active.modes.minor("pr96-idle-mode"),
+            "no-op disable resurrected at first activation"
+        );
+    });
+    // Now the repro's exact shape: switch away and back through the REAL
+    // activation path (after_activation -> push_init_minors). A fresh buffer
+    // that never saw the explicit toggle still gets the init default; this
+    // buffer's disable must survive the round trip.
+    editor.update(cx, |e, _| {
+        e.inactive.push(make_document("b.txt".into(), None, "b"));
+    });
+    run_cmd(&editor, cx, r#"(switch-to-buffer "b.txt")"#);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "b.txt");
+        assert!(
+            e.active.modes.minor("pr96-probe-mode"),
+            "unmarked buffer must still get the :init-value default"
+        );
+    });
+    run_cmd(&editor, cx, r#"(switch-to-buffer "test.txt")"#);
+    editor.read_with(cx, |e, _| {
+        assert_eq!(e.active.name, "test.txt");
+        assert!(
+            !e.active.modes.minor("pr96-probe-mode"),
+            "explicit disable resurrected across a buffer switch"
+        );
+        assert!(
+            !e.active.modes.minor("pr96-idle-mode"),
+            "no-op disable resurrected across a buffer switch"
+        );
+    });
+}
+
+#[gpui::test]
+fn empty_hook_keys_drop_out_of_the_snapshot(cx: &mut TestAppContext) {
+    // remove-hook retains an EMPTY key in the editor's hook table; the
+    // snapshot must not publish it, or C-h v offers a hook whose page falls
+    // through to "No variable named …".
+    let editor = setup(cx, "hello");
+    editor.update(cx, |e, cx| {
+        e.publish_point();
+        e.run_script_blocking(r#"(add-hook "foo-hook" 'my-setup)"#, cx);
+    });
+    settle(&editor, cx);
+    // The C-h v picker offers non-empty `-hook` keys, but NOT other hook keys:
+    // an `after-change-functions`-style name is not a variable, so offering
+    // it would fall through describe-variable-show to "No variable named …".
+    editor.update(cx, |e, cx| {
+        e.run_script_blocking(r#"(add-hook "probe-functions" 'my-setup)"#, cx);
+    });
+    settle(&editor, cx);
+    let offered = scheme_value(
+        &editor,
+        cx,
+        r#"(if (member "probe-functions" (variable-list)) "yes" "no")"#,
+    );
+    assert_eq!(
+        offered, "\"no\"",
+        "non-`-hook` hook key offered by the C-h v picker"
+    );
+    let hooks = scheme_value(&editor, cx, "(hook-names)");
+    assert!(
+        hooks.contains("probe-functions"),
+        "probe hook missing from snapshot: {hooks}"
+    );
+    let offered = scheme_value(
+        &editor,
+        cx,
+        r#"(if (member "foo-hook" (variable-list)) "yes" "no")"#,
+    );
+    assert_eq!(
+        offered, "\"yes\"",
+        "non-empty `-hook` key missing from the C-h v picker"
+    );
+    editor.update(cx, |e, cx| {
+        e.publish_point();
+        e.run_script_blocking(r#"(remove-hook "foo-hook" 'my-setup)"#, cx);
+    });
+    settle(&editor, cx);
+    editor.update(cx, |e, _| {
+        e.publish_point();
+        let names = e.script.eval("(hook-names)").unwrap().value.unwrap();
+        assert!(
+            !names.contains("foo-hook"),
+            "empty hook key leaked into the snapshot: {names}"
+        );
+    });
+}

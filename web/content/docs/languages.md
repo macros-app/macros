@@ -298,10 +298,10 @@ To configure what happens **on entering a mode** — the analog of Emacs's `rust
   (set-option "word-wrap:rust" #f)                  ; don't wrap long lines in Rust
   (define-key "rust" "ctrl-c ctrl-t" 'lsp-hover))
 
-(add-hook "rust" 'my-rust-setup)
+(add-hook "rust-mode-hook" 'my-rust-setup)
 ```
 
-`add-hook` accepts a command-name string, a `'symbol`, or an anonymous `(lambda () …)`. Two differences from Emacs worth knowing: the hook key is the **mode name** (`"rust"`, not `rust-mode-hook`), with `fundamental` as the catch-all that runs for every buffer; and the registry is **global** (shared by all buffers in that mode) rather than buffer-local, so hooks should be idempotent — *set* buffer-local state, don't *append* to it.
+`add-hook` accepts a command-name string, a `'symbol`, or an anonymous `(lambda () …)`. The public hook spellings are the Emacs ones: `rust-mode-hook` (the bare mode name `"rust"` also fires as a back-compat alias, but it is not the documented API). `fundamental-mode-hook` is the catch-all that runs for every buffer. The registry is **global** (shared by all buffers in that mode) rather than buffer-local, so hooks should be idempotent — *set* buffer-local state, don't *append* to it.
 
 ## Custom fontification from Scheme
 

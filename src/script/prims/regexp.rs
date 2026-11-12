@@ -110,6 +110,12 @@ pub(in crate::script) fn register(reg: &mut Registrar, ctx: &EngineShared) {
             SteelVal::ListV(per_line.into())
         },
     );
+    // True when the pattern compiles under the Rust `regex` dialect. Scheme
+    // cannot distinguish a bad pattern from a no-match (`string-match` returns
+    // -1 for both), so registration-time validation goes through this.
+    reg.register_fn("regex-valid?", |pattern: String| -> bool {
+        regex(&pattern).is_ok()
+    });
     {
         // `(re-search-forward pattern)` → `(start end)` of the next match at/after
         // point, or `()` if none. Scheme drives point/edits from the result.

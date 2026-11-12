@@ -20,10 +20,14 @@
 ;;    the shared global Normal maps.
 ;;  - The mode line renders the mode's LIGHTER from the stack entry (no
 ;;    Scheme slot per mode).
-;;  - HOOKS: the editor fires NAME-hook (and NAME / NAME-mode-hook) on enable
-;;    AND disable, from the same path as major-mode hooks.
-;;  - `:init-value` modes are pushed at a buffer's FIRST activation (Rust
-;;    side, init_minors_ran) — a later user disable sticks.
+;;  - HOOKS: the editor fires NAME-hook (the public spelling; NAME-hook /
+;;    NAME-mode-hook) on enable AND disable, from the same path as major-mode
+;;    hooks. The bare NAME spelling also fires — a back-compat alias, not the
+;;    documented API.
+;;  - `:init-value` modes are pushed at a buffer's first application of init
+;;    (Rust side, per-mode marks in init_minors_done) — retroactive like
+;;    Emacs: a mode registered LATE still reaches buffers that never applied
+;;    its init, and a later user disable sticks.
 ;;  - `:global` modes are NOT stack entries: the editor keeps one on/off
 ;;    state in a global layer that key lookup consults between every
 ;;    buffer's local minors and its major chain (local minors shadow global
@@ -131,8 +135,6 @@
 ;; Expansion shape:
 ;;   (begin
 ;;     (define NAME-map <keymap datum>)             ; introspection alist
-;;     (define NAME-hook #f)                        ; parity binding; the LIVE
-;;                                                  ; hook key is the STRING
 ;;     (minor-mode--install-scoped-keys 'NAME '<keymap>)
 ;;     (register-minor-mode-def "NAME" lighter init-value)  ; Rust stack entry
 ;;                                ; (register-global-minor-mode-def for :global)
@@ -208,9 +210,6 @@
                  (list 'define
                        (string->symbol (string-append mode-name "-map"))
                        (list 'quote keymap))
-                 (list 'define
-                       (string->symbol (string-append mode-name "-hook"))
-                       #f)
                  (list 'minor-mode--install-scoped-keys (list 'quote name-sym)
                        (list 'quote keymap))
                  ;; The Rust-side definition: stack entry (or global layer)

@@ -939,6 +939,16 @@ mod engine_tests {
             removed.commands.as_slice(),
             [EditorCommand::RemoveHook(m, f)] if m == "steel" && f == "enable-lsp"
         ));
+        // The Emacs idiom keeps working: a QUOTED-SYMBOL hook name
+        // (`(add-hook 'foo-mode-hook 'fn)`) coerces into the string-keyed
+        // registry — `<mode>-hook` is the documented public spelling.
+        let emacs_idiom = engine
+            .eval(r#"(add-hook 'foo-mode-hook 'my-setup)"#)
+            .unwrap();
+        assert!(matches!(
+            emacs_idiom.commands.as_slice(),
+            [EditorCommand::AddHook(m, f)] if m == "foo-mode-hook" && f == "my-setup"
+        ));
     }
 
     /// With core.scm loaded, `add-hook` accepts a 'symbol and a procedure (not
@@ -14738,6 +14748,101 @@ mod minor_mode_lib {
     }
 
     #[test]
+    fn minor_mode_expansion_defines_no_hook_decoy() {
+        let engine = engine();
+        load_with_deps(&engine, "minor-mode");
+        // define-minor-mode no longer defines an inert NAME-hook binding:
+        // evaluating it errors as an unbound identifier.
+        let r = engine.eval("test-hook");
+        assert!(
+            r.is_err(),
+            "NAME-hook decoy is back: evaluating it returned {:?}",
+            r.map(|res| res.value)
+        );
+        // ...and describe-variable can render the live hook registrations:
+        // the hook-listing primitive exists and returns the empty list for an
+        // unregistered hook.
+        assert_eq!(
+            v(&engine, r#"(hook-registered-functions "foo-mode-hook")"#),
+            "()"
+        );
+        assert_eq!(v(&engine, r#"(hook-names)"#), "()");
+    }
+
+    #[test]
+    fn describe_variable_renders_hook_keys_not_bare_mode_names() {
+        let engine = engine();
+        load_with_deps(&engine, "help-extras");
+        // A hook KEY renders its registered functions.
+        engine.set_snapshot(EditorSnapshot {
+            hooks: vec![("rust-mode-hook".into(), vec!["my-setup".into()])],
+            ..Default::default()
+        });
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "rust-mode-hook" (variable-list)) "y" "n")"#
+            ),
+            "\"y\"",
+            "hook key missing from the C-h v picker"
+        );
+        let out = engine
+            .eval(r#"(describe-variable-show "rust-mode-hook")"#)
+            .unwrap();
+        let rendered = out.commands.iter().find_map(|c| match c {
+            EditorCommand::RenderBuffer { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = rendered.expect("describe-variable-show must render a buffer");
+        assert!(text.contains("Registered functions"), "got: {text}");
+        assert!(text.contains("my-setup"), "got: {text}");
+        // Hooks are separate from the mode itself: a <mode>-hook names the
+        // mode command to view instead.
+        assert!(
+            text.contains("describe-function (rust-mode)"),
+            "hook help must point at the mode: {text}"
+        );
+        // A non-mode hook (no -mode-hook suffix) has no mode to point at.
+        engine.set_snapshot(EditorSnapshot {
+            hooks: vec![("kill-buffer-hook".into(), vec!["save-stuff".into()])],
+            ..Default::default()
+        });
+        let out = engine
+            .eval(r#"(describe-variable-show "kill-buffer-hook")"#)
+            .unwrap();
+        let rendered = out.commands.iter().find_map(|c| match c {
+            EditorCommand::RenderBuffer { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        let text = rendered.expect("describe-variable-show must render a buffer");
+        assert!(
+            !text.contains("belongs to"),
+            "non-mode hook must not name a mode: {text}"
+        );
+        // A BARE mode name is a command, not a variable: it is NOT offered by
+        // the picker and does NOT grab the mode's hook.
+        assert_eq!(
+            v(
+                &engine,
+                r#"(if (member "rust-mode" (variable-list)) "y" "n")"#
+            ),
+            "\"n\"",
+            "bare mode name must not be offered as a variable"
+        );
+        let out = engine
+            .eval(r#"(describe-variable-show "rust-mode")"#)
+            .unwrap();
+        assert!(
+            out.commands
+                .iter()
+                .all(|c| !matches!(c, EditorCommand::RenderBuffer { text, .. }
+                     if text.contains("Registered functions"))),
+            "bare mode name must not render the hook: {:?}",
+            out.commands
+        );
+    }
+
+    #[test]
     fn minor_mode_registry_roundtrip() {
         let engine = engine();
         load_with_deps(&engine, "minor-mode");
@@ -14889,7 +14994,11 @@ mod minor_mode_lib {
             "test-mode-map missing bindings: {:?}",
             v(&engine, "test-mode-map")
         );
-        assert_eq!(v(&engine, "test-mode-hook"), "#false");
+        // The inert NAME-hook decoy is gone — evaluating it errors as unbound.
+        assert!(
+            engine.eval("test-mode-hook").is_err(),
+            "NAME-hook decoy is back"
+        );
         // No mode-line slot is registered at define time — the lighter renders
         // from the stack entry RegisterMinorMode just created.
         assert!(
@@ -15243,7 +15352,11 @@ mod derived_mode_lib {
             "\"y\""
         );
         assert!(v(&engine, "mylang-mode-map").contains("ctrl-c z"));
-        assert_eq!(v(&engine, "mylang-mode-hook"), "#false");
+        // The inert NAME-hook decoy is gone — evaluating it errors as unbound.
+        assert!(
+            engine.eval("mylang-mode-hook").is_err(),
+            "NAME-hook decoy is back"
+        );
         // The bare spelling of CHILD works identically.
         engine
             .eval(r#"(define-derived-mode other fundamental "O.")"#)
@@ -15442,6 +15555,16 @@ mod auto_mode_lib {
     }
 
     #[test]
+    fn regex_valid_distinguishes_bad_pattern() {
+        let engine = engine();
+        assert_eq!(v(&engine, r#"(regex-valid? "\\.el$")"#), "#true");
+        // NOTE: Emacs `\'` compiles here (redundant punctuation escapes are
+        // allowed) — the dialect gotcha is match semantics, not compile. Use a
+        // genuinely invalid pattern: unclosed bracket class.
+        assert_eq!(v(&engine, r#"(regex-valid? "[a-")"#), "#false");
+    }
+
+    #[test]
     fn auto_mode_alist_walks_first_match_wins_and_dedups() {
         let engine = engine();
         load_with_deps(&engine, "derived-mode");
@@ -15484,6 +15607,47 @@ mod auto_mode_lib {
                 .iter()
                 .any(|c| matches!(c, EditorCommand::AddAutoMode { pattern, mode }
                 if pattern == "\\.special$" && mode == "magit-status"))
+        );
+    }
+
+    #[test]
+    fn add_auto_mode_rejects_bad_pattern_loudly() {
+        let engine = engine();
+        load_with_deps(&engine, "derived-mode");
+        // ONE eval containing a bad pattern AND a later good entry — a real
+        // init.scm loads all its entries in a single eval, so "the rest of the
+        // file still lands" must hold within THAT eval, not across separate
+        // eval calls.
+        let (commands, err) = engine.eval_collecting(
+            r#"(add-auto-mode "[a-" "foo-mode")
+               (add-auto-mode "\\.el$" "emacs-lisp-mode")"#,
+        );
+        // The bad pattern warns loudly (echo message naming the pattern) and
+        // the eval does NOT error — a runtime error would drop every form
+        // after the bad one, bricking the rest of init.
+        assert!(
+            err.is_none(),
+            "bad pattern must not abort the eval: {err:?}"
+        );
+        let warned = commands.iter().find_map(|c| match c {
+            EditorCommand::Message(text) => Some(text.clone()),
+            _ => None,
+        });
+        let warned = warned.expect("bad pattern must warn");
+        assert!(warned.contains("entry disabled"), "got: {warned}");
+        assert!(
+            warned.contains("[a-"),
+            "message must name the pattern: {warned}"
+        );
+        // The bad entry must NOT be registered (either table).
+        assert_eq!(
+            v(&engine, r#"(member "[a-" (map car *auto-mode-alist*))"#),
+            "#false"
+        );
+        // The LATER entry from the SAME eval still landed.
+        assert_eq!(
+            v(&engine, r#"(auto-mode--match "x.el")"#),
+            "\"emacs-lisp-mode\""
         );
     }
 

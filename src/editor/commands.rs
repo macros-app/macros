@@ -518,8 +518,20 @@ impl Editor {
                 // else keymap only.
                 let language: Option<String> = match self.mode_registry.get(&mode) {
                     Some(_) => {
-                        self.active.modes = self.mode_registry.build_stack(&mode);
-                        self.active.modes.active_language().map(str::to_string)
+                        // Deferred parent validation (Emacs allows forward
+                        // references): a typo'd parent errors HERE, naming the
+                        // parent, instead of silently building
+                        // fundamental→child.
+                        match self.mode_registry.build_stack_checked(&mode) {
+                            Ok(stack) => {
+                                self.active.modes = stack;
+                                self.active.modes.active_language().map(str::to_string)
+                            }
+                            Err(msg) => {
+                                self.echo(msg, cx);
+                                return Ok(());
+                            }
+                        }
                     }
                     None => {
                         let language = Highlighter::for_language(&mode).map(|_| mode.clone());
