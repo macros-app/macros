@@ -144,6 +144,19 @@ impl Editor {
     /// Route one keystroke through the modal layers (see [`Self::on_key_down`]);
     /// also how `:normal` feeds its keys.
     pub(super) fn dispatch_keystroke(&mut self, ks: &Keystroke, cx: &mut Context<Self>) {
+        // The PC clipboard chords (C-Insert, S-Insert, S-Delete, and C-S-c /
+        // C-S-v off macOS) become their cmd-c/x/v twins before any layer sees
+        // them, so they copy/cut/paste wherever cmd-c/x/v do — buffers,
+        // special buffers, the minibuffer, a live terminal, a grid. A user's
+        // own binding of the chord wins (e.g. `C-S-c C-S-c` → mc-edit-lines),
+        // and mid-sequence keys are never rewritten.
+        let alias = clipboard_alias(ks, cfg!(target_os = "macos")).filter(|_| {
+            let chord = chord_string(ks);
+            self.pending_keys.is_empty()
+                && self.keymap.resolve(&self.active.modes, &chord).is_none()
+                && !self.keymap.is_prefix(&self.active.modes, &chord)
+        });
+        let ks = alias.as_ref().unwrap_or(ks);
         // Precedence: startup gate → transient → helm → minibuffer → completion
         // popup → terminal → evil replace-pending → evil Normal/Visual → modal
         // leader → evil Insert → special-buffer chord overlay → special buffer →
@@ -1680,6 +1693,32 @@ pub(super) const KEY_TAB: ActionKey = ActionKey {
     ghost: true,
 };
 
+/// The cmd-c/x/v keystroke a PC clipboard chord stands for, or `None` when `ks`
+/// isn't one. cmd is the Win key on Windows (and Super on Linux), where the OS
+/// keeps Win+C/X/V for itself, so these are the only clipboard keys there:
+///
+/// - `ctrl-insert` copy, `shift-insert` paste, `shift-delete` cut — the CUA
+///   keys Emacs binds on every platform, so they alias on macOS too.
+/// - `ctrl-shift-c` copy, `ctrl-shift-v` paste — the terminal-emulator
+///   convention (Windows Terminal, GNOME Terminal, …), off macOS only: there
+///   cmd-c/v already work and a terminal user may want C-S-c sent to the shell.
+fn clipboard_alias(ks: &Keystroke, mac: bool) -> Option<Keystroke> {
+    let m = &ks.modifiers;
+    if m.platform || m.alt || m.function {
+        return None;
+    }
+    let key = ks.key.to_ascii_lowercase();
+    let target = match (m.control, m.shift, key.as_str()) {
+        (true, false, "insert") => "c",
+        (false, true, "insert") => "v",
+        (false, true, "delete") => "x",
+        (true, true, "c") if !mac => "c",
+        (true, true, "v") if !mac => "v",
+        _ => return None,
+    };
+    Keystroke::parse(&format!("cmd-{target}")).ok()
+}
+
 /// Whether a keystroke in a live terminal belongs to the editor instead of the
 /// shell: an in-progress editor sequence continues, `C-x` is the editor prefix,
 /// platform (cmd) chords stay the editor's (so cmd-c/cmd-v copy/paste and cmd-q
@@ -1704,7 +1743,7 @@ fn terminal_key_goes_to_editor(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_key_goes_to_editor;
+    use super::{clipboard_alias, terminal_key_goes_to_editor};
     use crate::mode::{Keymap, LEADER_KEYMAP};
     use gpui::Keystroke;
 
@@ -1735,5 +1774,36 @@ mod tests {
         // User pass-through list.
         assert!(to_editor("alt-o", false, "ctrl-] alt-o"));
         assert!(!to_editor("alt-p", false, "ctrl-] alt-o"));
+    }
+
+    #[test]
+    fn pc_clipboard_chords_alias_to_cmd() {
+        let alias =
+            |k: &str, mac: bool| clipboard_alias(&key(k), mac).map(|ks| super::chord_string(&ks));
+        for mac in [false, true] {
+            assert_eq!(alias("ctrl-insert", mac).as_deref(), Some("cmd-c"));
+            assert_eq!(alias("shift-insert", mac).as_deref(), Some("cmd-v"));
+            assert_eq!(alias("shift-delete", mac).as_deref(), Some("cmd-x"));
+        }
+        // The terminal-emulator chords only where cmd isn't a usable modifier.
+        assert_eq!(alias("ctrl-shift-c", false).as_deref(), Some("cmd-c"));
+        assert_eq!(alias("ctrl-shift-v", false).as_deref(), Some("cmd-v"));
+        assert_eq!(alias("ctrl-shift-c", true), None);
+        assert_eq!(alias("ctrl-shift-v", true), None);
+        // Everything else is left alone — Emacs's C-c / C-v / plain Delete.
+        for k in [
+            "ctrl-c",
+            "ctrl-v",
+            "ctrl-x",
+            "delete",
+            "insert",
+            "ctrl-alt-insert",
+        ] {
+            assert_eq!(alias(k, false), None, "{k}");
+        }
+        // An aliased chord routes to the editor in a live terminal, like cmd-v.
+        let km = Keymap::default();
+        let v = clipboard_alias(&key("ctrl-shift-v"), false).unwrap();
+        assert!(terminal_key_goes_to_editor(&v, false, "", &km));
     }
 }

@@ -203,6 +203,37 @@ fn kill_ring_save_copies_without_editing(cx: &mut TestAppContext) {
     assert_eq!(text(&ed, vcx), "hello worldhello\n");
 }
 
+/// The PC clipboard keys (Windows/Linux, where cmd is the Win/Super key):
+/// C-Insert copies, S-Delete cuts, S-Insert pastes — through the same
+/// clipboard commands as cmd-c/x/v, so the OS clipboard and the ring agree.
+#[gpui::test]
+fn pc_clipboard_keys_copy_cut_and_paste(cx: &mut TestAppContext) {
+    let (ed, vcx) = setup(cx, "hello world\n");
+    press(&ed, vcx, "C-SPC M-f ctrl-insert");
+    assert_eq!(text(&ed, vcx), "hello world\n");
+    assert_eq!(clipboard(vcx).as_deref(), Some("hello"));
+    assert_eq!(status(&ed, vcx), "Copied");
+
+    press(&ed, vcx, "C-SPC M-f shift-delete");
+    assert_eq!(text(&ed, vcx), "hello\n");
+    assert_eq!(clipboard(vcx).as_deref(), Some(" world"));
+
+    set_clipboard(vcx, " there");
+    press(&ed, vcx, "shift-insert");
+    assert_eq!(text(&ed, vcx), "hello there\n");
+
+    // A user binding of the chord beats the alias.
+    ed.update(vcx, |e, cx| {
+        e.run_script_blocking(
+            "(define-key \"fundamental\" \"shift-insert\" 'end-of-buffer)",
+            cx,
+        )
+    });
+    press(&ed, vcx, "M-< shift-insert");
+    assert_eq!(text(&ed, vcx), "hello there\n");
+    assert_eq!(point(&ed, vcx), "hello there\n".len());
+}
+
 // --- yank / yank-pop -------------------------------------------------------------
 
 /// A ring of three kills, newest last, with the clipboard already holding the

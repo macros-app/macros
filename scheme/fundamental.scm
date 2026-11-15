@@ -31,6 +31,8 @@
 (define-key "fundamental" "ctrl-y" 'yank)
 (define-key "fundamental" "alt-y" 'yank-pop)
 ;; System clipboard (macOS cmd-c/x/v) — work everywhere, incl. evil modes.
+;; Off macOS cmd is the Win/Super key, so C-Insert / S-Delete / S-Insert (and
+;; C-S-c / C-S-v) alias to these unless bound themselves (src/editor/input.rs).
 (define-key "fundamental" "cmd-c" 'clipboard-copy)
 (define-key "fundamental" "cmd-x" 'clipboard-cut)
 (define-key "fundamental" "cmd-v" 'clipboard-paste)
