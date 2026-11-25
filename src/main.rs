@@ -20,6 +20,7 @@ mod formula;
 mod grammar;
 mod grid;
 mod grid_fn;
+mod hexview;
 mod highlight;
 mod json_format;
 mod jsonrpc;

@@ -67,6 +67,10 @@ mod grid_sheets;
 mod grid_wrap;
 mod grid_xlsx;
 mod helm;
+mod hexbuf;
+mod hexbuf_element;
+#[cfg(test)]
+mod hexbuf_tests;
 mod input;
 mod isearch;
 mod json_print;
@@ -343,6 +347,9 @@ struct Document {
     /// A grid shown as raw text (`grid-toggle-view`): what only the grid
     /// holds, put back when it turns into a grid again.
     grid_stash: Option<Box<grid::GridStash>>,
+    /// For a hex buffer (a binary file shown as bytes): its data and view.
+    /// The rope above stays empty; see [`Document::save_bytes`].
+    hex: Option<Box<hexbuf::HexDoc>>,
     /// For the ANVIL REPL buffer: where its editable input region starts (see
     /// [`anvil_repl`]). Moves with edits like a marker.
     repl_input: Option<usize>,
@@ -359,6 +366,9 @@ impl Document {
     /// A CSV grid holding formulas or formatting can't be written — CSV
     /// stores neither — so it's an error naming the fix (save it as `.xlsx`).
     fn save_bytes(&self) -> std::io::Result<Vec<u8>> {
+        if let Some(h) = &self.hex {
+            return Ok(h.data.bytes().to_vec());
+        }
         match &self.grid {
             // Only part of a big file is parsed yet: saving now would cut it.
             Some(g) if g.loading.is_some() => Err(std::io::Error::other(format!(
@@ -961,6 +971,12 @@ pub struct Editor {
     terminal_geom: HashMap<u64, TermGeom>,
     /// The terminal id whose selection a drag is currently extending, if any.
     terminal_drag: Option<u64>,
+    /// Editor-wide hex buffer state: pane geometry for mouse hits, the drag
+    /// in progress, and wheel scrolling (see [`hexbuf::HexUi`]).
+    hex_ui: hexbuf::HexUi,
+    /// Identities of files whose pending read should open as hex whatever
+    /// they hold (`hex-find-file`).
+    hex_forced: std::collections::HashSet<PathBuf>,
     /// Editor-wide grid state: settings, mouse and echo bookkeeping, the
     /// `ge` popup (see [`grid::GridUi`]).
     grid_ui: grid::GridUi,
@@ -1669,6 +1685,8 @@ impl Editor {
             terminal_task: None,
             terminal_geom: HashMap::new(),
             terminal_drag: None,
+            hex_ui: Default::default(),
+            hex_forced: Default::default(),
             grid_ui: Default::default(),
             grid_fns: Default::default(),
             macro_recording: None,
@@ -3869,6 +3887,7 @@ impl Editor {
             minor_modes: self.active_minor_names().join(" "),
             mode_stack: self.active.modes.names().join(" "),
             grid: self.active.grid.as_deref().map(|g| g.snapshot()),
+            hex: self.active.hex.as_deref().map(|h| h.snapshot()),
         });
     }
 
@@ -5312,6 +5331,7 @@ fn blank_document(
         ghost: None,
         grid: None,
         grid_stash: None,
+        hex: None,
         repl_input: None,
         narrow: None,
     }

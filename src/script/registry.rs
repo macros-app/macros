@@ -239,6 +239,12 @@ fn build_nullary() -> Vec<(&'static str, EditorCommand)> {
             .iter()
             .map(|&(name, cmd)| (name, Grid(cmd.into()))),
     );
+    // Hex buffer commands (scheme/hex.scm binds them).
+    out.extend(
+        crate::hexview::cmd::HEX_COMMANDS
+            .iter()
+            .map(|&(name, cmd)| (name, Hex(cmd))),
+    );
     out.extend(
         crate::editor::EMACS_INPUT_COMMANDS
             .iter()
@@ -267,6 +273,7 @@ pub(crate) fn build_engine(shared: &EngineShared) -> (Engine, Vec<String>) {
     }
     prims::editing::register(&mut reg, shared);
     prims::grid::register(&mut reg, shared);
+    prims::hexbuf::register(&mut reg, shared);
     prims::prompts::register(&mut reg, shared);
     prims::keymaps::register(&mut reg, shared);
     prims::languages::register(&mut reg, shared);

@@ -145,6 +145,12 @@ pub enum EditorCommand {
     /// A grid-buffer command (scheme/grid.scm), with the count or `C-u`
     /// flag its key carried; see [`crate::grid::cmd`].
     Grid(crate::grid::cmd::GridInvocation),
+    /// A hex-buffer command (scheme/hex.scm); see [`crate::hexview::cmd`].
+    Hex(crate::hexview::cmd::HexCmd),
+    /// A hex operation with arguments from the Scheme API.
+    HexOp(crate::hexview::cmd::HexOp),
+    /// `(hex-find-file path)`: visit a file as hex, whatever it holds.
+    HexFindFile(String),
     /// Mark ring, text scale, overwrite-mode, `C-q`, `C-x z`, …; see
     /// `crate::editor::emacs_input`.
     EmacsInput(crate::editor::EmacsInputCmd),

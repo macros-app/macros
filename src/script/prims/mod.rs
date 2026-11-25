@@ -20,6 +20,7 @@ pub(super) mod files;
 pub(super) mod git;
 pub(super) mod grid;
 pub(super) mod help;
+pub(super) mod hexbuf;
 pub(super) mod hooks;
 pub(super) mod http;
 pub(super) mod keymaps;

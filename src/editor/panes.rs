@@ -822,6 +822,12 @@ impl Editor {
                         pane: *id,
                     }
                     .into_any_element()
+                } else if self.pane_hex(*id).is_some() {
+                    super::hexbuf_element::HexElement {
+                        editor: cx.entity(),
+                        pane: *id,
+                    }
+                    .into_any_element()
                 } else if let Some(tid) = self.pane_terminal_id(*id) {
                     crate::element::TerminalElement {
                         editor: cx.entity(),
