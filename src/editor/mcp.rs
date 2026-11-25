@@ -604,7 +604,7 @@ impl Editor {
     }
 
     fn mcp_log_line(&mut self, line: String) {
-        let stamped = format!("{} {line}", chrono::Local::now().format("%H:%M:%S"));
+        let stamped = format!("{} {line}", jiff::Zoned::now().strftime("%H:%M:%S"));
         self.mcp_log.push(stamped.clone());
         self.append_to_log_buffer("*mcp-server*", &stamped);
     }

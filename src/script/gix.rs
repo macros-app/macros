@@ -4,8 +4,7 @@ use std::collections::HashMap;
 /// `"<shorthash>\t<author>\t<YYYY-MM-DD>\t<summary>"`. Tab-separated because
 /// author names and commit summaries contain spaces and colons, so the
 /// `path:line:text` colon convention `grep-files` uses wouldn't round-trip. The
-/// date comes from `chrono` (already a dep) so we don't depend on gix-date's
-/// formatter module being public.
+/// date is in the author's own zone, as `git log --date=short` prints it.
 pub(crate) fn gix_commit_row(
     repo: &gix::Repository,
     id: &gix::ObjectId,
@@ -14,11 +13,22 @@ pub(crate) fn gix_commit_row(
     let short = id.to_hex_with_len(8).to_string();
     let author = commit.author()?;
     let name = author.name.to_string();
-    let date = chrono::DateTime::from_timestamp(author.seconds(), 0)
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
-        .unwrap_or_default();
+    let date = git_date(author.time()?, "%Y-%m-%d");
     let summary = commit.message()?.summary().to_string();
     Ok(format!("{short}\t{name}\t{date}\t{summary}"))
+}
+
+/// A git timestamp formatted (strftime-style) in its own UTC offset, as git
+/// prints author dates; "" for a time or offset out of range.
+fn git_date(time: gix::date::Time, fmt: &str) -> String {
+    let (Ok(ts), Ok(off)) = (
+        jiff::Timestamp::from_second(time.seconds),
+        jiff::tz::Offset::from_seconds(time.offset),
+    ) else {
+        return String::new();
+    };
+    let zoned = ts.to_zoned(jiff::tz::TimeZone::fixed(off));
+    jiff::fmt::strtime::format(fmt, &zoned).unwrap_or_default()
 }
 
 /// One `git log --oneline`-style row: `"<short7>[ (<decorations>)] <summary>"`
@@ -176,12 +186,7 @@ pub(crate) fn gix_blame_text(dir: &str, file: &str) -> Result<String, Box<dyn st
         let commit = repo.find_commit(entry.commit_id)?;
         let author = commit.author()?;
         let time = author.time()?;
-        let date = chrono::FixedOffset::east_opt(time.offset)
-            .and_then(|tz| {
-                chrono::DateTime::from_timestamp(time.seconds, 0).map(|dt| dt.with_timezone(&tz))
-            })
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
+        let date = git_date(time, "%Y-%m-%d");
         let is_root = commit.parent_ids().next().is_none();
         abbrev = abbrev.max(commit.id().shorten_or_id().hex_len() + 1);
         let name = mailmap.resolve(author).name.to_string();
@@ -799,15 +804,8 @@ pub(crate) fn gix_show(dir: &str, rev: &str) -> Result<String, Box<dyn std::erro
     let author = commit.author()?;
     out.push_str(&format!("Author: {} <{}>\n", author.name, author.email));
     let t = author.time()?;
-    let date = chrono::DateTime::from_timestamp(t.seconds, 0)
-        .and_then(|dt| {
-            chrono::FixedOffset::east_opt(t.offset).map(|off| {
-                dt.with_timezone(&off)
-                    .format("%a %b %e %H:%M:%S %Y %z")
-                    .to_string()
-            })
-        })
-        .unwrap_or_default();
+    // git's default date: the day unpadded ("Nov 6", not "Nov  6").
+    let date = git_date(t, "%a %b %-d %H:%M:%S %Y %z");
     out.push_str(&format!("Date:   {date}\n\n"));
     for line in commit.message_raw()?.to_string().lines() {
         out.push_str("    ");
@@ -1341,6 +1339,24 @@ pub(crate) fn diff_line_marks(head: &str, text: &str) -> Vec<(usize, crate::edit
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn git_dates_use_the_authors_offset() {
+        // 2026-11-26 03:04:05 UTC, authored at -08:00: still the 25th there.
+        let t = gix::date::Time::new(1_795_662_245, -8 * 3600);
+        assert_eq!(git_date(t, "%Y-%m-%d"), "2026-11-25");
+        assert_eq!(
+            git_date(t, "%a %b %-d %H:%M:%S %Y %z"),
+            "Wed Nov 25 19:04:05 2026 -0800"
+        );
+        let early = gix::date::Time::new(1_793_928_616, 0);
+        assert_eq!(
+            git_date(early, "%a %b %-d %H:%M:%S %Y %z"),
+            "Fri Nov 6 01:30:16 2026 +0000"
+        );
+        // An offset no real zone has yields "" rather than a wrong date.
+        assert_eq!(git_date(gix::date::Time::new(0, 100 * 3600), "%Y"), "");
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
