@@ -38,6 +38,7 @@ The fastest way to learn the editor is from inside it:
 Inside the editor, <kbd>C-x C-f</kbd> opens a file. From outside it:
 
 - **From a terminal:** `macros notes.md data.csv` opens each file, the last one in front. `macros --client notes.md` opens it in the Macros you already have running instead (see [Edit server](/docs/server)).
+- **By dragging:** drop files onto a window to open them in the pane you drop them on. Each opens in the right kind of buffer: CSV, TSV, and `.xlsx` as a [grid](/docs/grid), binary files in the [hex editor](/docs/hex), everything else as text. A dropped folder opens in [dired](/docs/dired).
 - **From your file manager:** Macros is listed under **Open With** for every language it highlights, plus CSV and TSV files, Excel workbooks (`.xlsx`), plain text, Org, and Markdown. That's **Open With** in Finder on macOS, **Open with** in Explorer on Windows, and **Open With Other Application** (or similar) in your Linux file manager. This needs an installed build; a build run with `cargo run` isn't registered with the OS.
 
 Launching on files gives you just those files: your saved buffers and windows aren't restored, and stay saved for next time (see [Session state](/docs/configuration#session-state)). On macOS, a file opened while Macros is running joins the frontmost window. On Windows and Linux it opens in a new Macros window.

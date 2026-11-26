@@ -225,6 +225,22 @@ pub struct EditorSnapshot {
     /// The active grid buffer's state, for the `grid-*` reads; `None` when
     /// the active buffer isn't a grid.
     pub grid: Option<GridSnapshot>,
+    /// The active hex buffer's state, for the `hex-*` reads; `None` when the
+    /// active buffer isn't a hex buffer.
+    pub hex: Option<HexSnapshot>,
+}
+
+/// What Scheme can read about the active hex buffer.
+#[derive(Default, Clone)]
+pub struct HexSnapshot {
+    /// The byte offset of point.
+    pub offset: usize,
+    /// The buffer's length in bytes.
+    pub size: usize,
+    /// The selected range `(start end)`, end exclusive, when one is active.
+    pub selection: Option<(usize, usize)>,
+    /// The byte at point (`None` at the append slot after the last byte).
+    pub byte: Option<u8>,
 }
 
 /// What Scheme can read about the active grid without a round trip: small,

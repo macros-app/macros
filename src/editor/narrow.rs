@@ -273,6 +273,10 @@ impl Editor {
             self.echo("Use grid-narrow-to-selection (C-x n n) in a grid", cx);
             return;
         }
+        if self.active.hex.is_some() {
+            self.echo("A hex buffer can't be narrowed", cx);
+            return;
+        }
         let r = self.active.buffer.clamp_range(start..end);
         self.active.narrow = (r != (0..self.active.buffer.len())).then_some(r);
         self.active.mark_active = false;

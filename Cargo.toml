@@ -1,6 +1,6 @@
 [package]
 name = "macros"
-version = "0.6.7"
+version = "0.6.8"
 edition = "2024"
 description = "Macros — an Emacs-style GPUI editor scripted in Steel"
 repository = "https://github.com/macros-app/macros"
@@ -132,9 +132,10 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # Unique node IDs for org-roam (`(org-id-new)`) and local-time formatting for
 # timestamps / agenda "today" (`(current-time fmt)`). Both already in the tree
-# transitively via gpui; promoted to direct deps for the Scheme primitives.
+# transitively (gpui, gix); promoted to direct deps for the Scheme primitives.
+# jiff also formats git dates.
 uuid = { version = "1", features = ["v4"] }
-chrono = "0.4"
+jiff = "0.2"
 # Self-update (src/update.rs). `ureq` is a small blocking HTTP/1.1 client with
 # rustls TLS baked in — no tokio runtime required, so it slots cleanly into
 # gpui's background executor for the one-shot manifest fetch + artifact

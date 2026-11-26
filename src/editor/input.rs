@@ -177,6 +177,7 @@ impl Editor {
             Self::key_evil_capture,
             Self::key_evil_modal,
             Self::key_grid,
+            Self::key_hex,
             Self::key_leader,
             Self::key_evil_insert,
             Self::key_special_select,
@@ -942,6 +943,10 @@ impl Editor {
         ) {
             return;
         }
+        // A click in a hex pane: put point on that byte, start a selection.
+        if self.hex_mouse_down(event.position, event.button, event.modifiers.shift, cx) {
+            return;
+        }
         // A click in a terminal pane starts a grid text selection (and focuses it).
         if self.terminal_selection_begin(event.position, cx) {
             return;
@@ -1164,7 +1169,7 @@ impl Editor {
             self.terminal_selection_drag(event.position, cx);
             return;
         }
-        if self.grid_mouse_move(event.position, cx) {
+        if self.grid_mouse_move(event.position, cx) || self.hex_mouse_move(event.position, cx) {
             return;
         }
         if self.is_selecting {
@@ -1233,6 +1238,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.grid_mouse_up(cx);
+        self.hex_mouse_up();
         self.is_selecting = false;
         // A special-buffer press that never became a drag is a click: run its
         // `mouse-1` binding now. Selecting has already stopped, so a binding
@@ -1343,6 +1349,10 @@ impl Editor {
         ) {
             return;
         }
+        // Over a hex pane, the wheel scrolls its rows.
+        if self.hex_scroll(event.position, f32::from(pixel_delta.y), cx) {
+            return;
+        }
         // Over a terminal pane, the wheel scrolls the terminal's scrollback.
         if let Some(pane) = self.pane_at_position(event.position)
             && let Some(tid) = self.pane_terminal_id(pane)
@@ -1430,6 +1440,8 @@ impl Editor {
         }
         // grid: cell editor or grid keymap
         self.grid_action_key(k.name, cx)
+            // hex buffer: its keymap (an unbound key is swallowed)
+            || self.hex_action_key(k.name, cx)
             // terminal: sent to the shell, like every plain key in a terminal
             // (before the modal keymap, matching `dispatch_keystroke`)
             || self.terminal_action_key(k.name, cx)

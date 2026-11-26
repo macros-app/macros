@@ -24,14 +24,22 @@ impl Editor {
                 .unwrap_or_else(|| Err(std::io::Error::other("remote read thread died")));
             this.update(cx, |editor, cx| {
                 editor.pending_opens.remove(&identity);
+                let as_hex = editor.hex_forced.remove(&identity);
                 match result {
+                    Ok(bytes) if as_hex => editor.open_hex(name, path, bytes, cx),
                     Ok(bytes) if as_grid => editor.open_grid(name, path, bytes, cx),
+                    Ok(bytes) if crate::hexview::looks_binary(&bytes) => {
+                        editor.open_hex(name, path, bytes, cx)
+                    }
                     Ok(bytes) => match String::from_utf8(bytes) {
                         Ok(text) => editor.open_file(name, path, text, cx),
                         Err(_) => editor.echo(format!("Could not open {name}: not UTF-8 text"), cx),
                     },
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound && as_grid => {
                         editor.open_grid(name, path, Vec::new(), cx)
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound && as_hex => {
+                        editor.open_hex(name, path, Vec::new(), cx)
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                         editor.open_file(name, path, String::new(), cx)

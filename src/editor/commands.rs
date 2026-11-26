@@ -55,6 +55,7 @@ impl Editor {
     /// and generic ones (undo, save, clipboard) that mean something else in a
     /// grid buffer, go first.
     const COMMAND_HANDLERS: &[CommandHandler] = &[
+        Self::cmd_hex,
         Self::cmd_grid,
         Self::cmd_motion,
         Self::cmd_narrow,

@@ -429,13 +429,29 @@ impl Editor {
                         Err(_) => {}
                     }
                 }
+                let as_hex = editor.hex_forced.remove(&identity);
                 let result = match result {
+                    Ok(bytes) if as_hex => {
+                        editor.open_hex(name, path, bytes, cx);
+                        return;
+                    }
                     Ok(bytes) if as_grid => {
                         editor.open_grid(name, path, bytes, cx);
                         return;
                     }
-                    Ok(bytes) => String::from_utf8(bytes)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                    // A binary file (not UTF-8, or NULs up front): a hex
+                    // buffer rather than an error.
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(text) if !crate::hexview::has_leading_nul(text.as_bytes()) => Ok(text),
+                        Ok(text) => {
+                            editor.open_hex(name, path, text.into_bytes(), cx);
+                            return;
+                        }
+                        Err(e) => {
+                            editor.open_hex(name, path, e.into_bytes(), cx);
+                            return;
+                        }
+                    },
                     Err(err) => Err(err),
                 };
                 match result {
@@ -444,6 +460,9 @@ impl Editor {
                     // empty buffer that creates the file on first save.
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound && as_grid => {
                         editor.open_grid(name, path, Vec::new(), cx)
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound && as_hex => {
+                        editor.open_hex(name, path, Vec::new(), cx)
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                         editor.open_file(name, path, String::new(), cx)
@@ -623,9 +642,10 @@ fn uniquified_name(
 impl Editor {
     /// Open files dropped onto the window from the OS (Finder, a terminal, etc.).
     /// Each dropped file is visited in its own buffer, in the pane it was
-    /// dropped on; the last one ends up active. CSV/TSV files open as a grid
-    /// (see `find_file`). Directories are skipped — `find_file` only reads
-    /// regular files.
+    /// dropped on, as `find_file` would open it: CSV/TSV/xlsx as a grid,
+    /// binary files as hex, the rest as text. A dropped folder opens in
+    /// dired (the last one, when several are dropped). Files load in the
+    /// background, so whichever finishes last is shown.
     pub(super) fn on_drop_files(
         &mut self,
         paths: &ExternalPaths,
@@ -637,19 +657,21 @@ impl Editor {
         {
             self.select_pane(pane, cx);
         }
-        let mut skipped = 0;
-        for path in paths.paths() {
-            if path.is_dir() {
-                skipped += 1;
-                continue;
-            }
+        let (dirs, files): (Vec<_>, Vec<_>) = paths.paths().iter().partition(|p| p.is_dir());
+        for path in files {
             self.find_file(&path.to_string_lossy(), cx);
         }
-        if skipped > 0 {
-            self.echo(
-                format!("Skipped {skipped} folder(s) — can only open files"),
-                cx,
-            );
+        // dired shows one directory: the last one dropped.
+        if let Some(dir) = dirs.last() {
+            let dir = format!("{}/", dir.to_string_lossy().trim_end_matches('/'));
+            self.publish_point();
+            self.script.dispatch_action("dired-in", Some(&dir));
+            if dirs.len() > 1 {
+                self.echo(
+                    format!("Showing {dir} — dired shows one folder at a time"),
+                    cx,
+                );
+            }
         }
     }
 
@@ -704,6 +726,10 @@ impl Editor {
                     g.saved_externally();
                     self.active.modified = false;
                 }
+                if own_file && let Some(h) = self.active.hex.as_deref_mut() {
+                    h.saved();
+                    self.active.modified = false;
+                }
                 self.echo(format!("Wrote {target}"), cx)
             }
             Err(err) => self.echo(format!("Save failed: {err}"), cx),
@@ -739,6 +765,10 @@ impl Editor {
     pub(super) fn revert_buffer(&mut self, cx: &mut Context<Self>) {
         if self.active.grid.is_some() {
             self.grid_revert(cx);
+            return;
+        }
+        if self.active.hex.is_some() {
+            self.hex_revert(cx);
             return;
         }
         let Some(path) = self.active.path.clone() else {
@@ -806,7 +836,7 @@ impl Editor {
         if !visited {
             return;
         }
-        if self.grid_auto_revert(path, cx) {
+        if self.grid_auto_revert(path, cx) || self.hex_auto_revert(path, cx) {
             return;
         }
         let stamp = crate::save::stamp(path);
@@ -1031,6 +1061,12 @@ impl Editor {
             self.echo("Buffer is not visiting a file", cx);
             return;
         }
+        if self.active.hex.is_some() {
+            // Bytes: no formatter runs over them.
+            self.run_hook_blocking("before-save-hook", cx);
+            self.write_active_to_disk(cx);
+            return;
+        }
         if self
             .active_uri()
             .is_some_and(|uri| self.formatting_for_save.contains_key(&uri))
@@ -1065,10 +1101,21 @@ impl Editor {
         let visiting = self
             .docs()
             .find(|d| visits_identity(d, &identity))
-            .map(|d| (d.name.clone(), d.grid.is_some(), d.buffer.tick()));
-        let (text, base) = if let Some((name, grid, tick)) = visiting {
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    d.grid.is_some(),
+                    d.hex.is_some(),
+                    d.buffer.tick(),
+                )
+            });
+        let (text, base) = if let Some((name, grid, hex, tick)) = visiting {
             if grid {
                 self.echo(format!("Not changed: {name} is open as a grid"), cx);
+                return;
+            }
+            if hex {
+                self.echo(format!("Not changed: {name} is open as hex"), cx);
                 return;
             }
             let text = self
@@ -1214,7 +1261,14 @@ impl Editor {
                 if crate::remote::is_remote(&path) && doc.grid.is_none() {
                     doc.modified = false;
                     saved += 1;
-                    let text = doc.buffer.full_text().into_bytes();
+                    // A hex buffer's bytes, else the text.
+                    let text = match doc.hex.as_deref_mut() {
+                        Some(h) => {
+                            h.saved();
+                            h.data.bytes().to_vec()
+                        }
+                        None => doc.buffer.full_text().into_bytes(),
+                    };
                     remote.push((doc.name.clone(), path, text, document_uri(doc)));
                     continue;
                 }
@@ -1229,6 +1283,9 @@ impl Editor {
                     Ok(()) => {
                         if let Some(g) = doc.grid.as_deref_mut() {
                             g.saved_externally();
+                        }
+                        if let Some(h) = doc.hex.as_deref_mut() {
+                            h.saved();
                         }
                         doc.modified = false;
                         saved += 1;
@@ -1289,19 +1346,26 @@ impl Editor {
         let Some(path) = self.active.path.clone() else {
             return;
         };
-        let text = self.active.buffer.full_text();
+        // A hex buffer writes its bytes; everything else its text.
+        let text = match self.active.hex.as_deref_mut() {
+            Some(h) => {
+                h.saved();
+                h.data.bytes().to_vec()
+            }
+            None => self.active.buffer.full_text().into_bytes(),
+        };
         let name = self.active.name.clone();
         let uri = document_uri(&self.active);
         self.active.modified = false;
         if crate::remote::is_remote(&path) {
-            return self.save_remote(name, path, text.into_bytes(), uri, cx);
+            return self.save_remote(name, path, text, uri, cx);
         }
         let ticket = crate::save::ticket(&path);
         // Until the result is handled, a quit waits for this save.
         let pending = crate::save::begin_pending();
         let write_path = path.clone();
         let write = cx.background_executor().spawn(async move {
-            let outcome = crate::save::write_sequenced(&ticket, &write_path, text.as_bytes());
+            let outcome = crate::save::write_sequenced(&ticket, &write_path, &text);
             (ticket, outcome)
         });
         cx.spawn(async move |this, cx| {
@@ -1351,6 +1415,9 @@ impl Editor {
     fn mark_path_modified(&mut self, path: &Path) {
         if let Some(doc) = self.docs_mut().find(|d| d.path.as_deref() == Some(path)) {
             doc.modified = true;
+            if let Some(h) = doc.hex.as_deref_mut() {
+                h.data.forget_saved();
+            }
         }
     }
 
@@ -1565,6 +1632,9 @@ impl Editor {
                     if let Some(g) = self.active.grid.as_deref_mut() {
                         g.saved_externally();
                     }
+                    if let Some(h) = self.active.hex.as_deref_mut() {
+                        h.saved();
+                    }
                     self.active.modified = false;
                 }
                 Err(err) => failed.push(format!("{}: {err}", self.active.name)),
@@ -1585,6 +1655,9 @@ impl Editor {
                     Ok(()) => {
                         if let Some(g) = doc.grid.as_deref_mut() {
                             g.saved_externally();
+                        }
+                        if let Some(h) = doc.hex.as_deref_mut() {
+                            h.saved();
                         }
                         doc.modified = false;
                     }
@@ -1645,6 +1718,9 @@ impl Editor {
             Ok(()) => {
                 if let Some(g) = self.active.grid.as_deref_mut() {
                     g.saved_externally();
+                }
+                if let Some(h) = self.active.hex.as_deref_mut() {
+                    h.saved();
                 }
                 self.active.modified = false;
                 self.echo(format!("Wrote {}", self.active.name), cx);

@@ -7,6 +7,7 @@
 
 use gpui::Context;
 
+use super::hexbuf::hex_document;
 use super::*;
 use crate::script::{LayoutSpec, SessionState};
 
@@ -212,10 +213,12 @@ impl Editor {
             .iter()
             // Grid buffers are special (read-only rope) but visit a file, so
             // they're restored like any file buffer.
-            .filter(|d| d.special.is_none() || d.grid.is_some())
+            .filter(|d| d.special.is_none() || d.grid.is_some() || d.hex.is_some())
             .filter_map(|d| {
                 let path = d.path.as_deref()?;
-                let point = if d.selection_reversed {
+                let point = if let Some(h) = &d.hex {
+                    h.view.cursor
+                } else if d.selection_reversed {
                     d.selected_range.start
                 } else {
                     d.selected_range.end
@@ -223,10 +226,17 @@ impl Editor {
                 Some((self.session_abs(path), point))
             })
             .collect();
-        if (self.active.special.is_none() || self.active.grid.is_some())
+        if (self.active.special.is_none()
+            || self.active.grid.is_some()
+            || self.active.hex.is_some())
             && let Some(path) = self.active.path.as_deref()
         {
-            file_buffers.push((self.session_abs(path), self.cursor_offset()));
+            let point = self
+                .active
+                .hex
+                .as_deref()
+                .map_or_else(|| self.cursor_offset(), |h| h.view.cursor);
+            file_buffers.push((self.session_abs(path), point));
         }
         self.script.set_session(SessionState {
             minibuffer_history: self.minibuffer_history.entries().to_vec(),
@@ -304,21 +314,49 @@ impl Editor {
                     .is_some_and(|p| super::buffers::file_identity(p) == identity)
             };
             if visits(&self.active) {
+                if let Some(h) = self.active.hex.as_deref_mut() {
+                    let len = h.data.len();
+                    h.view.set_cursor(point, len);
+                    continue;
+                }
                 let p = crate::script::snap_byte(self.active.buffer.rope(), point);
                 self.move_to(p, cx);
                 continue;
             }
             if let Some(doc) = self.inactive.iter_mut().find(|d| visits(d)) {
+                if let Some(h) = doc.hex.as_deref_mut() {
+                    let len = h.data.len();
+                    h.view.set_cursor(point, len);
+                    continue;
+                }
                 let p = crate::script::snap_byte(doc.buffer.rope(), point);
                 doc.selected_range = p..p;
                 doc.selection_reversed = false;
                 continue;
             }
-            let Ok(contents) = std::fs::read_to_string(&path) else {
+            let Ok(bytes) = std::fs::read(&path) else {
                 continue; // vanished / unreadable: skip silently
             };
             let Some(name) = path.file_name().map(|f| f.to_string_lossy().into_owned()) else {
                 continue;
+            };
+            // A binary file comes back as the hex buffer it was.
+            let contents = match String::from_utf8(bytes) {
+                Ok(text) if !crate::hexview::looks_binary(text.as_bytes()) => text,
+                Ok(text) => {
+                    let name = self.unique_buffer_name(&name, &path);
+                    self.inactive
+                        .push(hex_document(name, path, text.into_bytes(), point));
+                    opened += 1;
+                    continue;
+                }
+                Err(e) => {
+                    let name = self.unique_buffer_name(&name, &path);
+                    self.inactive
+                        .push(hex_document(name, path, e.into_bytes(), point));
+                    opened += 1;
+                    continue;
+                }
             };
             let p = char_floor(&contents, point);
             // Two restored `mod.rs` files get distinct names (`mod.rs<a>`), as

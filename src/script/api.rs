@@ -96,6 +96,7 @@ sections! {
     Faces = "faces", "Faces (colors, fonts, underline) and themes";
     Prompts = "prompts", "Messages, minibuffer reads, pickers (helm), y-or-n-p, transients";
     Grid = "grid", "Grid (CSV) buffers: read cells and state, edit, view, and style";
+    Hex = "hex", "Hex buffers: binary files as bytes — point, size, goto, search, fill";
     Ui = "ui", "Mode line and titlebar";
     Keymaps = "keymaps", "Key bindings and the command list";
     Modal = "modal", "Evil/Helix state: marks, ex, counts, search query";
@@ -238,6 +239,7 @@ const DOC_SOURCES: &[(&str, &str)] = &[
     ("script/prims/files.rs", include_str!("prims/files.rs")),
     ("script/prims/git.rs", include_str!("prims/git.rs")),
     ("script/prims/grid.rs", include_str!("prims/grid.rs")),
+    ("script/prims/hexbuf.rs", include_str!("prims/hexbuf.rs")),
     ("script/prims/help.rs", include_str!("prims/help.rs")),
     ("script/prims/hooks.rs", include_str!("prims/hooks.rs")),
     ("script/prims/http.rs", include_str!("prims/http.rs")),

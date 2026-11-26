@@ -12,11 +12,8 @@ pub(in crate::script) fn register(reg: &mut Registrar, _ctx: &EngineShared) {
     // `(current-time fmt)` → local time formatted with a `strftime`-style string
     // (Emacs `format-time-string`), e.g. `(current-time "%Y%m%d%H%M%S")` for a
     // node filename, `(current-time "%Y-%m-%d")` for an agenda date. An invalid
-    // format yields "" rather than panicking (write! returns Err, never unwinds).
+    // format yields "" rather than an error.
     reg.register_fn("current-time", |fmt: String| -> String {
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        let _ = write!(out, "{}", chrono::Local::now().format(&fmt));
-        out
+        jiff::fmt::strtime::format(&fmt, &jiff::Zoned::now()).unwrap_or_default()
     });
 }

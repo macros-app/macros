@@ -50,14 +50,15 @@ impl Editor {
                 .map_or_else(|| self.active.name.clone(), |n| n.to_string_lossy().into());
             target.push(name);
         }
-        if self.active.special.is_some() {
-            self.echo(format!("{} can't visit a file", self.active.name), cx);
+        // A grid keeps its own file (its formats and sheets ride on it), and
+        // a hex buffer its bytes; `:w` semantics — write a copy — are the
+        // safe reading. (Both are special buffers: check them first.)
+        if self.active.grid.is_some() || self.active.hex.is_some() {
+            self.write_buffer_to(&target.to_string_lossy(), cx);
             return;
         }
-        // A grid keeps its own file (its formats and sheets ride on it); `:w`
-        // semantics — write a copy — are the safe reading.
-        if self.active.grid.is_some() {
-            self.write_buffer_to(&target.to_string_lossy(), cx);
+        if self.active.special.is_some() {
+            self.echo(format!("{} can't visit a file", self.active.name), cx);
             return;
         }
         let identity = file_identity(&target);
